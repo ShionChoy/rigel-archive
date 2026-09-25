@@ -97,6 +97,25 @@ RK 自解压包（2002 年前后的 BMS 包）7-Zip 和 Bandizip 都打不开，
 本地的 D1 与 R2 按 `wrangler.jsonc` 里的数据库 ID 存放；ID 改变后要 `npm run db:reset`。
 归类规则在 `tools/ra/rules/mapping.yaml`，按顺序匹配，第一条命中的规则生效；建议只是提议，要在整理台确认。
 
+## 在云端开发（全新检出）
+
+仓库里只有代码：密钥（`cloud.env`、`backup.env`、`site/.dev.vars`）、原件工作区和线上数据都不在仓库里，也不要放进来。
+在 Claude Code 网页版等云端环境，或任何全新检出里：
+
+```sh
+cd site && npm ci                             # 同时生成 worker-configuration.d.ts
+cp .dev.vars.example .dev.vars                # WORKER_TOKEN 填一个随机字符串
+cd ../tools/ra && uv sync && uv run ra seed   # 没有原件工作区时只导入作品目录（53 个作品，没有文件）
+cd ../../site && npm run db:reset && npm run dev
+```
+
+- 没有 Docker 时 `npm run dev` 自动不启动处理容器，并提示改用 `uv run ra worker --site http://localhost:4321`
+  处理上传（见 `site/astro.config.mjs`）。
+- 检查与测试照常：`npx astro check`、`npm run check:i18n`、`cd tools/ra && uv run pytest`（缺 ffmpeg、metaflac、
+  rclone 的测试自动跳过）。
+- 部署要 Cloudflare API 令牌（环境变量 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`）和 Docker（构建处理容器的镜像）。
+  没有 Docker 的环境只改代码、跑测试，部署回本机做。
+
 ## 处理程序（云端容器）
 
 `src/processor.ts` 里的 Durable Object 管理一个 Cloudflare 容器，容器里运行 `ra container`（镜像由

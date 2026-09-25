@@ -9,6 +9,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 worker-configuration.d.ts
+# astro dev writes it when Docker is missing (see site/astro.config.mjs)
+wrangler.dev-no-container.jsonc
 
 # Secrets for talking to the deployed site (ra push / ra worker)
 cloud.env

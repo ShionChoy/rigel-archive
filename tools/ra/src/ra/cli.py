@@ -50,8 +50,10 @@ def _load(args):
     # The local copy's scan is the source of truth; the 2026-09-23 NAS listing is only a fallback.
     if args.survey is None and args.scan.exists():
         files = as_source_files(load_scan(args.scan))
-    else:
+    elif args.survey is not None or DEFAULT_SURVEY.exists():
         files = read_listing(args.survey or DEFAULT_SURVEY)
+    else:
+        files = []  # no workspace here (a fresh checkout, a cloud sandbox): the release catalog alone
     records = load_records(args.archives)
     files = apply_probes(expand(files, records), load_probes(args.probes))
     return releases, rules, files, suggest_all(files, records, rules)

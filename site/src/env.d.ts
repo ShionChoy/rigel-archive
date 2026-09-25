@@ -15,9 +15,10 @@ declare namespace App {
 
 /**
  * Secrets (see wrangler.jsonc). `npm run types` only knows the ones in .dev.vars, so they are declared
- * here too: a fresh checkout without .dev.vars still type-checks.
+ * here too: a fresh checkout without .dev.vars still type-checks. Both Env types get them: the global
+ * one and Cloudflare.Env, the type of `env` from cloudflare:workers.
  */
-interface Env {
+interface Secrets {
   WORKER_TOKEN: string;
   // The encrypted backup's, set once B2 is configured.
   B2_KEY_ID?: string;
@@ -25,4 +26,8 @@ interface Env {
   B2_BUCKET?: string;
   BACKUP_CRYPT_PASSWORD?: string;
   BACKUP_CRYPT_SALT?: string;
+}
+interface Env extends Secrets {}
+declare namespace Cloudflare {
+  interface Env extends Secrets {}
 }
