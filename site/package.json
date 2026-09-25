@@ -8,6 +8,7 @@
     "preview": "astro preview",
     "check": "astro check",
     "types": "wrangler types --strict-vars=false",
+    "postinstall": "wrangler types --strict-vars=false",
     "db:migrate": "wrangler d1 migrations apply DB --local",
     "db:seed": "wrangler d1 execute DB --local --file .seed/seed.sql",
     "db:reset": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate && npm run db:seed",

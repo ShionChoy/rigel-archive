@@ -1,0 +1,6 @@
+# Local development settings: copy to .dev.vars (which git ignores) and fill in.
+# The token is any long random string; tools/ra reads it from .dev.vars to call the local site.
+#   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+WORKER_TOKEN=
+# Where `uv run ra serve` serves the local copy of the 合辑 (leave empty when there is none).
+MEDIA_DEV_BASE=http://127.0.0.1:4322

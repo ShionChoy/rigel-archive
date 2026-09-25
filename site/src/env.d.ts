@@ -13,8 +13,13 @@ declare namespace App {
   }
 }
 
-/** Secrets of the encrypted backup, set once B2 is configured (see wrangler.jsonc). */
+/**
+ * Secrets (see wrangler.jsonc). `npm run types` only knows the ones in .dev.vars, so they are declared
+ * here too: a fresh checkout without .dev.vars still type-checks.
+ */
 interface Env {
+  WORKER_TOKEN: string;
+  // The encrypted backup's, set once B2 is configured.
   B2_KEY_ID?: string;
   B2_APP_KEY?: string;
   B2_BUCKET?: string;
