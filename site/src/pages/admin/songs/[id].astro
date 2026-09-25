@@ -1,0 +1,182 @@
+---
+import Admin from '../../../layouts/Admin.astro';
+import { FILE_KIND_LABELS, RIGHTS_LABELS, SLOT_LABELS } from '../../../lib/constants';
+import { db, parseFormat, releaseLabels, type FileRow } from '../../../lib/db';
+import { formatDuration, formatSpec, withParams } from '../../../lib/format';
+import { UserError, errorText } from '../../../lib/i18n';
+import { audioSources, mediaSrc } from '../../../lib/media';
+import { derivedFor } from '../../../lib/processing';
+import { mergeSongs, saveSong, splitTrack, versionsOf } from '../../../lib/songs';
+import { formatMs, titleKey } from '../../../lib/tracks';
+import { mimeFor } from '../../../lib/constants';
+
+const { id } = Astro.params;
+const { t } = Astro.locals;
+const database = db();
+const song = await database.prepare('SELECT id, title, note FROM songs WHERE id = ?').bind(id).first<{ id: string; title: string; note: string | null }>();
+if (!song) return new Response(t('找不到单曲'), { status: 404 });
+const actor = Astro.locals.admin!.email;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  try {
+    switch (form.get('action')) {
+      case 'save': {
+        const n = await saveSong(actor, song.id, form);
+        return Astro.redirect(withParams(Astro.url, { msg: n ? t('已保存') : t('没有改动'), err: null }), 303);
+      }
+      case 'split': {
+        const newId = await splitTrack(actor, String(form.get('track') ?? ''));
+        return Astro.redirect(`/admin/songs/${newId}?msg=${encodeURIComponent(t('已拆成独立单曲'))}`, 303);
+      }
+      case 'merge': {
+        await mergeSongs(actor, song.id, [String(form.get('source') ?? '')]);
+        return Astro.redirect(withParams(Astro.url, { msg: t('已并入'), err: null }), 303);
+      }
+      default:
+        throw new UserError('未知的操作');
+    }
+  } catch (e) {
+    return Astro.redirect(withParams(Astro.url, { err: errorText(e, t), msg: null }), 303);
+  }
+}
+
+const versions = await versionsOf([song.id]);
+type AudioFile = Pick<FileRow, 'id' | 'name' | 'ext' | 'slot' | 'track_id' | 'blob_key' | 'format' | 'sha256' | 'source_path' | 'member_path'>;
+type Loose = Pick<FileRow, 'id' | 'dir' | 'name' | 'kind' | 'rights' | 'release_id'> & { matched_ms: number };
+const [{ results: audio }, { results: others }, { results: heard }, { results: loose }, labels] = await Promise.all([
+  versions.length
+    ? database
+        .prepare(
+          `SELECT id, name, ext, slot, track_id, blob_key, format, sha256, source_path, member_path FROM files f
+           WHERE track_id IN (SELECT value FROM json_each(?)) AND kind = 'audio' AND state != 'ignored'
+             AND NOT EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id)
+           ORDER BY slot, name`,
+        )
+        .bind(JSON.stringify(versions.map((v) => v.track_id)))
+        .all<AudioFile>()
+    : Promise.resolve({ results: [] as AudioFile[] }),
+  database
+    .prepare('SELECT s.id, s.title, count(t.id) AS n FROM songs s LEFT JOIN tracks t ON t.song_id = s.id WHERE s.id != ? GROUP BY s.id ORDER BY s.title')
+    .bind(song.id)
+    .all<{ id: string; title: string; n: number }>(),
+  // Acoustic fingerprints: other songs whose tracks sound like the same recording as one of these.
+  database
+    .prepare(
+      `SELECT DISTINCT t2.song_id AS id FROM tracks t1
+       JOIN files f1 ON f1.track_id = t1.id
+       JOIN acoustic_matches m ON f1.sha256 IN (m.a, m.b)
+       JOIN files f2 ON f2.sha256 = CASE WHEN m.a = f1.sha256 THEN m.b ELSE m.a END
+       JOIN tracks t2 ON t2.id = f2.track_id
+       WHERE t1.song_id = ?1 AND t2.song_id IS NOT NULL AND t2.song_id != ?1`,
+    )
+    .bind(song.id)
+    .all<{ id: string }>(),
+  // …and files not linked to any track yet (a PV, a compilation, a game OST, a whole-album rip).
+  database
+    .prepare(
+      `SELECT f2.id, f2.dir, f2.name, f2.kind, f2.rights, f2.release_id, max(m.matched_ms) AS matched_ms FROM tracks t1
+       JOIN files f1 ON f1.track_id = t1.id
+       JOIN acoustic_matches m ON f1.sha256 IN (m.a, m.b)
+       JOIN files f2 ON f2.sha256 = CASE WHEN m.a = f1.sha256 THEN m.b ELSE m.a END
+       WHERE t1.song_id = ?1 AND f2.track_id IS NULL AND f2.state != 'ignored'
+       GROUP BY f2.id ORDER BY f2.dir, f2.name LIMIT 100`,
+    )
+    .bind(song.id)
+    .all<Loose>(),
+  releaseLabels(),
+]);
+const derived = await derivedFor(database, audio.map((f) => f.sha256));
+const key = titleKey(song.title);
+const similar = others.filter((s) => titleKey(s.title) === key);
+const sameRecording = others.filter((s) => heard.some((h) => h.id === s.id));
+---
+
+<Admin title={song.title}>
+  <p class="muted"><a href="/admin/songs">← {t('单曲')}</a> · <a href={`/admin/history?entity=song&id=${song.id}`}>{t('修改记录')}</a></p>
+
+  <h2>{t('全部版本（{n}）', { n: versions.length })}</h2>
+  <table class="grid">
+    <thead><tr><th>{t('发行')}</th><th>{t('作品')}</th><th>{t('曲目')}</th><th>{t('时长')}</th><th>{t('音源')}</th><th></th></tr></thead>
+    <tbody>
+      {
+        versions.map((v) => (
+          <tr>
+            <td class="mono">{v.release_date ?? '—'}</td>
+            <td><a href={`/admin/releases/${v.release_id}#tracks`}>{v.catalog_no ? `${v.catalog_no} ` : ''}{v.release_title}</a></td>
+            <td>{v.disc > 1 ? `${v.disc}-` : ''}{v.position}. {v.title}{v.version_label && <span class="chip">{v.version_label}</span>}</td>
+            <td class="num">{formatMs(v.duration_ms)}</td>
+            <td>
+              {audio.filter((f) => f.track_id === v.track_id).map((f) => {
+                const sources = audioSources(mediaSrc(f, ''), f.sha256 ? derived.get(f.sha256) : undefined, mimeFor(f.ext));
+                return (
+                  <div>
+                    <span class="muted">{f.slot ? t(SLOT_LABELS[f.slot]) : ''} · {formatSpec(parseFormat(f.format))}</span>
+                    {sources.length ? (
+                      <audio controls preload="none" style="width:260px;display:block">
+                        {sources.map((s) => <source src={s.src} type={s.type} />)}
+                      </audio>
+                    ) : (
+                      <a href={`/admin/files/${f.id}`}>{f.name}</a>
+                    )}
+                  </div>
+                );
+              })}
+            </td>
+            <td>
+              {versions.length > 1 && (
+                <form method="post">
+                  <input type="hidden" name="action" value="split" />
+                  <input type="hidden" name="track" value={v.track_id} />
+                  <button type="submit" title={t('这个版本其实是另一首曲')}>{t('拆出')}</button>
+                </form>
+              )}
+            </td>
+          </tr>
+        ))
+      }
+      {versions.length === 0 && <tr><td colspan="6" class="muted">{t('没有曲目属于这首单曲。')}</td></tr>}
+    </tbody>
+  </table>
+
+  {
+    loose.length > 0 && (
+      <>
+        <h2>{t('还没挂到曲目的同一录音（{n}）', { n: loose.length })}</h2>
+        <p class="muted">{t('声学指纹找到的：听起来与这首单曲的某个版本是同一录音，但还没有对应到任何曲目，例如 PV、合辑或游戏原声里的收录、整张抓轨。')}</p>
+        <ul>
+          {loose.map((f) => (
+            <li>
+              <a href={`/admin/files/${f.id}#recordings`} class="mono">{f.dir ? `${f.dir}/${f.name}` : f.name}</a>{' '}
+              <span class="chip">{t(FILE_KIND_LABELS[f.kind] ?? f.kind)}</span>
+              {f.rights !== 'unknown' && <span class={`chip ${f.rights}`}>{t(RIGHTS_LABELS[f.rights])}</span>}
+              {f.release_id && ` ${labels.get(f.release_id) ?? f.release_id}`}
+              <span class="muted"> · {t('匹配 {length}', { length: formatDuration(f.matched_ms / 1000) })}</span>
+            </li>
+          ))}
+        </ul>
+      </>
+    )
+  }
+
+  <h2>{t('并入另一首单曲')}</h2>
+  <form method="post" class="panel">
+    <input type="hidden" name="action" value="merge" />
+    <select name="source" required>
+      <option value="">{t('选择要并入这里的单曲…')}</option>
+      {sameRecording.length > 0 && <optgroup label={t('声学指纹：同一录音')}>{sameRecording.map((s) => <option value={s.id}>{t('{title}（{n} 个版本）', { title: s.title, n: s.n })}</option>)}</optgroup>}
+      {similar.length > 0 && <optgroup label={t('同名')}>{similar.map((s) => <option value={s.id}>{t('{title}（{n} 个版本）', { title: s.title, n: s.n })}</option>)}</optgroup>}
+      <optgroup label={t('全部')}>{others.map((s) => <option value={s.id}>{t('{title}（{n} 个版本）', { title: s.title, n: s.n })}</option>)}</optgroup>
+    </select>
+    <button type="submit">{t('并入')}</button>
+    <span class="muted">{t('所选单曲的全部曲目改属这首，所选单曲随后删除；可在修改记录里撤销。')}</span>
+  </form>
+
+  <h2>{t('资料')}</h2>
+  <form method="post" class="panel form-grid">
+    <input type="hidden" name="action" value="save" />
+    <label for="title">{t('标题')}</label><input id="title" type="text" name="title" value={song.title} required />
+    <label for="note">{t('备注')}</label><textarea id="note" name="note">{song.note ?? ''}</textarea>
+    <span></span><p><button class="primary" type="submit">{t('保存')}</button></p>
+  </form>
+</Admin>

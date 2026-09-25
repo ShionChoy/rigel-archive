@@ -1,0 +1,24 @@
+[project]
+name = "ra"
+version = "0.1.0"
+description = "Rigel archive import tool: survey, suggest, seed"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "numpy>=2.5.3",
+    "pillow>=12.3.0",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+ra = "ra.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

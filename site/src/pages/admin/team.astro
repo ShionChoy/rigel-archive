@@ -1,0 +1,131 @@
+---
+import Admin from '../../layouts/Admin.astro';
+import { db } from '../../lib/db';
+import { formatTime, withParams } from '../../lib/format';
+import { LANGS, LANG_NAMES, errorText, UserError } from '../../lib/i18n';
+import { ROLES, ROLE_HELP, ROLE_NAMES, addMember, canManage, removeMember, updateMember, type Member } from '../../lib/team';
+
+const actor = Astro.locals.admin!;
+const { t } = Astro.locals;
+const manage = canManage(actor);
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const get = (k: string) => String(form.get(k) ?? '');
+  try {
+    let msg = '';
+    switch (get('action')) {
+      case 'add':
+        msg = t('已加入 {email}。别忘了把这个邮箱也加进 Cloudflare Access 的策略。', {
+          email: await addMember(actor, get('email'), get('name'), get('role'), get('lang')),
+        });
+        break;
+      case 'update':
+        msg = (await updateMember(actor, get('email'), get('name'), get('role'), get('lang'))) ? t('已保存') : t('没有改动');
+        break;
+      case 'remove':
+        await removeMember(actor, get('email'));
+        msg = t('已移除 {email}。要让对方连登录页都进不了，也从 Access 策略里删掉这个邮箱。', { email: get('email') });
+        break;
+      default:
+        throw new UserError('未知的操作');
+    }
+    return Astro.redirect(withParams(Astro.url, { msg, err: null }), 303);
+  } catch (e) {
+    return Astro.redirect(withParams(Astro.url, { err: errorText(e, t), msg: null }), 303);
+  }
+}
+
+const { results: members } = await db()
+  .prepare("SELECT email, name, role, lang, created_at FROM admins ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, email")
+  .all<Member>();
+const langName = (l: string | null) => (l && l in LANG_NAMES ? LANG_NAMES[l as keyof typeof LANG_NAMES] : t('跟随浏览器'));
+---
+
+<Admin title={t('管理组')}>
+  <p class="muted">
+    {t('进入后台要过两道检查：先由 Cloudflare Access 验证邮箱（登录页），再核对这份名单。加入新成员时，两边都要加：在这里加入名单，并在 Cloudflare 的 Zero Trust → Access controls → Applications → 本站应用 → Policies 里把邮箱加进允许的策略。')}
+  </p>
+
+  <table class="grid">
+    <thead><tr><th>{t('邮箱')}</th><th>{t('称呼')}</th><th>{t('角色')}</th><th>{t('界面语言')}</th><th>{t('加入时间')}</th>{manage && <th></th>}</tr></thead>
+    <tbody>
+      {
+        members.map((m) => (
+          <tr>
+            <td class="mono">{m.email}{m.email === actor.email && <span class="chip">{t('我')}</span>}</td>
+            {manage ? (
+              <>
+                <td>
+                  <form method="post" id={`f-${m.email}`}>
+                    <input type="hidden" name="action" value="update" />
+                    <input type="hidden" name="email" value={m.email} />
+                    <input type="text" name="name" value={m.name ?? ''} size="12" />
+                  </form>
+                </td>
+                <td>
+                  <select name="role" form={`f-${m.email}`}>
+                    {ROLES.map((r) => <option value={r} selected={m.role === r}>{t(ROLE_NAMES[r])}</option>)}
+                  </select>
+                </td>
+                <td>
+                  <select name="lang" form={`f-${m.email}`}>
+                    <option value="" selected={!m.lang}>{t('跟随浏览器')}</option>
+                    {LANGS.map((l) => <option value={l} selected={m.lang === l}>{LANG_NAMES[l]}</option>)}
+                  </select>
+                </td>
+                <td class="mono">{formatTime(m.created_at)}</td>
+                <td>
+                  <button type="submit" form={`f-${m.email}`}>{t('保存')}</button>
+                  {m.email !== actor.email && (
+                    <form method="post" style="display:inline">
+                      <input type="hidden" name="action" value="remove" />
+                      <input type="hidden" name="email" value={m.email} />
+                      <button class="danger" type="submit">{t('移除')}</button>
+                    </form>
+                  )}
+                </td>
+              </>
+            ) : (
+              <>
+                <td>{m.name ?? '—'}</td>
+                <td>{t(ROLE_NAMES[m.role])}</td>
+                <td>{langName(m.lang)}</td>
+                <td class="mono">{formatTime(m.created_at)}</td>
+              </>
+            )}
+          </tr>
+        ))
+      }
+    </tbody>
+  </table>
+
+  {
+    manage && (
+      <>
+        <h2>{t('加入成员')}</h2>
+        <form method="post" class="panel form-grid">
+          <input type="hidden" name="action" value="add" />
+          <label for="email">{t('邮箱')}</label><input id="email" type="email" name="email" required placeholder={t('对方登录 Cloudflare Access 用的邮箱')} />
+          <label for="name">{t('称呼')}</label><input id="name" type="text" name="name" />
+          <label for="role">{t('角色')}</label>
+          <select id="role" name="role">
+            {ROLES.map((r) => <option value={r} selected={r === 'editor'}>{t(ROLE_NAMES[r])}：{t(ROLE_HELP[r])}</option>)}
+          </select>
+          <label for="lang">{t('界面语言')}</label>
+          <select id="lang" name="lang">
+            <option value="">{t('跟随浏览器')}</option>
+            {LANGS.map((l) => <option value={l}>{LANG_NAMES[l]}</option>)}
+          </select>
+          <span></span><p><button class="primary" type="submit">{t('加入')}</button></p>
+        </form>
+      </>
+    )
+  }
+
+  <h2>{t('角色')}</h2>
+  <ul>
+    {ROLES.map((r) => <li><b>{t(ROLE_NAMES[r])}</b>：{t(ROLE_HELP[r])}</li>)}
+  </ul>
+  <p class="muted">{t('每位成员也可以随时用左下角的按钮切换自己的界面语言。')}</p>
+</Admin>

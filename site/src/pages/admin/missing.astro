@@ -1,0 +1,82 @@
+---
+import Admin from '../../layouts/Admin.astro';
+import { SLOTS, SLOT_LABELS, SLOT_STATUSES, SLOT_STATUS_LABELS, isOneOf, type Slot, type SlotStatus } from '../../lib/constants';
+import { db } from '../../lib/db';
+import { withParams } from '../../lib/format';
+
+const url = Astro.url;
+const { t } = Astro.locals;
+const chosen = url.searchParams.getAll('status').filter((s): s is SlotStatus => isOneOf(SLOT_STATUSES, s));
+const statuses: SlotStatus[] = chosen.length ? chosen : ['missing', 'partial'];
+const slotFilter = url.searchParams.get('slot');
+const slot = isOneOf(SLOTS, slotFilter) ? slotFilter : null;
+
+const database = db();
+const [summary, rows] = await Promise.all([
+  database.prepare('SELECT slot, status, count(*) AS n FROM release_slots GROUP BY slot, status').all<{ slot: Slot; status: SlotStatus; n: number }>(),
+  database
+    .prepare(
+      `SELECT s.release_id, s.slot, s.status, s.planned_date, s.note, r.catalog_no, r.title, r.release_date
+       FROM release_slots s JOIN releases r ON r.id = s.release_id JOIN eras e ON e.id = r.era_id
+       WHERE s.status IN (${statuses.map(() => '?').join(', ')}) ${slot ? 'AND s.slot = ?' : ''}
+       ORDER BY e.sort, r.release_date DESC NULLS LAST, r.catalog_no`,
+    )
+    .bind(...statuses, ...(slot ? [slot] : []))
+    .all<{ release_id: string; slot: Slot; status: SlotStatus; planned_date: string | null; note: string | null; catalog_no: string | null; title: string; release_date: string | null }>(),
+]);
+
+const count = (s: Slot, st: SlotStatus) => summary.results.find((r) => r.slot === s && r.status === st)?.n ?? 0;
+const statusLink = (st: SlotStatus) => {
+  const next = new URL(url);
+  next.searchParams.delete('status');
+  next.searchParams.append('status', st);
+  return next.pathname + next.search;
+};
+---
+
+<Admin title={t('缺档看板')}>
+  <p class="muted">{t('每个作品固定 7 个版本栏位。这里汇总各栏位的状态；默认列出「缺档」与「部分缺档」，也就是补档待办。点数字可以只看那一格。')}</p>
+
+  <table class="grid">
+    <thead>
+      <tr><th>{t('状态')}</th>{SLOTS.map((s) => <th class="num">{t(SLOT_LABELS[s])}</th>)}</tr>
+    </thead>
+    <tbody>
+      {
+        SLOT_STATUSES.map((st) => (
+          <tr>
+            <td><a href={statusLink(st)}><span class={`chip ${st}`}>{t(SLOT_STATUS_LABELS[st])}</span></a></td>
+            {SLOTS.map((s) => (
+              <td class="num">
+                {count(s, st) ? <a href={withParams(new URL(statusLink(st), url), { slot: s })}>{count(s, st)}</a> : <span class="muted">0</span>}
+              </td>
+            ))}
+          </tr>
+        ))
+      }
+    </tbody>
+  </table>
+
+  <h2>
+    {statuses.map((st) => t(SLOT_STATUS_LABELS[st])).join(t('、'))}{slot && ` · ${t(SLOT_LABELS[slot])}`}{t('：{n} 项', { n: rows.results.length })}
+    {(chosen.length > 0 || slot) && <a href="/admin/missing" style="font-size:13px;font-weight:400">{t('恢复默认')}</a>}
+  </h2>
+  <table class="grid">
+    <thead><tr><th>{t('作品')}</th><th>{t('栏位')}</th><th>{t('状态')}</th><th>{t('说明')}</th></tr></thead>
+    <tbody>
+      {
+        rows.results.map((r) => (
+          <tr>
+            <td>
+              <a href={`/admin/releases/${r.release_id}`}>{r.catalog_no ? `${r.catalog_no} ` : ''}{r.title}</a>
+              <div class="muted">{r.release_date ?? ''}</div>
+            </td>
+            <td>{t(SLOT_LABELS[r.slot])}</td>
+            <td><span class={`chip ${r.status}`}>{t(SLOT_STATUS_LABELS[r.status])}</span>{r.planned_date && ` ${r.planned_date}`}</td>
+            <td>{r.note ?? ''}</td>
+          </tr>
+        ))
+      }
+    </tbody>
+  </table>
+</Admin>

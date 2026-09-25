@@ -1,0 +1,1 @@
+"""Rigel archive import tool."""

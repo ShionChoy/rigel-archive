@@ -1,0 +1,360 @@
+---
+import Admin from '../../../layouts/Admin.astro';
+import ReleaseFields from '../../../components/ReleaseFields.astro';
+import {
+  FILE_KIND_LABELS, FILE_STATE_LABELS, RELEASE_KIND_LABELS, SLOTS, SLOT_LABELS, SLOT_STATUSES, SLOT_STATUS_LABELS, type Slot,
+} from '../../../lib/constants';
+import { db, parseFormat, type FileRow, type ReleaseRow, type SlotRow } from '../../../lib/db';
+import { formatBytes, formatSpec, withParams } from '../../../lib/format';
+import { N_, UserError, errorText, translateHtml } from '../../../lib/i18n';
+import { LANGS, saveCover, saveInfo, saveSlots, saveTranslations } from '../../../lib/releases';
+import { formatMs, generateTracks, loadTracks, matchFiles, sameTitleSongs, saveFileTracks, saveTracks } from '../../../lib/tracks';
+
+const { id } = Astro.params;
+const { t, lang } = Astro.locals;
+const database = db();
+const release = await database.prepare('SELECT * FROM releases WHERE id = ?').bind(id).first<ReleaseRow>();
+if (!release) return new Response(t('找不到作品'), { status: 404 });
+
+const loadSlots = async () =>
+  (await database.prepare('SELECT * FROM release_slots WHERE release_id = ?').bind(release.id).all<SlotRow>()).results;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const actor = Astro.locals.admin!.email;
+  const saved = (n: number) => (n ? t('已保存（{n} 处改动）', { n }) : t('没有改动'));
+  try {
+    let msg: string;
+    switch (form.get('section')) {
+      case 'info':
+        msg = saved(await saveInfo(actor, release, form));
+        break;
+      case 'slots':
+        msg = saved(await saveSlots(actor, release, await loadSlots(), form));
+        break;
+      case 'i18n':
+        msg = saved(await saveTranslations(actor, release, form));
+        break;
+      case 'cover':
+        msg = saved(await saveCover(actor, release, form));
+        break;
+      case 'tracks':
+        msg = saved(await saveTracks(actor, release, await loadTracks(release.id), form));
+        break;
+      case 'generate':
+        msg = t('已生成曲目表（{n} 处改动）', { n: await generateTracks(actor, release, String(form.get('slot') ?? '')) });
+        break;
+      case 'match': {
+        const r = await matchFiles(actor, release);
+        msg = r.left
+          ? t('已对应 {n} 个文件，{left} 个没找到对应曲目，请手动选择', { n: r.matched, left: r.left })
+          : t('已对应 {n} 个文件', { n: r.matched });
+        break;
+      }
+      case 'file_tracks':
+        msg = saved(await saveFileTracks(actor, release, form));
+        break;
+      default:
+        throw new UserError('未知的表单');
+    }
+    return Astro.redirect(withParams(Astro.url, { msg, err: null }) + (form.get('anchor') ? `#${form.get('anchor')}` : ''), 303);
+  } catch (e) {
+    return Astro.redirect(withParams(Astro.url, { err: errorText(e, t), msg: null }), 303);
+  }
+}
+
+type FileItem = Pick<FileRow, 'id' | 'name' | 'size' | 'kind' | 'state' | 'slot' | 'dir' | 'track_id' | 'format'> & { old: number };
+const [slots, files, translations, tracks] = await Promise.all([
+  loadSlots(),
+  database
+    .prepare(
+      `SELECT id, name, size, kind, state, slot, dir, track_id, format,
+              EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id) AS old
+       FROM files f WHERE release_id = ? ORDER BY slot, dir, name`,
+    )
+    .bind(release.id)
+    .all<FileItem>(),
+  database
+    .prepare("SELECT field, lang, value FROM translations WHERE entity = 'release' AND entity_id = ?")
+    .bind(release.id)
+    .all<{ field: string; lang: string; value: string }>(),
+  loadTracks(release.id),
+]);
+const candidates = await sameTitleSongs(tracks);
+const songTitles = new Map<string, string>();
+if (tracks.length) {
+  const { results } = await database
+    .prepare('SELECT s.id, s.title, (SELECT count(*) FROM tracks t WHERE t.song_id = s.id) AS n FROM songs s WHERE s.id IN (SELECT song_id FROM tracks WHERE release_id = ?)')
+    .bind(release.id)
+    .all<{ id: string; title: string; n: number }>();
+  for (const s of results) songTitles.set(s.id, s.n > 1 ? t('{title}（{n} 个版本）', { title: s.title, n: s.n }) : s.title);
+}
+
+const slotBy = new Map(slots.map((s) => [s.slot, s]));
+const filesBySlot = new Map<Slot | null, FileItem[]>();
+for (const f of files.results) filesBySlot.set(f.slot, [...(filesBySlot.get(f.slot) ?? []), f]);
+const tr = (field: string, code: string) => translations.results.find((x) => x.field === field && x.lang === code)?.value ?? '';
+const trackLabel = new Map(tracks.map((x) => [x.id, `${tracks.some((y) => y.disc > 1) ? `${x.disc}-` : ''}${x.position}. ${x.title}`]));
+const audioSlots = SLOTS.filter((s) => (filesBySlot.get(s) ?? []).some((f) => f.kind === 'audio'));
+const unlinkedAudio = files.results.filter((f) => f.kind === 'audio' && !f.track_id && !f.old).length;
+const images = files.results.filter((f) => f.kind === 'image');
+const FILE_PREVIEW = 60;
+const LANG_NAMES: Record<string, string> = { zh: N_('中文'), ja: N_('日文'), en: N_('英文') };
+---
+
+<Admin title={release.catalog_no ? `${release.catalog_no} ${release.title}` : release.title}>
+  <p class="muted">
+    {t(RELEASE_KIND_LABELS[release.kind])} · {release.release_date ?? t('日期未知')} ·
+    <a href={`/admin/releases/${release.id}/preview`}>{t('预览公开页')}</a> ·
+    <a href={`/admin/history?release=${release.id}`}>{t('这个作品的修改记录')}</a> ·
+    <a href={`/admin/inbox?state=all&release=${release.id}`}>{t('在整理台查看全部 {n} 个文件', { n: files.results.length })}</a>
+  </p>
+
+  <h2>{t('版本栏位')}</h2>
+  <form method="post" class="panel">
+    <input type="hidden" name="section" value="slots" />
+    <table class="grid slot-table">
+      <thead><tr><th>{t('栏位')}</th><th>{t('状态')}</th><th>{t('预定日期')}</th><th>{t('说明')}</th><th class="num">{t('文件')}</th></tr></thead>
+      <tbody>
+        {
+          SLOTS.map((s) => {
+            const row = slotBy.get(s);
+            return (
+              <tr>
+                <td>{t(SLOT_LABELS[s])}</td>
+                <td>
+                  <select name={`status_${s}`} required>
+                    {!row && <option value="">{t('（缺少状态）')}</option>}
+                    {SLOT_STATUSES.map((st) => <option value={st} selected={row?.status === st}>{t(SLOT_STATUS_LABELS[st])}</option>)}
+                  </select>
+                </td>
+                <td><input type="text" name={`planned_${s}`} value={row?.planned_date ?? ''} size="10" placeholder={t('仅「预定」')} /></td>
+                <td><input type="text" name={`note_${s}`} value={row?.note ?? ''} style="width:100%" /></td>
+                <td class="num">{filesBySlot.get(s)?.length ?? 0}</td>
+              </tr>
+            );
+          })
+        }
+      </tbody>
+    </table>
+    <p><button class="primary" type="submit">{t('保存栏位')}</button></p>
+  </form>
+
+  <h2 id="tracks">{t('曲目表')}</h2>
+  <form method="post" class="panel">
+    <input type="hidden" name="section" value="tracks" />
+    <input type="hidden" name="anchor" value="tracks" />
+    <p class="muted" set:html={translateHtml(lang, '拖动左侧 ⠿ 调整顺序，序号按顺序自动编排（每张碟从 1 开始）。每首曲属于一个「单曲」，同一首曲在别的作品里的版本在<a href="/admin/songs">单曲</a>页合并。')} />
+    <table class="grid track-table" id="track-table">
+      <thead>
+        <tr><th></th><th>{t('碟')}</th><th class="num">{t('序号')}</th><th>{t('标题')}</th><th>{t('版本说明')}</th><th>{t('时长')}</th><th>{t('单曲')}</th><th>{t('备注')}</th><th>{t('删除')}</th></tr>
+      </thead>
+      <tbody>
+        {
+          tracks.map((x) => (
+            <tr draggable="true">
+              <td class="handle" title={t('拖动排序')}>⠿<input type="hidden" name="track_id" value={x.id} /></td>
+              <td><input type="number" name="disc" value={x.disc} min="1" max="99" style="width:3.5em" /></td>
+              <td class="num pos">{x.position}</td>
+              <td><input type="text" name="title" value={x.title} required style="width:100%" /></td>
+              <td><input type="text" name="version_label" value={x.version_label ?? ''} size="10" placeholder="Short ver. …" /></td>
+              <td><input type="text" name="duration" value={formatMs(x.duration_ms)} size="5" placeholder="4:32" /></td>
+              <td>
+                <select name="song">
+                  <option value="">{x.song_id ? songTitles.get(x.song_id) ?? x.song_id : t('（无）')}</option>
+                  {(candidates.get(x.id) ?? []).map((s) => <option value={s.id}>{t('改为同名单曲：{title}（{n} 个版本）', { title: s.title, n: s.n })}</option>)}
+                  <option value="new">{t('拆成独立的新单曲')}</option>
+                </select>
+                {x.song_id && <a href={`/admin/songs/${x.song_id}`} title={t('单曲页')}>↗</a>}
+              </td>
+              <td><input type="text" name="track_note" value={x.note ?? ''} size="10" /></td>
+              <td><input type="checkbox" name="remove" value={x.id} aria-label={t('删除这一行')} /></td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+    <template id="track-row">
+      <tr draggable="true">
+        <td class="handle" title={t('拖动排序')}>⠿<input type="hidden" name="track_id" value="new" /></td>
+        <td><input type="number" name="disc" value="1" min="1" max="99" style="width:3.5em" /></td>
+        <td class="num pos"></td>
+        <td><input type="text" name="title" style="width:100%" placeholder={t('新曲目标题')} /></td>
+        <td><input type="text" name="version_label" size="10" /></td>
+        <td><input type="text" name="duration" size="5" placeholder="4:32" /></td>
+        <td><select name="song"><option value="new">{t('新建单曲')}</option></select></td>
+        <td><input type="text" name="track_note" size="10" /></td>
+        <td></td>
+      </tr>
+    </template>
+    <p>
+      <button type="button" id="add-track">{t('添加一行')}</button>
+      <button class="primary" type="submit">{t('保存曲目表')}</button>
+    </p>
+  </form>
+  {
+    tracks.length === 0 && audioSlots.length > 0 && (
+      <form method="post" class="panel">
+        <input type="hidden" name="section" value="generate" />
+        <input type="hidden" name="anchor" value="tracks" />
+        {t('从栏位')}
+        <select name="slot">{audioSlots.map((s) => <option value={s}>{t('{slot}（{n} 个音频）', { slot: t(SLOT_LABELS[s]), n: filesBySlot.get(s)!.filter((f) => f.kind === 'audio').length })}</option>)}</select>
+        <button type="submit">{t('生成曲目表')}</button>
+        <span class="muted">{t('按标签里的碟号与曲号（没有就按文件名开头的数字）排序，标题取标签或文件名，并把这些文件对应到各曲。')}</span>
+      </form>
+    )
+  }
+  {
+    tracks.length > 0 && unlinkedAudio > 0 && (
+      <form method="post" class="panel">
+        <input type="hidden" name="section" value="match" />
+        <input type="hidden" name="anchor" value="files" />
+        {t('有 {n} 个音频文件还没对应到曲目。', { n: unlinkedAudio })}
+        <button type="submit">{t('自动对应')}</button>
+        <span class="muted">{t('先找与已对应文件同一音频或同一录音（声学指纹）的，再按曲号与标题；其余的在下面「文件」里逐个选择。')}</span>
+      </form>
+    )
+  }
+
+  <h2 id="files">{t('文件')}</h2>
+  <form method="post">
+    <input type="hidden" name="section" value="file_tracks" />
+    <input type="hidden" name="anchor" value="files" />
+    {
+      [...SLOTS, null].map((s) => {
+        const list = filesBySlot.get(s) ?? [];
+        if (list.length === 0) return null;
+        return (
+          <div class="panel">
+            <b>{s ? t(SLOT_LABELS[s]) : t('相关资料（不分栏）')}</b> <span class="muted">{t('{n} 个', { n: list.length })}</span>
+            <table class="grid">
+              <tbody>
+                {list.slice(0, FILE_PREVIEW).map((f) => (
+                  <tr>
+                    <td class="name">
+                      <a href={`/admin/files/${f.id}`}>{f.name}</a>
+                      {f.old ? <span class="chip ignored" title={t('已上传新版本替换')}>{t('旧版本')}</span> : null}
+                      <div class="muted">{f.dir}</div>
+                    </td>
+                    <td><span class="chip">{t(FILE_KIND_LABELS[f.kind] ?? f.kind)}</span></td>
+                    <td class="spec">{formatSpec(parseFormat(f.format))}</td>
+                    <td class="num">{formatBytes(f.size)}</td>
+                    <td><span class={`chip ${f.state}`}>{t(FILE_STATE_LABELS[f.state])}</span></td>
+                    <td>
+                      {f.kind === 'audio' && tracks.length > 0 ? (
+                        <>
+                          <input type="hidden" name="file_id" value={f.id} />
+                          <select name="file_track" aria-label={t('对应曲目')}>
+                            <option value="">{t('（不对应曲目）')}</option>
+                            {tracks.map((x) => <option value={x.id} selected={f.track_id === x.id}>{trackLabel.get(x.id)}</option>)}
+                          </select>
+                        </>
+                      ) : f.track_id ? (
+                        <span class="muted">{trackLabel.get(f.track_id)}</span>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {list.length > FILE_PREVIEW && <p><a href={`/admin/inbox?state=all&release=${release.id}`}>{t('还有 {n} 个，在整理台查看', { n: list.length - FILE_PREVIEW })}</a></p>}
+          </div>
+        );
+      })
+    }
+    {files.results.length === 0 && <p class="muted">{t('还没有文件归入这个作品。')}</p>}
+    {tracks.length > 0 && files.results.some((f) => f.kind === 'audio') && <p><button class="primary" type="submit">{t('保存文件与曲目的对应')}</button></p>}
+  </form>
+
+  <h2>{t('封面')}</h2>
+  <form method="post" class="panel">
+    <input type="hidden" name="section" value="cover" />
+    {
+      images.length === 0 ? (
+        <p class="muted">{t('这个作品还没有图片文件。把扫图或封面归入作品后可以在这里选。')}</p>
+      ) : (
+        <>
+          <select name="cover_file_id">
+            <option value="">{t('（不设封面）')}</option>
+            {images.map((f) => <option value={f.id} selected={release.cover_file_id === f.id}>{f.slot ? `${t(SLOT_LABELS[f.slot])}：` : ''}{f.name}</option>)}
+          </select>
+          <button type="submit">{t('保存封面')}</button>
+        </>
+      )
+    }
+  </form>
+
+  <h2>{t('基本信息')}</h2>
+  <form method="post" class="panel">
+    <input type="hidden" name="section" value="info" />
+    <ReleaseFields release={release} />
+    <p><button class="primary" type="submit">{t('保存基本信息')}</button></p>
+  </form>
+
+  <h2>{t('译名与介绍')}</h2>
+  <form method="post" class="panel">
+    <input type="hidden" name="section" value="i18n" />
+    <p class="muted">{t('原文标题：{title}。留空时页面显示原文；中文译名由管理组审定。介绍的原文在「基本信息」里。', { title: release.title })}</p>
+    <div class="lang-grid">
+      {
+        LANGS.map((code) => (
+          <div>
+            <b>{t(LANG_NAMES[code])}</b>
+            <label>{t('标题')}<input type="text" name={`title_${code}`} value={tr('title', code)} placeholder={code === 'ja' ? t('原文不是日文时填写') : ''} /></label>
+            <label>{t('介绍')}<textarea name={`description_${code}`} rows="6">{tr('description', code)}</textarea></label>
+          </div>
+        ))
+      }
+    </div>
+    <p><button class="primary" type="submit">{t('保存译名与介绍')}</button></p>
+  </form>
+</Admin>
+
+<script>
+  const table = document.querySelector<HTMLTableElement>('#track-table');
+  const body = table?.tBodies[0];
+  const renumber = () => {
+    const counters = new Map<string, number>();
+    for (const row of Array.from(body?.rows ?? [])) {
+      const disc = (row.querySelector('input[name="disc"]') as HTMLInputElement).value || '1';
+      const removed = (row.querySelector('input[name="remove"]') as HTMLInputElement | null)?.checked;
+      row.classList.toggle('removed', Boolean(removed));
+      const cell = row.querySelector('.pos') as HTMLElement;
+      if (removed) {
+        cell.textContent = '—';
+        continue;
+      }
+      const n = (counters.get(disc) ?? 0) + 1;
+      counters.set(disc, n);
+      cell.textContent = String(n);
+    }
+  };
+  let dragged: HTMLTableRowElement | null = null;
+  body?.addEventListener('dragstart', (e) => {
+    dragged = (e.target as HTMLElement).closest('tr');
+    dragged?.classList.add('dragging');
+  });
+  body?.addEventListener('dragend', () => {
+    dragged?.classList.remove('dragging');
+    dragged = null;
+    renumber();
+  });
+  body?.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    const over = (e.target as HTMLElement).closest('tr');
+    if (!dragged || !over || over === dragged) return;
+    const rect = over.getBoundingClientRect();
+    body.insertBefore(dragged, e.clientY > rect.top + rect.height / 2 ? over.nextSibling : over);
+  });
+  body?.addEventListener('change', renumber);
+  document.querySelector('#add-track')?.addEventListener('click', () => {
+    const template = document.querySelector<HTMLTemplateElement>('#track-row');
+    if (!template || !body) return;
+    body.appendChild(template.content.cloneNode(true));
+    const last = body.rows[body.rows.length - 1];
+    const prev = body.rows[body.rows.length - 2];
+    if (prev) (last.querySelector('input[name="disc"]') as HTMLInputElement).value = (prev.querySelector('input[name="disc"]') as HTMLInputElement).value;
+    renumber();
+    (last.querySelector('input[name="title"]') as HTMLInputElement).focus();
+  });
+</script>

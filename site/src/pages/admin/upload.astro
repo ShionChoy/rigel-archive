@@ -1,0 +1,239 @@
+---
+import Admin from '../../layouts/Admin.astro';
+import { SLOTS, SLOT_LABELS, UPLOAD_ROOT } from '../../lib/constants';
+import { releaseOptions } from '../../lib/db';
+import { translateHtml } from '../../lib/i18n';
+
+const { t, lang } = Astro.locals;
+const options = await releaseOptions();
+---
+
+<Admin title={t('上传')} wide>
+  <p class="muted" set:html={translateHtml(lang, '上传的文件进入整理台的「{root}」目录，和合辑文件一样在那里确认归类。文件先在浏览器里算出 SHA-256，存储里已有相同内容时不再重复传；大文件分块上传，中断后重新选择同一文件会接着传。上传后处理程序会自动核对内容、读取规格、解开压缩包并生成推流版与预览，进度见<a href="/admin/storage">存储与处理</a>页。', { root: UPLOAD_ROOT })} />
+
+  <div class="panel form-grid" id="upload-options" data-root={UPLOAD_ROOT}>
+    <label for="up-release">{t('作品（可选）')}</label>
+    <select id="up-release">
+      <option value="">{t('不指定，在整理台再归类')}</option>
+      {options.map((o) => <option value={o.id}>{o.label}</option>)}
+    </select>
+    <label for="up-slot">{t('版本栏位')}</label>
+    <select id="up-slot">
+      <option value="">{t('不分栏（相关资料）')}</option>
+      {SLOTS.map((s) => <option value={s}>{t(SLOT_LABELS[s])}</option>)}
+    </select>
+    <label for="up-note">{t('备注（可选）')}</label>
+    <input id="up-note" type="text" placeholder={t('例如：来源、获得方式；会写到每个文件上')} />
+    <span></span>
+    <label><input id="up-dup" type="checkbox" /> {t('内容与已有文件完全相同时也添加一条记录（默认跳过）')}</label>
+  </div>
+  <p class="muted">{t('指定的作品与栏位作为「脚本建议」记在文件上，仍需在整理台确认。')}</p>
+
+  <div id="drop" class="dropzone">
+    {t('把文件或文件夹拖到这里，或')}
+    <label class="button">{t('选择文件')}<input id="pick-files" type="file" multiple hidden /></label>
+    <label class="button">{t('选择文件夹')}<input id="pick-folder" type="file" hidden {...{ webkitdirectory: '' }} /></label>
+  </div>
+
+  <div class="upload-bar">
+    <button id="start" class="primary" disabled>{t('开始上传')}</button>
+    <button id="clear">{t('清空列表')}</button>
+    <span id="summary" class="muted"></span>
+    <a id="to-inbox" hidden>{t('到整理台查看这批文件')}</a>
+  </div>
+
+  <table class="grid" id="queue">
+    <thead><tr><th>{t('文件')}</th><th class="num">{t('大小')}</th><th>{t('状态')}</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</Admin>
+
+<script>
+  import { call, hashFile, storeFile } from '../../scripts/uploader';
+  import { t } from '../../scripts/i18n';
+
+  const PARALLEL = 2;
+  // Files the operating system writes by itself; the import ignores them too.
+  const JUNK = /(^|\/)(__MACOSX\/|\._[^/]*$|(thumbs\.db|desktop\.ini|\.ds_store)$)/i;
+
+  type Status = 'waiting' | 'working' | 'done' | 'exists' | 'skipped' | 'error';
+  interface Item {
+    file: File;
+    path: string;
+    status: Status;
+    cell: HTMLTableCellElement;
+  }
+
+  const root = document.querySelector<HTMLElement>('#upload-options')!.dataset.root!;
+  const tbody = document.querySelector<HTMLTableSectionElement>('#queue tbody')!;
+  const startButton = document.querySelector<HTMLButtonElement>('#start')!;
+  const summary = document.querySelector<HTMLElement>('#summary')!;
+  const toInbox = document.querySelector<HTMLAnchorElement>('#to-inbox')!;
+  const items: Item[] = [];
+  const session = { batch: crypto.randomUUID(), dir: '' };
+  let running = false;
+
+  const bytes = (n: number) => {
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let v = n;
+    let u = 0;
+    while (v >= 1024 && u < units.length - 1) {
+      v /= 1024;
+      u += 1;
+    }
+    return `${u === 0 ? v : v.toFixed(v < 10 ? 1 : 0)} ${units[u]}`;
+  };
+
+  function show(item: Item, status: Status, text: string, progress?: number, link?: string) {
+    item.status = status;
+    item.cell.replaceChildren();
+    if (link) {
+      const a = document.createElement('a');
+      a.href = link;
+      a.textContent = text;
+      item.cell.appendChild(a);
+    } else {
+      item.cell.appendChild(document.createTextNode(text));
+    }
+    if (progress !== undefined) {
+      const bar = document.createElement('progress');
+      bar.max = 1;
+      bar.value = progress;
+      item.cell.appendChild(document.createTextNode(' '));
+      item.cell.appendChild(bar);
+    }
+    item.cell.className = status === 'error' ? 'bad' : status === 'done' ? 'ok' : '';
+    refresh();
+  }
+
+  function refresh() {
+    const count = (s: Status) => items.filter((i) => i.status === s).length;
+    const waiting = count('waiting') + count('error');
+    summary.textContent = items.length
+      ? t('共 {n} 个：完成 {done}，已存在 {exists}，跳过 {skipped}，失败 {failed}，待上传 {waiting}', {
+          n: items.length, done: count('done'), exists: count('exists'), skipped: count('skipped'), failed: count('error'), waiting: count('waiting'),
+        })
+      : '';
+    startButton.disabled = running || waiting === 0;
+    startButton.textContent = count('error') && !count('waiting') ? t('重试失败的文件') : t('开始上传');
+  }
+
+  function add(file: File, path: string) {
+    path = path.replace(/^\/+/, '');
+    if (items.some((i) => i.path === path && i.file.size === file.size)) return;
+    const row = tbody.insertRow();
+    row.insertCell().textContent = path;
+    const size = row.insertCell();
+    size.className = 'num';
+    size.textContent = bytes(file.size);
+    const item: Item = { file, path, status: 'waiting', cell: row.insertCell() };
+    items.push(item);
+    if (JUNK.test(path)) show(item, 'skipped', t('系统生成的文件，已跳过'));
+    else show(item, 'waiting', t('待上传'));
+  }
+
+  async function walk(entry: FileSystemEntry, prefix: string): Promise<void> {
+    if (entry.isFile) {
+      const file = await new Promise<File>((resolve, reject) => (entry as FileSystemFileEntry).file(resolve, reject));
+      add(file, prefix + file.name);
+    } else if (entry.isDirectory) {
+      const reader = (entry as FileSystemDirectoryEntry).createReader();
+      for (;;) {
+        const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
+        if (batch.length === 0) break;
+        for (const child of batch) await walk(child, `${prefix}${entry.name}/`);
+      }
+    }
+  }
+
+  const drop = document.querySelector<HTMLElement>('#drop')!;
+  drop.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    drop.classList.add('over');
+  });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    drop.classList.remove('over');
+    const entries = [...(e.dataTransfer?.items ?? [])].map((i) => i.webkitGetAsEntry()).filter((x): x is FileSystemEntry => x !== null);
+    for (const entry of entries) await walk(entry, '');
+  });
+  document.querySelector<HTMLInputElement>('#pick-files')!.addEventListener('change', (e) => {
+    for (const f of (e.target as HTMLInputElement).files ?? []) add(f, f.name);
+  });
+  document.querySelector<HTMLInputElement>('#pick-folder')!.addEventListener('change', (e) => {
+    for (const f of (e.target as HTMLInputElement).files ?? []) add(f, f.webkitRelativePath || f.name);
+  });
+  document.querySelector<HTMLButtonElement>('#clear')!.addEventListener('click', () => {
+    if (running) return;
+    items.length = 0;
+    tbody.replaceChildren();
+    refresh();
+  });
+
+  async function sha256(item: Item): Promise<string> {
+    return hashFile(item.file, (done) => show(item, 'working', t('计算 SHA-256'), done));
+  }
+
+  async function upload(item: Item, sha: string) {
+    const { file } = item;
+    await storeFile(file, sha, (loaded) => show(item, 'working', t('上传中'), file.size ? loaded / file.size : 1));
+  }
+
+  async function run(item: Item) {
+    const value = (id: string) => (document.querySelector(id) as HTMLInputElement | HTMLSelectElement).value.trim() || null;
+    try {
+      show(item, 'working', t('计算 SHA-256'), 0);
+      const sha = await sha256(item);
+      show(item, 'working', t('检查是否已存在'));
+      const check = await call<{ stored: boolean; files: { id: string; dir: string; name: string }[] }>('/admin/api/upload/check', { sha256: sha });
+      const allowDup = document.querySelector<HTMLInputElement>('#up-dup')!.checked;
+      if (check.files.length && !allowDup) {
+        const first = check.files[0];
+        show(item, 'exists', t('已有相同内容：{path}', { path: `${first.dir ? `${first.dir}/` : ''}${first.name}` }), undefined, `/admin/files/${first.id}`);
+        return;
+      }
+      if (!check.stored) await upload(item, sha);
+      show(item, 'working', t('登记到整理台'));
+      const { id } = await call<{ id: string }>('/admin/api/upload/register', {
+        batch: session.batch,
+        batchDir: session.dir,
+        path: item.path,
+        size: item.file.size,
+        mtime: new Date(item.file.lastModified).toISOString(),
+        sha256: sha,
+        release: value('#up-release'),
+        slot: value('#up-slot'),
+        note: value('#up-note'),
+      });
+      show(item, 'done', check.stored ? t('完成（存储里已有相同内容，未重复上传）') : t('完成'), undefined, `/admin/files/${id}`);
+    } catch (e) {
+      show(item, 'error', t('失败：{error}', { error: e instanceof Error ? e.message : String(e) }));
+    }
+  }
+
+  startButton.addEventListener('click', async () => {
+    if (running) return;
+    running = true;
+    if (!session.dir) {
+      const d = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      session.dir = `${root}/${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+    for (const item of items) if (item.status === 'error') show(item, 'waiting', t('待上传'));
+    refresh();
+    const queue = items.filter((i) => i.status === 'waiting');
+    const worker = async () => {
+      for (let item = queue.shift(); item; item = queue.shift()) await run(item);
+    };
+    await Promise.all(Array.from({ length: PARALLEL }, worker));
+    running = false;
+    toInbox.href = `/admin/inbox?state=all&dir=${encodeURIComponent(session.dir)}`;
+    toInbox.hidden = !items.some((i) => i.status === 'done');
+    refresh();
+  });
+
+  window.addEventListener('beforeunload', (e) => {
+    if (running) e.preventDefault();
+  });
+</script>

@@ -1,0 +1,49 @@
+---
+import { ARCHIVE_NAME } from '../lib/constants';
+import { withParams } from '../lib/format';
+
+export interface DirNode {
+  name: string;
+  path: string;
+  n: number;
+  children: DirNode[];
+}
+
+interface Props {
+  nodes: DirNode[];
+  current: string;
+  url: URL;
+}
+
+const { nodes, current, url } = Astro.props;
+const isOpen = (node: DirNode) => current === node.path || current.startsWith(`${node.path}/`);
+// An archive node lists its unpacked members (ra extract gives them the archive's path as folder).
+const mark = (node: DirNode) => (ARCHIVE_NAME.test(node.name) ? 'archive' : undefined);
+---
+
+<ul>
+  {
+    nodes.map((node) => (
+      <li>
+        {node.children.length > 0 ? (
+          <details open={isOpen(node)}>
+            <summary>
+              <a class:list={[mark(node), { current: current === node.path }]} href={withParams(url, { dir: node.path, page: null })}>
+                {node.name}
+              </a>
+              <span class="n">{node.n}</span>
+            </summary>
+            <Astro.self nodes={node.children} current={current} url={url} />
+          </details>
+        ) : (
+          <>
+            <a class:list={[mark(node), { current: current === node.path }]} href={withParams(url, { dir: node.path, page: null })}>
+              {node.name}
+            </a>
+            <span class="n">{node.n}</span>
+          </>
+        )}
+      </li>
+    ))
+  }
+</ul>

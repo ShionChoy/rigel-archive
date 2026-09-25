@@ -1,0 +1,33 @@
+{
+  "name": "rigel-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "types": "wrangler types --strict-vars=false",
+    "db:migrate": "wrangler d1 migrations apply DB --local",
+    "db:seed": "wrangler d1 execute DB --local --file .seed/seed.sql",
+    "db:reset": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate && npm run db:seed",
+    "deploy": "astro check && node scripts/i18n-check.mjs && astro build && wrangler deploy",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "db:seed:remote": "wrangler d1 execute DB --remote --yes --file .seed/seed.sql",
+    "db:backup": "mkdir -p \"${RA_WORKSPACE:-/mnt/d/documents/projects/rigel-archive}/backups\" && wrangler d1 export DB --remote --output \"${RA_WORKSPACE:-/mnt/d/documents/projects/rigel-archive}/backups/d1-$(date -u +%Y%m%d-%H%M).sql\"",
+    "check:i18n": "node scripts/i18n-check.mjs",
+    "secrets:backup": "node scripts/secrets-backup.mjs"
+  },
+  "dependencies": {
+    "@astrojs/cloudflare": "^14.3.3",
+    "@cloudflare/containers": "^0.3.7",
+    "astro": "^7.3.4",
+    "hash-wasm": "^4.12.0",
+    "jose": "^6.2.12"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.10",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.137.0"
+  }
+}

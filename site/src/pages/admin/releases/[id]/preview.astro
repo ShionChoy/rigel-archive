@@ -1,0 +1,250 @@
+---
+// A minimal version of the public album page, to check the organizing result: the 7 slots with their
+// placeholders, the track list with a player (best available version of each track) and the files.
+import { env } from 'cloudflare:workers';
+import { RELEASE_KIND_LABELS, SLOTS, SLOT_LABELS, SLOT_STATUS_LABELS, type Slot } from '../../../../lib/constants';
+import { db, parseFormat, type FileRow, type ReleaseRow, type SlotRow } from '../../../../lib/db';
+import { formatBytes, formatSpec } from '../../../../lib/format';
+import { HTML_LANG } from '../../../../lib/i18n';
+import { audioSources, imageSrc, mediaSrc } from '../../../../lib/media';
+import { derivedFor } from '../../../../lib/processing';
+import { formatMs, loadTracks } from '../../../../lib/tracks';
+import { mimeFor } from '../../../../lib/constants';
+
+const { id } = Astro.params;
+const { t, lang } = Astro.locals;
+const database = db();
+const release = await database.prepare('SELECT * FROM releases WHERE id = ?').bind(id).first<ReleaseRow>();
+if (!release) return new Response(t('找不到作品'), { status: 404 });
+const base = env.MEDIA_DEV_BASE ?? '';
+
+type F = Pick<FileRow, 'id' | 'name' | 'kind' | 'ext' | 'slot' | 'track_id' | 'role' | 'format' | 'size' | 'sha256' | 'blob_key' | 'source_path' | 'member_path' | 'rights'>;
+const [slotsResult, filesResult, tracks, titles] = await Promise.all([
+  database.prepare('SELECT * FROM release_slots WHERE release_id = ?').bind(release.id).all<SlotRow>(),
+  database
+    .prepare(
+      `SELECT id, name, kind, ext, slot, track_id, role, format, size, sha256, blob_key, source_path, member_path, rights FROM files f
+       WHERE release_id = ? AND state IN ('classified', 'published') AND dup_of IS NULL
+         AND NOT EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id)
+       ORDER BY slot, name`,
+    )
+    .bind(release.id)
+    .all<F>(),
+  loadTracks(release.id),
+  database
+    .prepare("SELECT field, lang, value FROM translations WHERE entity = 'release' AND entity_id = ? AND status = 'approved'")
+    .bind(release.id)
+    .all<{ field: string; lang: string; value: string }>(),
+]);
+const files = filesResult.results;
+const slots = new Map(slotsResult.results.map((s) => [s.slot, s]));
+const bySlot = new Map<Slot | null, F[]>();
+for (const f of files) bySlot.set(f.slot, [...(bySlot.get(f.slot) ?? []), f]);
+const tx = (field: string, code: string) => titles.results.find((x) => x.field === field && x.lang === code)?.value;
+const derived = await derivedFor(database, files.map((f) => f.sha256));
+const derivedOf = (f: F) => (f.sha256 ? derived.get(f.sha256) : undefined);
+// Titles in the other languages under the original, like the public page (the admin's language first).
+const subtitles = (lang === 'ja' ? ['ja', 'en', 'zh'] : ['zh', 'en', 'ja']).map((code) => tx('title', code)).filter((v): v is string => !!v && v !== release.title);
+const description = tx('description', lang) ?? release.description;
+
+// The version a track plays by default: the best-sounding source among the slots that have it.
+const SLOT_RANK: Slot[] = ['digital', 'cd_rip', 'cd', 'bonus', 'streaming', 'pv', 'scans'];
+const quality = (f: F) => {
+  const fmt = parseFormat(f.format);
+  return (fmt.lossless ? 1e6 : 0) + (fmt.bits ?? 0) * 1e3 + (fmt.rate ?? 0) / 1e3 + (fmt.kbps ?? 0) / 1e3;
+};
+const playable = (f: F) => f.kind === 'audio' && f.rights !== 'third_party' && mediaSrc(f, base) !== null;
+const sourceFor = (trackId: string) =>
+  files
+    .filter((f) => f.track_id === trackId && playable(f))
+    .sort((a, b) => SLOT_RANK.indexOf(a.slot as Slot) - SLOT_RANK.indexOf(b.slot as Slot) || quality(b) - quality(a))[0];
+const cover = files.find((f) => f.id === release.cover_file_id);
+const coverSrc = cover ? imageSrc(mediaSrc(cover, base), derivedOf(cover), 640) : null;
+const queue = tracks.map((tr) => ({ tr, src: sourceFor(tr.id) }));
+const multiDisc = tracks.some((tr) => tr.disc > 1);
+const slotAudio = (s: Slot) => (bySlot.get(s) ?? []).filter((f) => f.kind === 'audio');
+const slotSpec = (s: Slot) => {
+  const audio = slotAudio(s);
+  if (audio.length === 0) return (bySlot.get(s) ?? []).length ? t('{n} 个文件', { n: (bySlot.get(s) ?? []).length }) : '';
+  return formatSpec({ ...parseFormat(audio[0].format), duration: undefined }) + ` · ${t('{n} 个音频', { n: audio.length })}`;
+};
+const placeholder = new Set(['missing', 'partial', 'unknown']);
+const gallery = files.filter((f) => f.kind === 'image' && (f.slot === 'scans' || f.slot === null)).slice(0, 40);
+const others = files.filter((f) => f.kind !== 'audio' && !gallery.includes(f));
+---
+
+<!doctype html>
+<html lang={HTML_LANG[lang]}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>{t('预览')} · {release.title}</title>
+    <style>
+      :root { --ink: #1d2230; --muted: #6b7079; --line: #e3e3de; --accent: #3c5aa8; --bg: #f7f6f2; }
+      * { box-sizing: border-box; }
+      body { margin: 0; font: 15px/1.6 system-ui, -apple-system, 'Noto Sans SC', 'Noto Sans JP', sans-serif; color: var(--ink); background: var(--bg); padding-bottom: 96px; }
+      .bar { background: #2b3040; color: #fff; padding: 8px 16px; font-size: 13px; }
+      .bar a { color: #cdd6ff; }
+      main { max-width: 980px; margin: 0 auto; padding: 24px 16px; }
+      header.album { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
+      .cover { width: 220px; aspect-ratio: 1; background: #ddd center/cover; border-radius: 6px; display: grid; place-items: center; color: var(--muted); }
+      h1 { margin: 0 0 4px; font-size: 26px; }
+      .sub { color: var(--muted); }
+      section { margin-top: 28px; }
+      h2 { font-size: 17px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+      table { width: 100%; border-collapse: collapse; }
+      td { padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+      .ph { display: inline-block; border: 1px dashed #b9b9b0; color: var(--muted); padding: 0 8px; border-radius: 4px; }
+      .ok { color: #2d6a3a; }
+      button.play { border: 1px solid var(--line); background: #fff; border-radius: 50%; width: 30px; height: 30px; cursor: pointer; }
+      button.play:disabled { opacity: 0.3; cursor: default; }
+      button.all { background: var(--accent); color: #fff; border: 0; border-radius: 4px; padding: 6px 14px; cursor: pointer; }
+      tr.now td { background: #eef2ff; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+      .grid img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; background: #ddd; }
+      footer.player { position: fixed; left: 0; right: 0; bottom: 0; background: #fff; border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 12px; align-items: center; }
+      footer.player audio { flex: 1; }
+      .muted { color: var(--muted); }
+      @media (max-width: 640px) { header.album { grid-template-columns: 1fr; } .cover { width: 100%; } }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      {t('后台预览：只显示「已归类 / 已发布」的文件（重复与旧版本不显示）；公开站点上线前的样子。')}
+      <a href={`/admin/releases/${release.id}`}>{t('← 回到作品编辑')}</a>
+      {release.state !== 'published' && ` · ${t('本作品还是草稿，不会公开')}`}
+    </div>
+    <main>
+      <header class="album">
+        <div class="cover" style={coverSrc ? `background-image:url('${coverSrc}')` : undefined}>{!coverSrc && t('无封面')}</div>
+        <div>
+          <h1>{release.title}</h1>
+          {subtitles.length > 0 && <div class="sub">{subtitles.slice(0, 2).join(' / ')}</div>}
+          <p class="sub">
+            {[release.catalog_no, release.release_date, release.event, tracks.length ? t('{n} 曲', { n: tracks.length }) : release.track_count ? t('{n} 曲', { n: release.track_count }) : null, release.series, t(RELEASE_KIND_LABELS[release.kind])].filter(Boolean).join(' · ')}
+          </p>
+          {queue.some((q) => q.src) && <button class="all" id="play-all">{t('▶ 播放全部')}</button>}
+          {description && <p style="white-space:pre-wrap">{description}</p>}
+        </div>
+      </header>
+
+      <section>
+        <h2>{t('版本栏位')}</h2>
+        <table>
+          <tbody>
+            {
+              SLOTS.map((s) => {
+                const row = slots.get(s);
+                const status = row?.status ?? 'unknown';
+                return (
+                  <tr>
+                    <td style="width:9em">{t(SLOT_LABELS[s])}</td>
+                    <td>
+                      {placeholder.has(status) ? (
+                        <span class="ph">{t('{status} · 征集中', { status: t(SLOT_STATUS_LABELS[status]) })}</span>
+                      ) : status === 'collected' ? (
+                        <span class="ok">{t(SLOT_STATUS_LABELS[status])}</span>
+                      ) : (
+                        <span class="muted">{t(SLOT_STATUS_LABELS[status])}{status === 'planned' && row?.planned_date ? ` ${row.planned_date}` : ''}</span>
+                      )}
+                      {' '}<span class="muted">{slotSpec(s)}</span>
+                      {row?.note && <div class="muted">{row.note}</div>}
+                    </td>
+                  </tr>
+                );
+              })
+            }
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>{t('曲目')}</h2>
+        {tracks.length === 0 && <p class="muted">{t('还没有曲目表（在作品编辑页录入，或从文件生成）。')}</p>}
+        <table id="tracks">
+          <tbody>
+            {
+              queue.map(({ tr, src }, i) => (
+                <tr data-sources={src ? JSON.stringify(audioSources(mediaSrc(src, base), derivedOf(src), mimeFor(src.ext))) : undefined} data-title={tr.title} data-index={i}>
+                  <td style="width:3em" class="muted">{multiDisc ? `${tr.disc}-` : ''}{String(tr.position).padStart(2, '0')}</td>
+                  <td>
+                    {tr.title}{tr.version_label && <span class="muted"> （{tr.version_label}）</span>}
+                    {src && <div class="muted" style="font-size:12px">{src.slot ? t(SLOT_LABELS[src.slot]) : ''} · {formatSpec(parseFormat(src.format))}</div>}
+                  </td>
+                  <td class="muted" style="width:4em">{formatMs(tr.duration_ms)}</td>
+                  <td style="width:3em"><button class="play" disabled={!src} aria-label={t('播放')}>▶</button></td>
+                  <td style="width:7em">{tr.song_id && <a href={`/admin/songs/${tr.song_id}`}>{t('所有版本 ›')}</a>}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </section>
+
+      {
+        gallery.length > 0 && (
+          <section>
+            <h2>{t('扫图与图片')}</h2>
+            <div class="grid">
+              {gallery.map((f) => {
+                const src = mediaSrc(f, base);
+                const large = imageSrc(src, derivedOf(f), 1600);
+                const thumb = imageSrc(src, derivedOf(f), 240);
+                return src ? <a href={large ?? src} target="_blank" rel="noopener"><img src={thumb ?? src} alt={f.name} loading="lazy" /></a> : <span class="ph">{f.name}</span>;
+              })}
+            </div>
+          </section>
+        )
+      }
+
+      {
+        others.length > 0 && (
+          <section>
+            <h2>{t('其他文件')}</h2>
+            <table>
+              <tbody>
+                {others.map((f) => (
+                  <tr>
+                    <td>{f.name}</td>
+                    <td class="muted">{f.slot ? t(SLOT_LABELS[f.slot]) : t('相关资料')}</td>
+                    <td class="muted">{f.rights === 'third_party' ? t('第三方 · 只列条目') : formatBytes(f.size)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+        )
+      }
+    </main>
+    <footer class="player">
+      <span id="now" class="muted">{t('未在播放')}</span>
+      <audio id="audio" controls preload="none"></audio>
+    </footer>
+
+    <script>
+      const audio = document.querySelector<HTMLAudioElement>('#audio')!;
+      const now = document.querySelector<HTMLElement>('#now')!;
+      const rows = Array.from(document.querySelectorAll<HTMLTableRowElement>('#tracks tr[data-sources]'));
+      let current = -1;
+      // The first source this browser plays: the lossless stream (FLAC), else AAC, else the original.
+      const pick = (row: HTMLTableRowElement) => {
+        const sources = JSON.parse(row.dataset.sources!) as { src: string; type: string }[];
+        return (sources.find((s) => audio.canPlayType(s.type) !== '') ?? sources[sources.length - 1]).src;
+      };
+      const play = (i: number) => {
+        const row = rows[i];
+        if (!row) return;
+        rows.forEach((r) => r.classList.remove('now'));
+        row.classList.add('now');
+        current = i;
+        audio.src = pick(row);
+        now.textContent = row.dataset.title ?? '';
+        audio.play().catch(() => undefined);
+      };
+      rows.forEach((row, i) => row.querySelector('button.play')?.addEventListener('click', () => play(i)));
+      document.querySelector('#play-all')?.addEventListener('click', () => play(0));
+      audio.addEventListener('ended', () => play(current + 1));
+    </script>
+  </body>
+</html>

@@ -1,0 +1,289 @@
+---
+import { env } from 'cloudflare:workers';
+import Admin from '../../layouts/Admin.astro';
+import { db } from '../../lib/db';
+import { originalGone } from '../../lib/deletion';
+import { formatBytes, formatTime, withParams } from '../../lib/format';
+import { N_, errorText, translateHtml, UserError } from '../../lib/i18n';
+import { MAX_ATTEMPTS, pendingCounts } from '../../lib/processing';
+import { wakeProcessor } from '../../lib/schedule';
+import { graceDays, purge, storageReport, wantedTotals } from '../../lib/storage';
+import { canManage } from '../../lib/team';
+import { backupSettings, processor, type ProcessorStatus } from '../../processor';
+
+const { t, lang } = Astro.locals;
+const grace = graceDays(env.STORAGE_GRACE_DAYS);
+const database = db();
+const backupReady = backupSettings(env) !== null;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  try {
+    let msg: string;
+    switch (form.get('action')) {
+      case 'wake':
+        await wakeProcessor(env);
+        msg = t('已唤醒处理程序，它会处理完队列后自动停下');
+        break;
+      case 'restart':
+        if (!canManage(Astro.locals.admin)) throw new UserError('重启处理程序需要站长或管理员权限');
+        await processor(env).restart();
+        msg = t('处理程序已重启，正在处理的内容会在 20 分钟内重新排队');
+        break;
+      case 'retry': {
+        // Failed contents get three fresh tries.
+        const r = await database.prepare("DELETE FROM media_tasks WHERE state = 'failed'").run();
+        await wakeProcessor(env);
+        msg = t('{n} 个失败的任务已重新排队', { n: r.meta.changes });
+        break;
+      }
+      case 'backup':
+        if (!canManage(Astro.locals.admin)) throw new UserError('立即备份需要站长或管理员权限');
+        if (!backupReady) throw new UserError('备份还没有设置');
+        await wakeProcessor(env, true);
+        msg = t('备份已开始，完成后结果显示在下面（首次备份要传完全部原件，需要较长时间）');
+        break;
+      default: {
+        if (!canManage(Astro.locals.admin)) throw new UserError('清理存储需要站长或管理员权限');
+        const r = await purge(database, env.MEDIA, grace);
+        msg = r.count ? t('已清理 {n} 个对象，释放 {size}', { n: r.count, size: formatBytes(r.bytes) }) : t('没有可以清理的对象');
+      }
+    }
+    return Astro.redirect(withParams(Astro.url, { msg, err: null }), 303);
+  } catch (e) {
+    return Astro.redirect(withParams(Astro.url, { err: errorText(e, t), msg: null }), 303);
+  }
+}
+
+// Listing every stored object takes a while with tens of thousands of them, so it runs on request.
+const scan = Astro.url.searchParams.has('scan');
+type Failed = { sha256: string; task: string; attempts: number; error: string | null; updated_at: string; id: string | null; name: string | null };
+type Run = { id: number; started_at: string; finished_at: string | null; ok: number | null; report: string | null };
+const [report, gone, wanted, stored, derived, pending, taskCounts, failed, runs, status, badUploads] = await Promise.all([
+  scan ? storageReport(database, env.MEDIA, grace) : null,
+  database.prepare(`SELECT count(*) AS n FROM files WHERE ${originalGone('files')}`).first<{ n: number }>(),
+  wantedTotals(database),
+  database
+    .prepare('SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM (SELECT blob_key, max(size) AS size FROM files WHERE blob_key IS NOT NULL GROUP BY blob_key)')
+    .first<{ n: number; bytes: number }>(),
+  database
+    .prepare("SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM (SELECT key, max(size) AS size FROM derived WHERE key LIKE 'derived/%' GROUP BY key)")
+    .first<{ n: number; bytes: number }>(),
+  pendingCounts(database),
+  database.prepare('SELECT task, state, count(*) AS n FROM media_tasks GROUP BY task, state').all<{ task: string; state: string; n: number }>(),
+  database
+    .prepare(
+      `SELECT t.sha256, t.task, t.attempts, t.error, t.updated_at, min(f.id) AS id, min(f.name) AS name
+       FROM media_tasks t LEFT JOIN files f ON f.sha256 = t.sha256
+       WHERE t.state = 'failed' GROUP BY t.sha256, t.task ORDER BY t.updated_at DESC LIMIT 50`,
+    )
+    .all<Failed>(),
+  database.prepare('SELECT id, started_at, finished_at, ok, report FROM backup_runs ORDER BY id DESC LIMIT 10').all<Run>(),
+  processor(env).status().catch((e): ProcessorStatus => ({ state: 'unavailable', error: e instanceof Error ? e.message : String(e) })),
+  database
+    .prepare(
+      `SELECT id, dir, name, json_extract(format, '$.upload_error') AS upload_error, json_extract(format, '$.probe_error') AS probe_error
+       FROM files WHERE origin = 'upload' AND (json_extract(format, '$.upload_error') IS NOT NULL OR json_extract(format, '$.probe_error') IS NOT NULL)
+       ORDER BY checked_at DESC LIMIT 50`,
+    )
+    .all<{ id: string; dir: string; name: string; upload_error: string | null; probe_error: string | null }>(),
+]);
+const purgeable = report?.unreferenced.filter((o) => o.purgeable) ?? [];
+const TASK_NAMES: Record<string, string> = { check: N_('核对上传'), derive: N_('推流版与预览'), fingerprint: N_('声学指纹') };
+const count = (task: string, state: string) => taskCounts.results.find((r) => r.task === task && r.state === state)?.n ?? 0;
+const running = status.state === 'running' || status.state === 'healthy';
+const STATE_NAMES: Record<string, string> = {
+  running: N_('启动中'), healthy: N_('运行中'), stopping: N_('正在停止'), stopped: N_('已停止（没有工作时自动停下）'),
+  stopped_with_code: N_('已停止（程序退出）'), unavailable: N_('无法连接（本地开发时没有容器）'),
+};
+const parse = (raw: string | null) => {
+  try {
+    return raw ? (JSON.parse(raw) as Record<string, any>) : {};
+  } catch {
+    return {};
+  }
+};
+const lastOk = runs.results.find((r) => r.ok === 1);
+---
+
+<Admin title={t('存储与处理')}>
+  <p class="muted" set:html={translateHtml(lang, '网站的文件按内容存放（<code>blobs/&lt;SHA-256&gt;</code>），相同内容只存一份，文件名和归类都在数据库里。删除文件只删记录；存储里的内容在没有任何文件引用 {days} 天后，才可以在这里清理，在此之前删除都能撤销。', { days: grace })} />
+
+  <h2>{t('云端存储')}</h2>
+  <div class="panel">
+    <p>{t('原件：{n} 份内容，{size}。', { n: stored?.n ?? 0, size: formatBytes(stored?.bytes) })} {t('推流版与预览：{n} 个文件，{size}（可随时从原件重新生成，不备份）。', { n: derived?.n ?? 0, size: formatBytes(derived?.bytes) })}</p>
+    {
+      wanted.n > 0 ? (
+        <p set:html={translateHtml(lang, '还有 <b>{n}</b> 份内容（{size}）没有上传：本机在 <code>tools/ra</code> 运行 <code>uv run ra push</code>，中断后重跑会接着传。上传前这些文件在后台不能预览。', { n: wanted.n, size: formatBytes(wanted.bytes) })} />
+      ) : (
+        <p class="muted">{t('需要的内容都已上传。')}</p>
+      )
+    }
+    <p class="muted">{t('存储是私有的，只有管理组能读；第三方文件也存入，公开站上是否展示按权属决定。')}</p>
+  </div>
+
+  <h2>{t('处理程序')}</h2>
+  <div class="panel">
+    <p class="muted">
+      {t('处理程序在 Cloudflare 的容器里运行：核对上传、解开压缩包、生成推流版与预览、计算声学指纹、每晚备份。有工作时自动启动（上传后立即，其余每 10 分钟检查一次），做完自动停下，不需要本机运行任何程序。')}
+    </p>
+    <p>
+      <b>{t('状态')}</b>：{t(STATE_NAMES[status.state] ?? status.state)}
+      {running && status.busy && status.task && <span class="muted"> · {status.task}</span>}
+      {running && status.video && <span class="muted"> · {t('正在转码视频 {name}（{at} 开始）', { name: status.video.name, at: formatTime(new Date(status.video.since * 1000).toISOString().replace(/\.\d+Z$/, 'Z')) })}</span>}
+      {running && status.up_since && <span class="muted"> · {t('本次启动于 {at}', { at: formatTime(new Date(status.up_since * 1000).toISOString().replace(/\.\d+Z$/, 'Z')) })}</span>}
+      {running && (status.done || status.failed) ? <span class="muted"> · {t('本次完成 {done} 个，失败 {failed} 个', { done: status.done ?? 0, failed: status.failed ?? 0 })}</span> : null}
+    </p>
+    <table class="grid">
+      <thead><tr><th>{t('工作')}</th><th class="num">{t('等待中')}</th><th class="num">{t('已完成')}</th><th class="num">{t('失败')}</th></tr></thead>
+      <tbody>
+        {(['check', 'derive', 'fingerprint'] as const).map((task) => (
+          <tr>
+            <td>{t(TASK_NAMES[task])}</td>
+            <td class="num">{pending[task]}</td>
+            <td class="num">{task === 'check' ? '—' : count(task, 'done')}</td>
+            <td class="num">{count(task, 'failed')}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+    <form method="post" class="inline">
+      <button name="action" value="wake">{t('立即处理队列')}</button>
+      {running && canManage(Astro.locals.admin) && (
+        <button name="action" value="restart" title={t('部署新版本后，用新版本立即重新开始')}>{t('重启处理程序')}</button>
+      )}
+      {failed.results.length > 0 && <button name="action" value="retry">{t('重试全部失败的任务')}</button>}
+    </form>
+    {
+      failed.results.length > 0 && (
+        <>
+          <p><b>{t('失败的任务（{n}）', { n: failed.results.length })}</b> <span class="muted">{t('失败后隔一小时自动重试，共 {n} 次。', { n: MAX_ATTEMPTS })}</span></p>
+          <ul>
+            {failed.results.map((f) => (
+              <li>
+                {f.id ? <a href={`/admin/files/${f.id}`} class="mono">{f.name}</a> : <span class="mono">{f.sha256.slice(0, 16)}…</span>}
+                {' '}<span class="chip">{t(TASK_NAMES[f.task] ?? f.task)}</span>
+                {' '}<span class="chip missing" title={f.error ?? ''}>{(f.error ?? '').slice(0, 100)}</span>
+                <span class="muted"> {t('第 {n} 次', { n: f.attempts })} · {formatTime(f.updated_at)}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )
+    }
+  </div>
+
+  {
+    badUploads.results.length > 0 && (
+      <div class="panel">
+        <b>{t('有问题的上传（{n}）', { n: badUploads.results.length })}</b>
+        <ul>
+          {badUploads.results.map((f) => (
+            <li>
+              <a href={`/admin/files/${f.id}`} class="mono">{f.dir}/{f.name}</a>{' '}
+              <span class="chip missing">{f.upload_error ? t(f.upload_error) : t('规格读取失败：{error}', { error: f.probe_error ?? '' })}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    )
+  }
+
+  <h2>{t('加密备份')}</h2>
+  <div class="panel">
+    <p class="muted">
+      {t('每晚 4:17（日本时间）把全部原件与数据库导出加密后备份到 Backblaze B2。加密在上传前完成，B2 上只有密文；原件只增不删，已清理的内容在备份里仍然保留。每次备份结束时从 B2 随机读回几个原件核对 SHA-256。')}
+    </p>
+    {
+      !backupReady ? (
+        <p set:html={translateHtml(lang, '<b>还没有设置。</b>在 <code>tools/ra/backup.env</code> 填好 B2 的密钥后，在 <code>site</code> 运行 <code>npm run secrets:backup</code>（见 README「加密备份」）。')} />
+      ) : (
+        <>
+          <p>
+            {lastOk
+              ? t('最近一次成功：{at}', { at: formatTime(lastOk.finished_at ?? lastOk.started_at) })
+              : t('还没有成功完成过备份。')}
+          </p>
+          {canManage(Astro.locals.admin) && (
+            <form method="post"><button name="action" value="backup">{t('立即备份')}</button></form>
+          )}
+        </>
+      )
+    }
+    {
+      runs.results.length > 0 && (
+        <table class="grid">
+          <thead><tr><th>{t('开始')}</th><th>{t('结果')}</th><th>{t('原件')}</th><th>{t('数据库导出')}</th><th>{t('读回核对')}</th><th>{t('用时')}</th></tr></thead>
+          <tbody>
+            {runs.results.map((r) => {
+              const rep = parse(r.report);
+              const blobs = rep.blobs ?? {};
+              return (
+                <tr>
+                  <td class="mono">{formatTime(r.started_at)}</td>
+                  <td>
+                    {r.ok === null ? <span class="chip planned">{t('进行中')}</span> : r.ok ? <span class="chip collected">{t('成功')}</span> : <span class="chip missing" title={rep.error ?? ''}>{t('失败')}</span>}
+                    {r.ok === 0 && rep.error && <div class="muted">{String(rep.error).slice(0, 200)}</div>}
+                  </td>
+                  <td>
+                    {blobs.stored != null && t('{backed}/{stored} 份已在备份里', { backed: blobs.backed_up ?? 0, stored: blobs.stored })}
+                    {blobs.copied ? <div class="muted">{t('本次新传 {n} 份，{size}', { n: blobs.copied, size: formatBytes(blobs.copied_bytes) })}</div> : null}
+                  </td>
+                  <td>{rep.db ? formatBytes(rep.db.size) : '—'}</td>
+                  <td>{rep.verified != null ? t('{n} 个无误', { n: rep.verified }) : '—'}</td>
+                  <td>{rep.seconds != null ? t('{n} 分钟', { n: Math.max(1, Math.round(rep.seconds / 60)) }) : '—'}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )
+    }
+  </div>
+
+  <h2>{t('清理')}</h2>
+  <div class="panel">
+    {
+      report ? (
+        <p>{t('存储里共 {n} 个原件，{size}。其中 {loose} 个已没有文件引用。', { n: report.objects, size: formatBytes(report.bytes), loose: report.unreferenced.length })}</p>
+      ) : (
+        <p><a class="button" href={withParams(Astro.url, { scan: '1' })}>{t('检查没有文件引用的内容')}</a> <span class="muted">{t('要逐个列出存储里的对象，需要几秒钟。')}</span></p>
+      )
+    }
+    {
+      gone && gone.n > 0 && (
+        <p set:html={translateHtml(lang, '另有 <a href="/admin/inbox?state=all&origin=gone">{n} 个合辑文件原件已不存在</a>（最近一次导入时 source 里没有找到），可以在整理台删除。', { n: gone.n })} />
+      )
+    }
+  </div>
+
+  {
+    !report ? null : report.unreferenced.length === 0 ? (
+      <p class="muted">{t('没有文件引用的内容：没有。')}</p>
+    ) : (
+      <>
+        <table class="grid">
+          <thead>
+            <tr><th>{t('内容')}</th><th class="num">{t('大小')}</th><th>{t('不再被引用')}</th><th>{t('可清理时间')}</th></tr>
+          </thead>
+          <tbody>
+            {report.unreferenced.map((o) => (
+              <tr>
+                <td class="mono">{o.key.slice(0, 22)}…</td>
+                <td class="num">{formatBytes(o.size)}</td>
+                <td class="mono">{formatTime(o.since.replace(/\.\d+Z$/, 'Z'))}</td>
+                <td>{o.purgeable ? <span class="chip missing">{t('可以清理')}</span> : <span class="mono">{formatTime(o.purgeAfter.replace(/\.\d+Z$/, 'Z'))}</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <form method="post">
+          <button class="danger" type="submit" name="action" value="purge" disabled={purgeable.length === 0}>
+            {t('清理 {n} 个可以清理的对象（{size}）', { n: purgeable.length, size: formatBytes(purgeable.reduce((n, o) => n + o.size, 0)) })}
+          </button>
+          <span class="muted">{t('清理后，删除这些文件的操作不能再撤销；由它们生成的推流版与预览一并删除。')}</span>
+        </form>
+      </>
+    )
+  }
+</Admin>

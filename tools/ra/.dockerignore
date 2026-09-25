@@ -1,0 +1,7 @@
+# Only pyproject.toml, uv.lock and src/ go into the image. Secrets (cloud.env, backup.env) and local
+# environments stay out of the build context altogether.
+*
+!pyproject.toml
+!uv.lock
+!src/
+src/**/__pycache__

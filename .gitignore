@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.astro/
+.wrangler/
+.seed/
+.dev.vars
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+worker-configuration.d.ts
+
+# Secrets for talking to the deployed site (ra push / ra worker)
+cloud.env
+
+# Encryption keys and B2 credentials for the backup (ra backup)
+backup.env

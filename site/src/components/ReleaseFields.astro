@@ -1,0 +1,51 @@
+---
+import { ERAS, RELEASE_KINDS, RELEASE_KIND_LABELS } from '../lib/constants';
+import type { ReleaseRow } from '../lib/db';
+import { aliasesToText, linksToText } from '../lib/releases';
+
+interface Props {
+  release?: Partial<ReleaseRow>;
+}
+const r = Astro.props.release ?? {};
+const { t } = Astro.locals;
+---
+
+<div class="form-grid">
+  <label for="title">{t('标题（原文）')}</label>
+  <input id="title" type="text" name="title" value={r.title ?? ''} required />
+  <label for="title_reading">{t('读音')}</label>
+  <input id="title_reading" type="text" name="title_reading" value={r.title_reading ?? ''} />
+  <label for="catalog_no">{t('编号')}</label>
+  <input id="catalog_no" type="text" name="catalog_no" value={r.catalog_no ?? ''} placeholder="RTCD-014" />
+  <label for="era_id">{t('名义')}</label>
+  <select id="era_id" name="era_id">
+    {ERAS.map((e) => <option value={e.id} selected={(r.era_id ?? 'rigel-theatre') === e.id}>{e.name}</option>)}
+  </select>
+  <label for="kind">{t('形式')}</label>
+  <select id="kind" name="kind">
+    {RELEASE_KINDS.map((k) => <option value={k} selected={(r.kind ?? 'album') === k}>{t(RELEASE_KIND_LABELS[k])}</option>)}
+  </select>
+  <label for="series">{t('系列')}</label>
+  <input id="series" type="text" name="series" value={r.series ?? ''} placeholder="SOLROS/Lengsel、LYRA …" />
+  <label for="release_date">{t('发行日期')}</label>
+  <input id="release_date" type="text" name="release_date" value={r.release_date ?? ''} placeholder={t('YYYY-MM-DD（可只填年或年月）')} />
+  <label for="event">{t('首发活动')}</label>
+  <input id="event" type="text" name="event" value={r.event ?? ''} placeholder="M3-2026秋 …" />
+  <label for="track_count">{t('曲数')}</label>
+  <input id="track_count" type="number" min="0" name="track_count" value={r.track_count ?? ''} />
+  <label for="price">{t('价格')}</label>
+  <input id="price" type="text" name="price" value={r.price ?? ''} />
+  <label for="aliases">{t('别名（每行一个）')}</label>
+  <textarea id="aliases" name="aliases" placeholder={t('用于匹配文件夹和文件名')}>{aliasesToText(r.aliases ?? '[]')}</textarea>
+  <label for="links">{t('链接（每行「名称 网址」）')}</label>
+  <textarea id="links" name="links" placeholder="official https://rigeltheatre.com/…">{linksToText(r.links ?? '{}')}</textarea>
+  <label for="description">{t('介绍')}</label>
+  <textarea id="description" name="description">{r.description ?? ''}</textarea>
+  <label for="note">{t('管理备注（不公开）')}</label>
+  <textarea id="note" name="note">{r.note ?? ''}</textarea>
+  <label for="state">{t('发布状态')}</label>
+  <select id="state" name="state">
+    <option value="draft" selected={(r.state ?? 'draft') === 'draft'}>{t('草稿（不公开）')}</option>
+    <option value="published" selected={r.state === 'published'}>{t('已发布')}</option>
+  </select>
+</div>

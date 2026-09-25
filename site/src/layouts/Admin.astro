@@ -1,0 +1,69 @@
+---
+import '../styles/admin.css';
+import { HTML_LANG, LANGS, LANG_NAMES } from '../lib/i18n';
+
+interface Props {
+  title: string;
+  wide?: boolean;
+}
+
+const { title, wide = false } = Astro.props;
+const { admin, t, lang } = Astro.locals;
+const path = Astro.url.pathname;
+const msg = Astro.url.searchParams.get('msg');
+const err = Astro.url.searchParams.get('err');
+
+const nav = [
+  { href: '/admin/inbox', label: t('整理台') },
+  { href: '/admin/upload', label: t('上传') },
+  { href: '/admin/releases', label: t('作品') },
+  { href: '/admin/songs', label: t('单曲') },
+  { href: '/admin/missing', label: t('缺档看板') },
+  { href: '/admin/history', label: t('修改记录') },
+  { href: '/admin/storage', label: t('存储与处理') },
+  { href: '/admin/team', label: t('管理组') },
+];
+---
+
+<!doctype html>
+<html lang={HTML_LANG[lang]}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>{title} · {t('管理后台')}</title>
+  </head>
+  <body>
+    <div class="shell">
+      <nav class="side">
+        <a class="brand" href="/admin/inbox">Rigël Archive<small>{t('管理后台')}</small></a>
+        <ul>
+          {
+            nav.map((item) => (
+              <li>
+                <a href={item.href} aria-current={path.startsWith(item.href) ? 'page' : undefined}>
+                  {item.label}
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+        <div class="who">
+          <form method="post" action="/admin/lang" class="lang-switch">
+            <input type="hidden" name="back" value={path + Astro.url.search} />
+            {LANGS.map((l) => (
+              <button type="submit" name="lang" value={l} aria-pressed={l === lang ? 'true' : 'false'}>{LANG_NAMES[l]}</button>
+            ))}
+          </form>
+          {admin?.name ?? admin?.email}<br /><small>{admin?.email}</small>
+        </div>
+      </nav>
+      <main class:list={['main', { wide }]}>
+        <h1>{title}</h1>
+        {msg && <p class="flash ok">{msg}</p>}
+        {err && <p class="flash err">{err}</p>}
+        <slot />
+      </main>
+    </div>
+  </body>
+</html>

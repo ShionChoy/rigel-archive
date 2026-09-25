@@ -1,0 +1,41 @@
+---
+// The 整理台's side panel: a file's preview and key facts, loaded into the page without navigating.
+import { env } from 'cloudflare:workers';
+import FilePreview from '../../../../components/FilePreview.astro';
+import { FILE_KIND_LABELS, FILE_STATE_LABELS, RIGHTS_LABELS, SLOT_LABELS } from '../../../../lib/constants';
+import { db, parseFormat, releaseLabels, type FileRow } from '../../../../lib/db';
+import { formatBytes, formatSpec } from '../../../../lib/format';
+import { derivedFor } from '../../../../lib/processing';
+
+export const partial = true;
+
+const { t } = Astro.locals;
+const database = db();
+const file = await database.prepare('SELECT * FROM files WHERE id = ?').bind(Astro.params.id).first<FileRow>();
+if (!file) return new Response(t('找不到文件'), { status: 404 });
+const [labels, derived] = await Promise.all([
+  file.release_id ? releaseLabels() : Promise.resolve(new Map<string, string>()),
+  derivedFor(database, [file.sha256]),
+]);
+const fmt = parseFormat(file.format);
+const tags = Object.entries(fmt.tags ?? {}).slice(0, 6);
+---
+
+<div class="preview-head">
+  <b>{file.name}</b>
+  <div class="muted mono">{file.dir}</div>
+  <div>
+    <span class="chip">{t(FILE_KIND_LABELS[file.kind] ?? file.kind)}</span>
+    {formatBytes(file.size)} {formatSpec(fmt) && `· ${formatSpec(fmt)}`}
+  </div>
+  <div>
+    <span class={`chip ${file.state}`}>{t(FILE_STATE_LABELS[file.state])}</span>
+    {file.release_id && ` ${labels.get(file.release_id) ?? file.release_id}`}
+    {file.slot && ` · ${t(SLOT_LABELS[file.slot])}`}
+    {file.rights !== 'unknown' && <span class={`chip ${file.rights}`}>{t(RIGHTS_LABELS[file.rights])}</span>}
+  </div>
+  {tags.length > 0 && <div class="muted">{tags.map(([k, v]) => `${k}: ${v}`).join(' · ')}</div>}
+  {file.note && <div class="muted">{file.note}</div>}
+  <p><a href={`/admin/files/${file.id}`}>{t('打开文件页 ›')}</a></p>
+</div>
+<FilePreview file={file} base={env.MEDIA_DEV_BASE ?? ''} derived={file.sha256 ? derived.get(file.sha256) : undefined} />

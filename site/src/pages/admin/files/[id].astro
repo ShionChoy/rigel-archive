@@ -1,0 +1,575 @@
+---
+import { env } from 'cloudflare:workers';
+import Admin from '../../../layouts/Admin.astro';
+import FilePreview from '../../../components/FilePreview.astro';
+import { ChangeSet } from '../../../lib/changes';
+import {
+  ARCHIVE_STATUS_LABELS, FILE_KIND_LABELS, FILE_STATES, FILE_STATE_LABELS, NAME_ENCODING_LABELS, RIGHTS, RIGHTS_LABELS,
+  ROLE_LABELS, SLOTS, SLOT_LABELS, isOneOf,
+} from '../../../lib/constants';
+import { db, parseFormat, parseSuggestion, releaseOptions, suggestionPatch, type FileRow } from '../../../lib/db';
+import { KEEP_REASON_TEXT, deleteFiles, keepReason, keptMessage, originalGone } from '../../../lib/deletion';
+import { codecName, formatBytes, formatDuration, formatTime, percent, withParams } from '../../../lib/format';
+import { N_, errorText, summary, summaryText, translateHtml, UserError } from '../../../lib/i18n';
+import { MIN_AUDIO_SECONDS, derivedFor, redo, type DerivedRow } from '../../../lib/processing';
+import { markCollected } from '../../../lib/releases';
+import { wakeAfter } from '../../../lib/schedule';
+
+const { id } = Astro.params;
+const { t, lang } = Astro.locals;
+const database = db();
+const file = await database
+  .prepare(`SELECT *, ${originalGone('files')} AS gone FROM files WHERE id = ?`)
+  .bind(id)
+  .first<FileRow & { gone: number }>();
+if (!file) return new Response(t('找不到文件'), { status: 404 });
+
+const suggestion = parseSuggestion(file.suggest);
+const fmt = parseFormat(file.format);
+// Members get the archive's path as their folder, so this is also the 整理台 folder of an archive's contents.
+const treePath = file.dir ? `${file.dir}/${file.name}` : file.name;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const label = file.name;
+  const section = form.get('section');
+  if (section === 'delete') {
+    try {
+      if (form.get('confirm') !== 'yes') throw new UserError('请先勾选确认');
+      const r = await deleteFiles(database, Astro.locals.admin!.email, [file.id]);
+      if (r.count === 0) throw new Error(t('没有删除') + keptMessage(r, t));
+      const back = new URL('/admin/inbox', Astro.url);
+      back.searchParams.set('state', 'all');
+      if (file.dir) back.searchParams.set('dir', file.dir);
+      back.searchParams.set('msg', r.members
+        ? t('已删除 {name} 及包内 {n} 个文件，可在修改记录里撤销', { name: label, n: r.members })
+        : t('已删除 {name}，可在修改记录里撤销', { name: label }));
+      return Astro.redirect(back.pathname + back.search, 303);
+    } catch (e) {
+      return Astro.redirect(withParams(Astro.url, { err: errorText(e, t), msg: null }), 303);
+    }
+  }
+  if (section === 'redo') {
+    const task = form.get('task');
+    if ((task === 'derive' || task === 'fingerprint') && file.sha256) {
+      await redo(database, task, file.sha256);
+      wakeAfter(Astro.locals, env);
+    }
+    const msg = task === 'derive' ? t('已排队重新生成推流版与预览，处理程序几分钟内完成') : t('已排队重新计算声学指纹');
+    return Astro.redirect(withParams(Astro.url, { msg, err: null }), 303);
+  }
+  try {
+    let patch: Record<string, unknown>;
+    let change: string;
+    if (section === 'accept') {
+      const p = suggestionPatch(suggestion);
+      if (!p) throw new UserError('这个文件没有可用的建议');
+      patch = p;
+      change = summary('文件 {name}：按建议确认', { name: label });
+    } else {
+      const text = (name: string) => {
+        const v = String(form.get(name) ?? '').trim();
+        return v === '' ? null : v;
+      };
+      const release = text('release_id');
+      const slot = text('slot');
+      const rights = text('rights');
+      const state = text('state');
+      if (slot && !isOneOf(SLOTS, slot)) throw new UserError('未知的版本栏位');
+      if (slot && !release) throw new UserError('选择版本栏位前要先选作品');
+      if (!isOneOf(RIGHTS, rights)) throw new UserError('未知的权属');
+      if (!isOneOf(FILE_STATES, state)) throw new UserError('未知的状态');
+      patch = { release_id: release, slot, rights, state, role: text('role'), note: text('note'), download_name: text('download_name') };
+      change = summary('文件 {name}：手动修改', { name: label });
+    }
+    if (patch.release_id !== file.release_id) patch.track_id = null; // tracks belong to one release
+    const cs = new ChangeSet(database, Astro.locals.admin!.email, change);
+    await cs.update('file', { id: file.id }, patch);
+    await markCollected(cs, [[patch.release_id as string | null, patch.slot as string | null]]);
+    const n = await cs.commit();
+    return Astro.redirect(withParams(Astro.url, { msg: n ? t('已保存') : t('没有改动'), err: null }), 303);
+  } catch (e) {
+    return Astro.redirect(withParams(Astro.url, { err: errorText(e, t), msg: null }), 303);
+  }
+}
+
+type Copy = Pick<FileRow, 'id' | 'dir' | 'name' | 'state' | 'release_id'>;
+const channels = (n: number | undefined) => (n == null ? '' : n === 1 ? t('单声道') : n === 2 ? t('立体声') : t('{n} 声道', { n }));
+const audioSpec = (codec: string | undefined) =>
+  [
+    codecName(codec) + (fmt.lossless ? ` ${fmt.bits ?? '?'} bit` : '') + (fmt.rate ? ` ${fmt.rate / 1000} kHz` : ''),
+    channels(fmt.channels),
+  ].filter(Boolean).join(' ');
+const specLine = [
+  fmt.vcodec ? `${codecName(fmt.vcodec)} ${fmt.width}×${fmt.height}${fmt.fps ? ` ${fmt.fps} fps` : ''}` : '',
+  !fmt.vcodec && fmt.width ? `${codecName(fmt.codec)} ${fmt.width}×${fmt.height}` : '',
+  fmt.vcodec && fmt.acodec ? audioSpec(fmt.acodec) : '',
+  !fmt.vcodec && !fmt.width && fmt.codec ? audioSpec(fmt.codec) : '',
+  formatDuration(fmt.duration),
+  fmt.kbps ? `${fmt.kbps} kbps` : '',
+  fmt.container ?? '',
+  fmt.cover ? t('内嵌封面') : '',
+].filter(Boolean).join(' · ');
+const TAG_LABELS: Record<string, string> = {
+  title: N_('标题'), artist: N_('艺术家'), album: N_('专辑'), album_artist: N_('专辑艺术家'), track: N_('音轨号'), disc: N_('碟号'), date: N_('日期'), genre: N_('流派'),
+};
+type Version = Pick<FileRow, 'id' | 'name' | 'replaces' | 'created_at' | 'uploaded_by' | 'size'>;
+type Task = { task: string; state: string; attempts: number; error: string | null; updated_at: string; version: number };
+type Recording = Copy & { score: number; matched_ms: number; offset_ms: number; mine_first: number; other_duration: number | null };
+const sha = file.sha256;
+const [options, copies, sameAudio, parent, history, older, newer, track, covers, derivedMap, tasks, fingerprint, recordings] = await Promise.all([
+  releaseOptions(),
+  sha
+    ? database
+        .prepare('SELECT id, dir, name, state, release_id FROM files WHERE sha256 = ? AND id != ? ORDER BY dir, name')
+        .bind(sha, file.id)
+        .all<Copy>()
+    : Promise.resolve({ results: [] as Copy[] }),
+  file.pcm_md5
+    ? database
+        .prepare('SELECT id, dir, name, state, release_id FROM files WHERE pcm_md5 = ? AND sha256 IS NOT ? ORDER BY dir, name')
+        .bind(file.pcm_md5, sha)
+        .all<Copy>()
+    : Promise.resolve({ results: [] as Copy[] }),
+  file.member_of
+    ? database.prepare('SELECT id, dir, name FROM files WHERE id = ?').bind(file.member_of).first<Pick<FileRow, 'id' | 'dir' | 'name'>>()
+    : Promise.resolve(null),
+  database
+    .prepare("SELECT at, actor, summary, batch_id FROM revisions WHERE entity = 'file' AND entity_id = ? ORDER BY id DESC LIMIT 20")
+    .bind(file.id)
+    .all<{ at: string; actor: string; summary: string; batch_id: string }>(),
+  // Earlier versions this one replaces (newest first), and the version that replaced this one.
+  file.replaces
+    ? database
+        .prepare(
+          `WITH RECURSIVE chain(id, depth) AS (SELECT ?, 0 UNION ALL SELECT f.replaces, c.depth + 1 FROM files f JOIN chain c ON f.id = c.id WHERE f.replaces IS NOT NULL AND c.depth < 20)
+           SELECT f.id, f.name, f.replaces, f.created_at, f.uploaded_by, f.size FROM chain c JOIN files f ON f.id = c.id ORDER BY c.depth`,
+        )
+        .bind(file.replaces)
+        .all<Version>()
+    : Promise.resolve({ results: [] as Version[] }),
+  database.prepare('SELECT id, name, replaces, created_at, uploaded_by, size FROM files WHERE replaces = ?').bind(file.id).first<Version>(),
+  file.track_id
+    ? database
+        .prepare('SELECT t.disc, t.position, t.title, t.song_id FROM tracks t WHERE t.id = ?')
+        .bind(file.track_id)
+        .first<{ disc: number; position: number; title: string; song_id: string | null }>()
+    : Promise.resolve(null),
+  database.prepare('SELECT id, catalog_no, title FROM releases WHERE cover_file_id = ?').bind(file.id).all<{ id: string; catalog_no: string | null; title: string }>(),
+  derivedFor(database, [sha]),
+  sha
+    ? database.prepare('SELECT task, state, attempts, error, updated_at, version FROM media_tasks WHERE sha256 = ?').bind(sha).all<Task>()
+    : Promise.resolve({ results: [] as Task[] }),
+  sha ? database.prepare('SELECT duration FROM fingerprints WHERE sha256 = ?').bind(sha).first<{ duration: number }>() : Promise.resolve(null),
+  sha
+    ? database
+        .prepare(
+          `SELECT f.id, f.dir, f.name, f.state, f.release_id, m.score, m.matched_ms, m.offset_ms, m.a = ?1 AS mine_first,
+                  fp.duration AS other_duration
+           FROM acoustic_matches m
+           JOIN files f ON f.sha256 = CASE WHEN m.a = ?1 THEN m.b ELSE m.a END
+           LEFT JOIN fingerprints fp ON fp.sha256 = f.sha256
+           WHERE m.a = ?1 OR m.b = ?1
+           ORDER BY m.matched_ms DESC, f.dir, f.name LIMIT 100`,
+        )
+        .bind(sha)
+        .all<Recording>()
+    : Promise.resolve({ results: [] as Recording[] }),
+]);
+const labels = new Map(options.map((o) => [o.id, o.label]));
+const mediaBase = env.MEDIA_DEV_BASE;
+const keep = keepReason(file);
+const derived = sha ? derivedMap.get(sha) : undefined;
+const taskOf = (name: string) => tasks.results.find((x) => x.task === name);
+const deriveTask = taskOf('derive');
+const fpTask = taskOf('fingerprint');
+
+// Which derived files this kind of file gets, and whether this one is left out.
+const MEDIA = new Set(['audio', 'video', 'image']);
+const tooShort = file.kind === 'audio' && (fmt.duration ?? 0) < MIN_AUDIO_SECONDS && !file.release_id;
+const derivable = MEDIA.has(file.kind) && !!file.blob_key && !fmt.probe_error && !tooShort && file.state !== 'ignored';
+const fingerprintable = (file.kind === 'audio' || file.kind === 'video') && derivable && (fmt.duration ?? 0) > 0;
+const DERIVED_LABELS: Record<string, string> = {
+  stream: N_('无损推流（FLAC）'), aac: N_('AAC 推流'), wave: N_('波形'), img240: N_('缩略图 240 px'),
+  img640: N_('预览图 640 px'), img1600: N_('预览图 1600 px'), video: N_('站内视频（MP4）'), poster: N_('视频封面'),
+};
+const DERIVED_ORDER = Object.keys(DERIVED_LABELS);
+const derivedInfo = (row: DerivedRow) => {
+  const info = row.info ? (JSON.parse(row.info) as Record<string, number | string | boolean | undefined>) : {};
+  return [
+    info.codec === 'flac' && info.bits ? `FLAC ${info.bits}/${Number(info.rate) / 1000}` : '',
+    info.codec === 'aac' ? `AAC ${info.kbps} kbps` : '',
+    info.width ? `${info.width}×${info.height}` : '',
+    info.vcodec ? `H.264${info.acodec ? ' + AAC' : ''}` : '',
+    info.remuxed === true ? t('原视频只换封装') : info.remuxed === false ? t('重新编码') : '',
+    info.original ? t('直接用原件') : '',
+    info.damaged ? t('原件损坏，只解出一部分') : '',
+    info.points ? t('{n} 点', { n: Number(info.points) }) : '',
+  ].filter(Boolean).join(' · ');
+};
+const taskState = (task: Task | undefined, eligible: boolean) =>
+  !eligible ? null
+    : !task ? t('等待处理程序')
+    : task.state === 'running' ? t('处理中（{at} 开始）', { at: formatTime(task.updated_at) })
+    : task.state === 'failed' ? (task.attempts >= 3 ? t('失败，已停止重试') : t('失败，稍后自动重试（第 {n} 次）', { n: task.attempts }))
+    : t('已完成（{at}）', { at: formatTime(task.updated_at) });
+const seconds = (ms: number) => formatDuration(ms / 1000);
+const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
+---
+
+<Admin title={file.name}>
+  <p class="muted mono">
+    {file.source_path ?? treePath}
+    {file.member_path && <> › {file.member_path.split('!/').join(' › ')}</>}
+  </p>
+
+  {
+    newer && (
+      <p class="flash err">
+        <Fragment set:html={translateHtml(lang, '这是旧版本，已被 <a href="{href}">{name}</a> 替换（{who} · {at}）。', {
+          href: `/admin/files/${newer.id}`, name: newer.name, who: newer.uploaded_by ?? '', at: formatTime(newer.created_at),
+        })} />
+      </p>
+    )
+  }
+
+  <FilePreview file={file} base={mediaBase} derived={derived} />
+
+  <div class="panel">
+    <div class="form-grid">
+      <label>{t('类型')}</label><span><span class="chip">{t(FILE_KIND_LABELS[file.kind] ?? file.kind)}</span> .{file.ext}</span>
+      <label>{t('大小')}</label><span>{t('{size}（{bytes} 字节）', { size: formatBytes(file.size), bytes: file.size.toLocaleString() })}</span>
+      <label>{t('修改时间')}</label><span class="mono">{file.mtime ?? '—'}</span>
+      <label>SHA-256</label><span class="mono">{sha ?? t('尚未计算')}</span>
+      {specLine && (<><label>{t('规格')}</label><span>{specLine}</span></>)}
+      {fmt.probe_error && (<><label>{t('规格')}</label><span class="muted">{t('读取失败：{error}', { error: fmt.probe_error })}</span></>)}
+      {
+        fmt.tags && (
+          <>
+            <label>{t('内嵌标签')}</label>
+            <span>{Object.entries(fmt.tags).map(([k, v]) => <div><span class="muted">{t(TAG_LABELS[k] ?? k)}：</span>{v}</div>)}</span>
+          </>
+        )
+      }
+      {file.pcm_md5 && (<><label>PCM MD5</label><span class="mono">{file.pcm_md5}</span></>)}
+      <label>{t('来源')}</label>
+      <span>
+        {file.origin === 'nas' ? t('合辑（本机副本）') : t('后台上传：{who} · {at}', { who: file.uploaded_by ?? '', at: formatTime(file.created_at) })}
+        {file.gone ? <span class="chip missing">{t('原件已不存在')}</span> : null}
+        {file.gone ? <div class="muted">{t('最近一次导入时 source 里已没有这个文件（可能被移动、改名或删除），这条记录可以删除。')}</div> : null}
+      </span>
+      {
+        file.origin === 'upload' && (
+          <>
+            <label>{t('核对')}</label>
+            <span>
+              {fmt.upload_error ? <span class="chip missing">{t(fmt.upload_error)}</span>
+                : file.checked_at ? t('已核对 SHA-256 并读取规格（{at}）', { at: formatTime(file.checked_at) })
+                : <span class="muted">{t('等待处理程序核对 SHA-256、读取规格（上传后几分钟内自动完成）')}</span>}
+            </span>
+          </>
+        )
+      }
+      {
+        parent && (
+          <>
+            <label>{t('所在压缩包')}</label>
+            <span><a href={`/admin/files/${parent.id}`}>{parent.name}</a> <span class="muted mono">{parent.dir}</span></span>
+          </>
+        )
+      }
+      {
+        fmt.archive && (
+          <>
+            <label>{t('压缩包')}</label>
+            <span>
+              {fmt.archive.toUpperCase()} · {t('{n} 个文件', { n: fmt.files ?? 0 })}
+              {fmt.encoding && ` · ${t('文件名编码 {encoding}', { encoding: t(NAME_ENCODING_LABELS[fmt.encoding] ?? fmt.encoding) })}`}
+              {' '}<span class:list={['chip', fmt.status === 'ok' ? 'classified' : 'missing']}>{t(ARCHIVE_STATUS_LABELS[fmt.status ?? ''] ?? fmt.status ?? '')}</span>
+              {' '}<a href={`/admin/inbox?state=all&dir=${encodeURIComponent(treePath)}`}>{t('在整理台查看包内文件')}</a>
+              {fmt.error && <div class="muted">{fmt.error}</div>}
+            </span>
+          </>
+        )
+      }
+      <label>{t('存储')}</label><span>{file.blob_key ?? t('尚未上传到存储')}</span>
+      {
+        track && (
+          <>
+            <label>{t('曲目')}</label>
+            <span>
+              {track.disc > 1 ? `${track.disc}-` : ''}{track.position}. {track.title}
+              {track.song_id && <> · <a href={`/admin/songs/${track.song_id}`}>{t('单曲的全部版本')}</a></>}
+            </span>
+          </>
+        )
+      }
+      {
+        covers.results.length > 0 && (
+          <>
+            <label>{t('用作封面')}</label>
+            <span>{covers.results.map((r) => <a href={`/admin/releases/${r.id}`}>{r.catalog_no ?? r.title} </a>)}</span>
+          </>
+        )
+      }
+      {
+        older.results.length > 0 && (
+          <>
+            <label>{t('旧版本')}</label>
+            <span>
+              {older.results.map((v) => (
+                <div><a href={`/admin/files/${v.id}`}>{v.name}</a> <span class="muted">{formatBytes(v.size)} · {formatTime(v.created_at)}</span></div>
+              ))}
+            </span>
+          </>
+        )
+      }
+    </div>
+  </div>
+
+  {
+    MEDIA.has(file.kind) && sha && (
+      <div class="panel" id="derived">
+        <b>{t('推流版与预览')}</b>{' '}
+        <span class="muted">{t('处理程序从原件生成，供站内播放与预览；原件不变，下载的始终是原件。')}</span>
+        {!derivable && (
+          <p class="muted">
+            {!file.blob_key ? t('原件还没有存入云端，存入后自动生成。')
+              : fmt.probe_error ? t('规格读取失败，不能生成。')
+              : tooShort ? t('短于 {n} 秒且没有归入作品的音频（多为 BMS 键音）不生成；归入作品后会自动生成。', { n: MIN_AUDIO_SECONDS })
+              : t('已忽略的文件不生成。')}
+          </p>
+        )}
+        {derivable && (
+          <p>
+            {taskState(deriveTask, derivable)}
+            {deriveTask?.error && <span class="chip missing" title={deriveTask.error}>{deriveTask.error.slice(0, 120)}</span>}
+          </p>
+        )}
+        {derived && derived.size > 0 && (
+          <table class="grid">
+            <tbody>
+              {[...derived.values()].sort((a, b) => DERIVED_ORDER.indexOf(a.kind) - DERIVED_ORDER.indexOf(b.kind)).map((row) => (
+                <tr>
+                  <td>{t(DERIVED_LABELS[row.kind] ?? row.kind)}</td>
+                  <td>{derivedInfo(row)}</td>
+                  <td class="num">{formatBytes(row.size)}</td>
+                  <td><a href={`/admin/media/${row.key}`} target="_blank" rel="noopener">{t('打开')}</a></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {fingerprintable && (
+          <p>
+            {t('声学指纹')}：{fingerprint ? t('已计算') : taskState(fpTask, true)}
+            {fpTask?.state === 'failed' && fpTask.error && <span class="chip missing" title={fpTask.error}>{fpTask.error.slice(0, 120)}</span>}
+          </p>
+        )}
+        {derivable && (
+          <form method="post" class="inline">
+            <input type="hidden" name="section" value="redo" />
+            <button name="task" value="derive">{t('重新生成推流版与预览')}</button>
+            {fingerprintable && <button name="task" value="fingerprint">{t('重新计算声学指纹')}</button>}
+          </form>
+        )}
+      </div>
+    )
+  }
+
+  {
+    !newer && (
+      <div class="panel" id="replace" data-file={file.id} data-sha={sha ?? ''}>
+        <b>{t('上传新版本')}</b>{' '}
+        <span class="muted">
+          {t('例如更清晰的扫图、修正过的母带。新版本接替这个文件的作品、栏位、曲目与权属，这个文件保留为旧版本；可在修改记录里撤销。')}
+        </span>
+        <p>
+          <label class="button">{t('选择文件')}<input type="file" hidden /></label>
+          <span data-status class="muted"></span>
+          <progress hidden max="1" value="0"></progress>
+        </p>
+      </div>
+    )
+  }
+
+  {
+    suggestion && (
+      <form method="post" class="panel">
+        <input type="hidden" name="section" value="accept" />
+        <b>{t('脚本建议')}</b>{t('（规则「{rule}」，把握度 {confidence}）：', { rule: t(suggestion.rule), confidence: percent(suggestion.confidence) })}
+        {suggestion.state === 'ignored' && ` ${t('忽略')}`}
+        {suggestion.release_id && ` ${labels.get(suggestion.release_id) ?? suggestion.release_id}`}
+        {suggestion.slot && ` · ${t(SLOT_LABELS[suggestion.slot])}`}
+        {suggestion.rights && ` · ${t(RIGHTS_LABELS[suggestion.rights])}`}
+        {suggestion.role && ` · ${t(ROLE_LABELS[suggestion.role] ?? suggestion.role)}`}
+        {suggestion.note && <div class="muted">{suggestion.note}</div>}
+        {suggestionPatch(suggestion) && <p><button type="submit">{t('按建议确认')}</button></p>}
+      </form>
+    )
+  }
+
+  <form method="post" class="panel">
+    <input type="hidden" name="section" value="edit" />
+    <div class="form-grid">
+      <label for="release_id">{t('作品')}</label>
+      <select id="release_id" name="release_id">
+        <option value="">{t('（不属于任何作品）')}</option>
+        {options.map((o) => <option value={o.id} selected={file.release_id === o.id}>{o.label}</option>)}
+      </select>
+      <label for="slot">{t('版本栏位')}</label>
+      <select id="slot" name="slot">
+        <option value="">{t('不分栏（相关资料）')}</option>
+        {SLOTS.map((s) => <option value={s} selected={file.slot === s}>{t(SLOT_LABELS[s])}</option>)}
+      </select>
+      <label for="rights">{t('权属')}</label>
+      <select id="rights" name="rights">
+        {RIGHTS.map((r) => <option value={r} selected={file.rights === r}>{t(RIGHTS_LABELS[r])}</option>)}
+      </select>
+      <label for="state">{t('状态')}</label>
+      <select id="state" name="state">
+        {FILE_STATES.map((s) => <option value={s} selected={file.state === s}>{t(FILE_STATE_LABELS[s])}</option>)}
+      </select>
+      <label for="role">{t('用途')}</label>
+      <input id="role" type="text" name="role" value={file.role ?? ''} placeholder="master、cover、booklet、web_archive …" />
+      <label for="download_name">{t('下载文件名')}</label>
+      <input id="download_name" type="text" name="download_name" value={file.download_name ?? ''} placeholder={t('留空则按作品与栏位自动生成')} />
+      <label for="note">{t('备注')}</label>
+      <textarea id="note" name="note">{file.note ?? ''}</textarea>
+    </div>
+    <p><button class="primary" type="submit">{t('保存')}</button></p>
+  </form>
+
+  {
+    copies.results.length > 0 && (
+      <div class="panel">
+        <b>{t('内容完全相同的文件（{n}）', { n: copies.results.length })}</b>
+        <ul>
+          {copies.results.map((c) => (
+            <li>
+              <a href={`/admin/files/${c.id}`} class="mono">{c.dir ? `${c.dir}/${c.name}` : c.name}</a>{' '}
+              <span class={`chip ${c.state}`}>{t(FILE_STATE_LABELS[c.state])}</span>
+              {c.release_id && ` ${labels.get(c.release_id) ?? c.release_id}`}
+            </li>
+          ))}
+        </ul>
+      </div>
+    )
+  }
+
+  {
+    sameAudio.results.length > 0 && (
+      <div class="panel">
+        <b>{t('同一音频的其他文件（{n}）', { n: sameAudio.results.length })}</b>{' '}
+        <span class="muted">{t('解码后的音频完全相同，文件本身不同（例如 WAV 与 FLAC，或只有标签、封面不同）。')}</span>
+        <ul>
+          {sameAudio.results.map((c) => (
+            <li>
+              <a href={`/admin/files/${c.id}`} class="mono">{c.dir ? `${c.dir}/${c.name}` : c.name}</a>{' '}
+              <span class={`chip ${c.state}`}>{t(FILE_STATE_LABELS[c.state])}</span>
+              {c.release_id && ` ${labels.get(c.release_id) ?? c.release_id}`}
+            </li>
+          ))}
+        </ul>
+      </div>
+    )
+  }
+
+  {
+    recordings.results.length > 0 && (
+      <div class="panel" id="recordings">
+        <b>{t('同一录音（声学指纹，{n}）', { n: recordings.results.length })}</b>{' '}
+        <span class="muted">
+          {t('听起来是同一录音的其他文件：不同编码或母带、剪辑版，或整张抓轨、合辑里的一段。可用来挂到同一首曲目，或找出合辑里的社团曲目。')}
+        </span>
+        <table class="grid">
+          <thead>
+            <tr><th>{t('文件')}</th><th>{t('相似度')}</th><th>{t('匹配长度')}</th><th>{t('位置')}</th></tr>
+          </thead>
+          <tbody>
+            {recordings.results.map((r) => {
+              // where the matching part starts in the other file minus where it starts in this one
+              const shift = (r.mine_first ? r.offset_ms : -r.offset_ms) / 1000;
+              const share = myDuration ? Math.min(1, r.matched_ms / 1000 / myDuration) : null;
+              return (
+                <tr>
+                  <td>
+                    <a href={`/admin/files/${r.id}`} class="mono">{r.dir ? `${r.dir}/${r.name}` : r.name}</a>{' '}
+                    <span class={`chip ${r.state}`}>{t(FILE_STATE_LABELS[r.state])}</span>
+                    {r.release_id && ` ${labels.get(r.release_id) ?? r.release_id}`}
+                  </td>
+                  <td>{percent(r.score)}</td>
+                  <td>{seconds(r.matched_ms)}{share !== null && <span class="muted"> {t('（本文件的 {share}）', { share: percent(share) })}</span>}</td>
+                  <td class="muted">
+                    {Math.abs(shift) < 3 ? t('对齐') : shift > 0 ? t('在对方的 {at} 处', { at: formatDuration(shift) }) : t('对方在本文件的 {at} 处', { at: formatDuration(-shift) })}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  <form method="post" class="panel danger-zone">
+    <input type="hidden" name="section" value="delete" />
+    <b>{t('删除')}</b>
+    {
+      keep ? (
+        <p class="muted">{t('不能删除：{reason}。', { reason: t(KEEP_REASON_TEXT[keep]) })}</p>
+      ) : (
+        <>
+          <p class="muted">
+            {fmt.archive
+              ? t('只删除这条记录，连同包内 {n} 个文件，source 里的原件不受影响。', { n: fmt.files ?? 0 })
+              : t('只删除这条记录，source 里的原件不受影响。')}
+            {t('删除后可以在修改记录里撤销；存储里的内容在没有任何文件引用后还会保留 {days} 天。', { days: env.STORAGE_GRACE_DAYS || 30 })}
+          </p>
+          <label><input type="checkbox" name="confirm" value="yes" required /> {t('确认删除')}</label>{' '}
+          <button class="danger" type="submit">{t('删除')}</button>
+        </>
+      )
+    }
+  </form>
+
+  <h2>{t('修改记录')}</h2>
+  {history.results.length === 0 && <p class="muted">{t('没有修改记录。')}</p>}
+  <ul>
+    {history.results.map((h) => <li><span class="mono">{formatTime(h.at)}</span> {summaryText(h.summary, t)} <span class="muted">{h.actor}</span></li>)}
+  </ul>
+  {history.results.length > 0 && <a href={`/admin/history?entity=file&id=${file.id}`}>{t('在修改记录中查看')}</a>}
+</Admin>
+
+<script>
+  import { call, hashFile, storeFile } from '../../../scripts/uploader';
+  import { t } from '../../../scripts/i18n';
+
+  const box = document.querySelector<HTMLElement>('#replace');
+  const input = box?.querySelector<HTMLInputElement>('input[type="file"]');
+  const status = box?.querySelector<HTMLElement>('[data-status]');
+  const bar = box?.querySelector<HTMLProgressElement>('progress');
+  input?.addEventListener('change', async () => {
+    const file = input.files?.[0];
+    if (!file || !box || !status || !bar) return;
+    const say = (text: string, value?: number) => {
+      status.textContent = text;
+      bar.hidden = value === undefined;
+      if (value !== undefined) bar.value = value;
+    };
+    try {
+      say(t('计算 SHA-256'), 0);
+      const sha = await hashFile(file, (done) => say(t('计算 SHA-256'), done));
+      if (sha === box.dataset.sha) throw new Error(t('新文件与原文件内容完全相同'));
+      const check = await call<{ stored: boolean }>('/admin/api/upload/check', { sha256: sha });
+      if (!check.stored) await storeFile(file, sha, (loaded) => say(t('上传中'), file.size ? loaded / file.size : 1));
+      say(t('登记新版本'));
+      const { id } = await call<{ id: string }>('/admin/api/upload/replace', {
+        old: box.dataset.file, sha256: sha, size: file.size, name: file.name, mtime: new Date(file.lastModified).toISOString(),
+      });
+      location.href = `/admin/files/${id}?msg=${encodeURIComponent(t('已上传新版本；处理程序核对后显示规格'))}`;
+    } catch (e) {
+      say(t('失败：{error}（重新选择同一文件会接着传）', { error: e instanceof Error ? e.message : String(e) }));
+    }
+  });
+</script>

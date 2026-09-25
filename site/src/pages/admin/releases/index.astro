@@ -1,0 +1,81 @@
+---
+import Admin from '../../../layouts/Admin.astro';
+import { ERAS, RELEASE_KIND_LABELS, SLOTS, SLOT_LABELS, SLOT_STATUS_LABELS, type Slot, type SlotStatus } from '../../../lib/constants';
+import { db, type ReleaseRow } from '../../../lib/db';
+import { withParams } from '../../../lib/format';
+import { N_ } from '../../../lib/i18n';
+
+const url = Astro.url;
+const { t } = Astro.locals;
+const era = url.searchParams.get('era') ?? '';
+
+type Row = Pick<ReleaseRow, 'id' | 'catalog_no' | 'era_id' | 'kind' | 'series' | 'title' | 'release_date' | 'state'> & {
+  slots: string;
+  files: number;
+};
+
+const stmt = db().prepare(
+  `SELECT r.id, r.catalog_no, r.era_id, r.kind, r.series, r.title, r.release_date, r.state,
+          (SELECT json_group_object(slot, status) FROM release_slots WHERE release_id = r.id) AS slots,
+          (SELECT count(*) FROM files WHERE release_id = r.id) AS files
+   FROM releases r JOIN eras e ON e.id = r.era_id
+   ${era ? 'WHERE r.era_id = ?' : ''}
+   ORDER BY e.sort, r.release_date DESC NULLS LAST, r.catalog_no, r.title`,
+);
+const { results } = await (era ? stmt.bind(era) : stmt).all<Row>();
+// One-character column marks (the table header explains them).
+const short: Record<Slot, string> = { cd: 'CD', cd_rip: N_('抓'), digital: N_('数'), streaming: N_('流'), bonus: N_('特'), scans: N_('扫'), pv: 'PV' };
+---
+
+<Admin title={t('作品')}>
+  <div class="filters">
+    <a class:list={['button', { primary: !era }]} href={withParams(url, { era: null })}>{t('全部')}</a>
+    {ERAS.map((e) => <a class:list={['button', { primary: era === e.id }]} href={withParams(url, { era: e.id })}>{e.name}</a>)}
+    <a class="button primary" href="/admin/releases/new" style="margin-left:auto">{t('新建作品')}</a>
+  </div>
+
+  <table class="grid">
+    <thead>
+      <tr>
+        <th>{t('编号')}</th>
+        <th>{t('作品')}</th>
+        <th>{t('发行')}</th>
+        <th>{t('形式')}</th>
+        <th>{t('版本栏位（{legend}）', { legend: SLOTS.map((s) => `${t(short[s])}=${t(SLOT_LABELS[s])}`).join(t('，')) })}</th>
+        <th class="num">{t('文件')}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {
+        results.map((r) => {
+          const slots = JSON.parse(r.slots ?? '{}') as Partial<Record<Slot, SlotStatus>>;
+          return (
+            <tr>
+              <td class="mono">{r.catalog_no ?? '—'}</td>
+              <td>
+                <a href={`/admin/releases/${r.id}`}>{r.title}</a>
+                {r.state === 'draft' && <span class="chip">{t('草稿')}</span>}
+                {r.series && <div class="muted">{r.series}</div>}
+              </td>
+              <td class="mono">{r.release_date ?? '—'}</td>
+              <td>{t(RELEASE_KIND_LABELS[r.kind])}</td>
+              <td>
+                <div class="slots">
+                  {SLOTS.map((s) => {
+                    const status = slots[s];
+                    return (
+                      <span class={`chip ${status ?? 'missing'}`} title={`${t(SLOT_LABELS[s])}：${status ? t(SLOT_STATUS_LABELS[status]) : t('无状态')}`}>
+                        {t(short[s])}
+                      </span>
+                    );
+                  })}
+                </div>
+              </td>
+              <td class="num"><a href={`/admin/inbox?state=all&release=${r.id}`}>{r.files}</a></td>
+            </tr>
+          );
+        })
+      }
+    </tbody>
+  </table>
+</Admin>

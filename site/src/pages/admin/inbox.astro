@@ -1,0 +1,381 @@
+---
+import Admin from '../../layouts/Admin.astro';
+import DirTree from '../../components/DirTree.astro';
+import {
+  ARCHIVE_STATUS_LABELS, FILE_KIND_LABELS, FILE_STATES, FILE_STATE_LABELS, RIGHTS, RIGHTS_LABELS, ROLE_LABELS, SLOTS,
+  SLOT_LABELS,
+} from '../../lib/constants';
+import { db, parseFormat, parseSuggestion, releaseOptions, type FileRow } from '../../lib/db';
+import { formatBytes, formatSpec, percent, withParams } from '../../lib/format';
+import { keptMessage, originalGone } from '../../lib/deletion';
+import { errorText, summaryText, UserError } from '../../lib/i18n';
+import { applyInboxAction, dirTree, idsForFilter, parseInboxAction, readFilters, whereClause } from '../../lib/inbox';
+
+const PAGE_SIZE = 300;
+const url = Astro.url;
+const filters = readFilters(url.searchParams);
+const { t } = Astro.locals;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  try {
+    const action = parseInboxAction(form);
+    const ids = form.get('scope') === 'filter' ? await idsForFilter(filters) : form.getAll('ids').map(String);
+    if (ids.length === 0) throw new UserError('没有选中文件');
+    const r = await applyInboxAction(Astro.locals.admin!.email, ids, action);
+    const skipped = r.skipped ? t('，{n} 个没有可用建议已跳过', { n: r.skipped }) : '';
+    const low = r.lowConfidence ? t('，{n} 个把握度低于 50% 已跳过（请逐个确认或手动归入）', { n: r.lowConfidence }) : '';
+    const done = summaryText(r.summary, t);
+    const head = action.action === 'delete' ? done : t('{done}：实际改动 {n} 个', { done, n: r.changed });
+    return Astro.redirect(withParams(url, { msg: `${head}${skipped}${low}${r.kept ? keptMessage(r.kept, t) : ''}`, err: null }), 303);
+  } catch (e) {
+    return Astro.redirect(withParams(url, { err: errorText(e, t), msg: null }), 303);
+  }
+}
+
+const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+const byRelease = url.searchParams.get('group') === 'release';
+const SUGGESTED = "json_extract(suggest, '$.release_id')";
+const w = whereClause(filters);
+const database = db();
+
+type Row = Pick<
+  FileRow,
+  'id' | 'dir' | 'name' | 'size' | 'kind' | 'rights' | 'state' | 'release_id' | 'slot' | 'suggest' | 'note' | 'sha256' | 'format' | 'origin' | 'dup_of'
+> & {
+  copies: number;
+  same_audio: number;
+  gone: number;
+  old: number;
+  sug_release: string | null;
+  recordings: number;
+};
+
+const [totals, rowsResult, stateCounts, tree, options] = await Promise.all([
+  database.prepare(`SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM files ${w.sql}`).bind(...w.binds).first<{ n: number; bytes: number }>(),
+  database
+    .prepare(
+      `SELECT id, dir, name, size, kind, rights, state, release_id, slot, suggest, note, sha256, format, origin, dup_of,
+              ${originalGone('files')} AS gone, ${SUGGESTED} AS sug_release,
+              EXISTS (SELECT 1 FROM files n WHERE n.replaces = files.id) AS old,
+              CASE WHEN sha256 IS NULL THEN 1 ELSE (SELECT count(*) FROM files f2 WHERE f2.sha256 = files.sha256) END AS copies,
+              CASE WHEN pcm_md5 IS NULL THEN 1
+                   ELSE (SELECT count(DISTINCT sha256) FROM files f3 WHERE f3.pcm_md5 = files.pcm_md5) END AS same_audio,
+              CASE WHEN sha256 IS NULL THEN 0
+                   ELSE (SELECT count(*) FROM acoustic_matches m WHERE m.a = files.sha256 OR m.b = files.sha256) END AS recordings
+       FROM files ${w.sql} ORDER BY ${byRelease ? `${SUGGESTED} IS NULL, ${SUGGESTED}, ` : ''}dir, name LIMIT ? OFFSET ?`,
+    )
+    .bind(...w.binds, PAGE_SIZE, (page - 1) * PAGE_SIZE)
+    .all<Row>(),
+  database.prepare('SELECT state, count(*) AS n FROM files GROUP BY state').all<{ state: string; n: number }>(),
+  dirTree(filters.state),
+  releaseOptions(),
+]);
+
+const labels = new Map(options.map((o) => [o.id, o.label]));
+const counts = new Map(stateCounts.results.map((r) => [r.state, r.n]));
+const allCount = stateCounts.results.reduce((n, r) => n + r.n, 0);
+const total = totals?.n ?? 0;
+const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+// Rows come grouped by folder, or by the release the rules suggest (then by folder inside each).
+const groups: { key: string; label: string; href: string | null; rows: Row[] }[] = [];
+for (const row of rowsResult.results) {
+  const key = byRelease ? row.sug_release ?? '' : row.dir;
+  const last = groups.at(-1);
+  if (last && last.key === key) last.rows.push(row);
+  else if (byRelease) {
+    groups.push({
+      key, rows: [row],
+      label: key ? t('建议：{release}', { release: labels.get(key) ?? key }) : t('没有作品建议'),
+      href: key ? `/admin/releases/${key}` : null,
+    });
+  } else groups.push({ key, label: row.dir || t('（根目录）'), href: withParams(url, { dir: row.dir, page: null }), rows: [row] });
+}
+
+const tabs = [...FILE_STATES.map((s) => ({ id: s, label: t(FILE_STATE_LABELS[s]), n: counts.get(s) ?? 0 })), { id: 'all', label: t('全部'), n: allCount }];
+---
+
+<Admin title={t('整理台')} wide>
+  <p class="muted">
+    {t('脚本导入与后台上传的文件都在这里确认归类。勾选文件后用底部工具栏批量处理；每次操作都记入修改记录，可以撤销。')}
+  </p>
+
+  <div class="filters">
+    {
+      tabs.map((tab) => (
+        <a class:list={['button', { primary: filters.state === tab.id }]} href={withParams(url, { state: tab.id, page: null })}>
+          {tab.label} <span class="n">{tab.n}</span>
+        </a>
+      ))
+    }
+  </div>
+
+  <form class="filters" method="get">
+    <input type="hidden" name="state" value={filters.state} />
+    <input type="hidden" name="dir" value={filters.dir} />
+    <label>{t('搜索路径')} <input type="search" name="q" value={filters.q} placeholder={t('文件名或目录')} /></label>
+    <label>{t('类型')}
+      <select name="kind">
+        <option value="">{t('全部')}</option>
+        {Object.entries(FILE_KIND_LABELS).map(([k, v]) => <option value={k} selected={filters.kind === k}>{t(v)}</option>)}
+      </select>
+    </label>
+    <label>{t('建议')}
+      <select name="sug">
+        <option value="">{t('全部')}</option>
+        <option value="release" selected={filters.sug === 'release'}>{t('有作品建议')}</option>
+        <option value="rights" selected={filters.sug === 'rights'}>{t('只有权属建议')}</option>
+        <option value="none" selected={filters.sug === 'none'}>{t('没有建议')}</option>
+      </select>
+    </label>
+    <label>{t('作品')}
+      <select name="release">
+        <option value="">{t('全部')}</option>
+        {options.map((o) => <option value={o.id} selected={filters.release === o.id}>{o.label}</option>)}
+      </select>
+    </label>
+    <label>{t('来源')}
+      <select name="origin">
+        <option value="">{t('全部')}</option>
+        <option value="nas" selected={filters.origin === 'nas'}>{t('合辑')}</option>
+        <option value="upload" selected={filters.origin === 'upload'}>{t('后台上传')}</option>
+        <option value="gone" selected={filters.origin === 'gone'}>{t('原件已不存在')}</option>
+      </select>
+    </label>
+    <label>{t('分组')}
+      <select name="group">
+        <option value="">{t('按来源文件夹')}</option>
+        <option value="release" selected={byRelease}>{t('按建议作品')}</option>
+      </select>
+    </label>
+    <label>{t('权属')}
+      <select name="rights">
+        <option value="">{t('全部')}</option>
+        {RIGHTS.map((r) => <option value={r} selected={filters.rights === r}>{t(RIGHTS_LABELS[r])}</option>)}
+      </select>
+    </label>
+    <label title={t('声学指纹比对：听起来是同一录音的文件（不同编码、母带、剪辑，或整张抓轨里的一段）')}>{t('同一录音')}
+      <select name="acoustic">
+        <option value="">{t('全部')}</option>
+        <option value="any" selected={filters.acoustic === 'any'}>{t('与其他文件是同一录音')}</option>
+        <option value="own" selected={filters.acoustic === 'own'}>{t('与社团自有的文件是同一录音')}</option>
+      </select>
+    </label>
+    <button type="submit">{t('筛选')}</button>
+    {filters.dir && <a href={withParams(url, { dir: null, page: null })}>{t('清除目录：{dir}', { dir: filters.dir })}</a>}
+  </form>
+
+  <div class="inbox-layout">
+    <nav class="tree" aria-label={t('目录')}>
+      <a class:list={{ current: !filters.dir }} href={withParams(url, { dir: null, page: null })}>{t('全部目录')}</a>
+      <span class="n">{tree.total}</span>
+      <DirTree nodes={tree.nodes} current={filters.dir} url={url} />
+    </nav>
+
+    <form id="inbox-form" method="post" action={url.pathname + url.search}>
+      <p class="muted">
+        {t('共 {n} 个文件，{size}；本页显示 {shown} 个。', { n: total, size: formatBytes(totals?.bytes), shown: rowsResult.results.length })}
+      </p>
+      <table class="grid">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="select-all" aria-label={t('全选本页')} /></th>
+            <th>{t('文件')}</th>
+            <th class="num">{t('大小')}</th>
+            <th>{t('规格')}</th>
+            <th>{t('类型')}</th>
+            <th>{t('脚本建议')}</th>
+            <th>{t('当前归类')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {
+            groups.map((g, gi) => (
+              <>
+                <tr class="group">
+                  <td><input type="checkbox" data-group-toggle={`g${gi}`} aria-label={t('全选本组')} /></td>
+                  <td colspan="6">
+                    {g.href ? <a href={g.href}>{g.label}</a> : g.label}
+                    <span class="muted"> · {t('{n} 个', { n: g.rows.length })}</span>
+                  </td>
+                </tr>
+                {g.rows.map((f) => {
+                  const s = parseSuggestion(f.suggest);
+                  const fmt = parseFormat(f.format);
+                  const inside = f.dir ? `${f.dir}/${f.name}` : f.name;
+                  return (
+                    <tr>
+                      <td><input type="checkbox" name="ids" value={f.id} data-group={`g${gi}`} /></td>
+                      <td class="name">
+                        <button type="button" class="peek" data-peek={f.id} title={t('在右侧预览（j / k 切换上下一个）')} aria-label={t('预览')}>▸</button>
+                        <a href={`/admin/files/${f.id}`}>{f.name}</a>
+                        {byRelease && <div class="muted mono">{f.dir}</div>}
+                        {f.old ? <span class="chip ignored" title={t('已上传新版本替换')}>{t('旧版本')}</span> : null}
+                        {f.dup_of && <a class="chip ignored" href={`/admin/files/${f.dup_of}`} title={t('标为重复，指向保留的那份')}>{t('重复 → 保留的副本')}</a>}
+                        {f.origin === 'upload' && <span class="chip planned">{t('上传')}</span>}
+                        {f.gone ? <span class="chip missing" title={t('最近一次导入时 source 里已没有这个文件，可以删除')}>{t('原件已不存在')}</span> : null}
+                        {fmt.upload_error && <span class="chip missing" title={fmt.upload_error}>{t('上传内容有误')}</span>}
+                        {f.copies > 1 && <span class="chip partial" title={t('SHA-256 相同的文件数')}>{t('重复 ×{n}', { n: f.copies })}</span>}
+                        {f.same_audio > 1 && (
+                          <span class="chip planned" title={t('解码后的音频完全相同、文件本身不同的版本数（如 WAV 与 FLAC，或只有标签不同）')}>
+                            {t('同音频 ×{n}', { n: f.same_audio })}
+                          </span>
+                        )}
+                        {f.recordings > 0 && (
+                          <a class="chip ask" href={`/admin/files/${f.id}#recordings`} title={t('声学指纹比对：听起来是同一录音的其他文件数')}>
+                            {t('同录音 ×{n}', { n: f.recordings })}
+                          </a>
+                        )}
+                        {fmt.archive && (
+                          <a class="chip inbox" href={withParams(url, { dir: inside, page: null })} title={t('在整理台查看包内文件')}>
+                            {t('包内 {n} 个', { n: fmt.files })}
+                          </a>
+                        )}
+                        {fmt.status && fmt.status !== 'ok' && (
+                          <span class="chip missing" title={fmt.error}>{t(ARCHIVE_STATUS_LABELS[fmt.status] ?? fmt.status)}</span>
+                        )}
+                        {f.note && <div class="muted">{f.note}</div>}
+                      </td>
+                      <td class="num">{formatBytes(f.size)}</td>
+                      <td class="spec" title={fmt.probe_error}>{formatSpec(fmt)}</td>
+                      <td><span class="chip">{t(FILE_KIND_LABELS[f.kind] ?? f.kind)}</span></td>
+                      <td class="suggest">
+                        {s ? (
+                          <>
+                            {s.state === 'ignored' && <span class="chip ignored">{t('建议忽略')}</span>}
+                            {s.release_id && <b>{labels.get(s.release_id) ?? s.release_id}</b>}
+                            {s.slot && <span> · {t(SLOT_LABELS[s.slot])}</span>}
+                            {s.rights && <span class={`chip ${s.rights}`}>{t(RIGHTS_LABELS[s.rights])}</span>}{' '}
+                            {s.role && ROLE_LABELS[s.role] && <span class="chip">{t(ROLE_LABELS[s.role])}</span>}{' '}
+                            <span class="rule" title={t('规则：{rule}', { rule: t(s.rule) })}>{percent(s.confidence)}</span>
+                            {s.note && <div class="muted">{s.note}</div>}
+                          </>
+                        ) : (
+                          <span class="muted">—</span>
+                        )}
+                      </td>
+                      <td>
+                        <span class={`chip ${f.state}`}>{t(FILE_STATE_LABELS[f.state])}</span>{' '}
+                        {f.release_id && <span>{labels.get(f.release_id) ?? f.release_id}</span>}
+                        {f.slot && <span> · {t(SLOT_LABELS[f.slot])}</span>}
+                        {f.rights !== 'unknown' && <span class={`chip ${f.rights}`}>{t(RIGHTS_LABELS[f.rights])}</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </>
+            ))
+          }
+          {total === 0 && <tr><td colspan="7" class="muted">{t('没有符合条件的文件。')}</td></tr>}
+        </tbody>
+      </table>
+
+      {
+        pages > 1 && (
+          <div class="pager">
+            {page > 1 && <a href={withParams(url, { page: page - 1 })}>{t('上一页')}</a>}
+            <span>{t('第 {page} / {pages} 页', { page, pages })}</span>
+            {page < pages && <a href={withParams(url, { page: page + 1 })}>{t('下一页')}</a>}
+          </div>
+        )
+      }
+
+      <div class="toolbar">
+        <span set:html={t('已选 {n} 个', { n: '<b id="selected-count">0</b>' })} />
+        <label><input type="checkbox" name="scope" value="filter" id="scope-filter" /> {t('改为应用到当前筛选的全部 {n} 个', { n: total })}</label>
+        <span class="sep"></span>
+        <button class="primary" name="action" value="accept">{t('按建议确认')}</button>
+        <span class="sep"></span>
+        <select name="release" aria-label={t('作品')}>
+          <option value="">{t('选择作品…')}</option>
+          {options.map((o) => <option value={o.id}>{o.label}</option>)}
+        </select>
+        <select name="slot" aria-label={t('版本栏位')}>
+          <option value="">{t('不分栏（相关资料）')}</option>
+          {SLOTS.map((s) => <option value={s}>{t(SLOT_LABELS[s])}</option>)}
+        </select>
+        <button name="action" value="assign">{t('归入')}</button>
+        <span class="sep"></span>
+        <select name="rights_value" aria-label={t('权属')}>
+          {RIGHTS.map((r) => <option value={r} selected={r === 'third_party'}>{t(RIGHTS_LABELS[r])}</option>)}
+        </select>
+        <button name="action" value="rights">{t('设权属')}</button>
+        <span class="sep"></span>
+        <button name="action" value="dup" title={t('有相同内容（或相同音频）的其他文件时，指向保留的那份并忽略这些')}>{t('标为重复')}</button>
+        <button name="action" value="ignore">{t('忽略')}</button>
+        <button name="action" value="reset">{t('退回待整理')}</button>
+        <button class="danger" name="action" value="delete" title={t('只删除后台上传的文件，以及原件已不存在的合辑文件；可在修改记录里撤销')}>{t('删除')}</button>
+      </div>
+    </form>
+  </div>
+  <aside id="peek" class="peek-panel" hidden>
+    <button type="button" class="close" aria-label={t('关闭预览')}>×</button>
+    <div data-body></div>
+  </aside>
+</Admin>
+
+<script>
+  import { initPreviews } from '../../scripts/previews';
+  import { t } from '../../scripts/i18n';
+
+  // Side preview: ▸ on a row loads the file's preview here; j / k move to the next / previous file.
+  const panel = document.querySelector<HTMLElement>('#peek')!;
+  const panelBody = panel.querySelector<HTMLElement>('[data-body]')!;
+  const peekButtons = () => Array.from(document.querySelectorAll<HTMLButtonElement>('button.peek'));
+  let peeking: string | null = null;
+  async function peek(id: string) {
+    peeking = id;
+    panel.hidden = false;
+    document.querySelectorAll('tr.peeking').forEach((r) => r.classList.remove('peeking'));
+    const button = document.querySelector<HTMLButtonElement>(`button.peek[data-peek="${id}"]`);
+    button?.closest('tr')?.classList.add('peeking');
+    button?.closest('tr')?.scrollIntoView({ block: 'nearest' });
+    panelBody.innerHTML = `<p class="muted">${t('读取中…')}</p>`;
+    const response = await fetch(`/admin/files/${id}/preview`);
+    if (peeking !== id) return;
+    panelBody.innerHTML = response.ok ? await response.text() : `<p class="muted">${t('读取失败（HTTP {status}）', { status: response.status })}</p>`;
+    initPreviews(panelBody as unknown as ParentNode);
+  }
+  document.addEventListener('click', (e) => {
+    const button = (e.target as HTMLElement).closest<HTMLButtonElement>('button.peek');
+    if (button?.dataset.peek) peek(button.dataset.peek);
+  });
+  panel.querySelector('.close')?.addEventListener('click', () => {
+    panel.hidden = true;
+    peeking = null;
+    panelBody.innerHTML = '';
+    document.querySelectorAll('tr.peeking').forEach((r) => r.classList.remove('peeking'));
+  });
+  document.addEventListener('keydown', (e) => {
+    if (panel.hidden || !peeking || e.ctrlKey || e.metaKey || e.altKey) return;
+    if ((e.target as HTMLElement).closest('input, select, textarea')) return;
+    const ids = peekButtons().map((b) => b.dataset.peek!);
+    const at = ids.indexOf(peeking);
+    if (e.key === 'j' && at < ids.length - 1) peek(ids[at + 1]);
+    if (e.key === 'k' && at > 0) peek(ids[at - 1]);
+    if (e.key === 'x') {
+      const box = document.querySelector<HTMLInputElement>(`input[name="ids"][value="${peeking}"]`);
+      if (box) {
+        box.checked = !box.checked;
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+    if (e.key === 'Escape') panel.querySelector<HTMLButtonElement>('.close')?.click();
+  });
+
+  const form = document.querySelector<HTMLFormElement>('#inbox-form');
+  const counter = document.querySelector('#selected-count');
+  const boxes = () => form?.querySelectorAll<HTMLInputElement>('input[name="ids"]') ?? [];
+  const update = () => {
+    if (counter) counter.textContent = String([...boxes()].filter((b) => b.checked).length);
+  };
+  form?.addEventListener('change', (event) => {
+    const target = event.target as HTMLInputElement;
+    if (target.id === 'select-all') boxes().forEach((b) => (b.checked = target.checked));
+    const group = target.dataset.groupToggle;
+    if (group) form.querySelectorAll<HTMLInputElement>(`input[data-group="${group}"]`).forEach((b) => (b.checked = target.checked));
+    update();
+  });
+  update();
+</script>

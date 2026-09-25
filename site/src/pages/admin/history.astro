@@ -1,0 +1,191 @@
+---
+import { env } from 'cloudflare:workers';
+import Admin from '../../layouts/Admin.astro';
+import { ENTITY_LABELS, isEntity, undoBatch } from '../../lib/changes';
+import { db, releaseOptions } from '../../lib/db';
+import { formatTime, withParams } from '../../lib/format';
+import { N_, UserError, errorText, summaryText } from '../../lib/i18n';
+import { canManage } from '../../lib/team';
+
+const url = Astro.url;
+const { t } = Astro.locals;
+const PAGE_SIZE = 40;
+const DETAIL_LIMIT = 25;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const batch = String(form.get('batch') ?? '');
+  const team = await db().prepare("SELECT 1 FROM revisions WHERE batch_id = ? AND entity = 'admin' LIMIT 1").bind(batch).first();
+  const result = team && !canManage(Astro.locals.admin)
+    ? ({ ok: false, reason: new UserError('撤销管理组的修改需要站长或管理员权限') } as const)
+    : await undoBatch(db(), Astro.locals.admin!.email, batch, env.MEDIA);
+  const params = result.ok ? { msg: t('已撤销，恢复了 {n} 处', { n: result.count }), err: null } : { err: errorText(result.reason, t), msg: null };
+  return Astro.redirect(withParams(url, params), 303);
+}
+
+const entityParam = url.searchParams.get('entity') ?? '';
+const entity = isEntity(entityParam) ? entityParam : null;
+const entityId = url.searchParams.get('id') ?? '';
+const actorFilter = url.searchParams.get('actor') ?? '';
+const releaseFilter = url.searchParams.get('release') ?? '';
+const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+
+// Revisions matching the filters; a batch is listed when any of its revisions match.
+const conds: string[] = [];
+const filterBinds: unknown[] = [];
+if (entity) {
+  conds.push(entityId ? 'entity = ? AND entity_id = ?' : 'entity = ?');
+  filterBinds.push(entity, ...(entityId ? [entityId] : []));
+}
+if (actorFilter) {
+  conds.push('actor = ?');
+  filterBinds.push(actorFilter);
+}
+if (releaseFilter) {
+  // Everything about one release: the release itself, its slots, titles, tracks and the files filed
+  // under it (now, or before or after a change).
+  const releaseCond = `(
+    (entity = 'release' AND entity_id = ?1r)
+    OR (entity = 'release_slot' AND substr(entity_id, 1, length(?1r) + 1) = ?1r || '/')
+    OR (entity = 'translation' AND substr(entity_id, 1, length(?1r) + 9) = 'release/' || ?1r || '/')
+    OR (entity IN ('file', 'track') AND (json_extract(after, '$.release_id') = ?1r OR json_extract(before, '$.release_id') = ?1r))
+    OR (entity = 'track' AND entity_id IN (SELECT id FROM tracks WHERE release_id = ?1r))
+    OR (entity = 'file' AND entity_id IN (SELECT id FROM files WHERE release_id = ?1r))
+  )`;
+  conds.push(releaseCond.replaceAll('?1r', '?'));
+  filterBinds.push(...Array(releaseCond.split('?1r').length - 1).fill(releaseFilter));
+}
+const filter = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+const database = db();
+const batches = await database
+  .prepare(
+    `SELECT batch_id, min(at) AS at, actor, summary, count(*) AS n, max(reverted_by_batch) AS reverted
+     FROM revisions WHERE batch_id IN (SELECT batch_id FROM revisions ${filter})
+     GROUP BY batch_id ORDER BY min(id) DESC LIMIT ? OFFSET ?`,
+  )
+  .bind(...filterBinds, PAGE_SIZE + 1, (page - 1) * PAGE_SIZE)
+  .all<{ batch_id: string; at: string; actor: string; summary: string; n: number; reverted: string | null }>();
+const hasMore = batches.results.length > PAGE_SIZE;
+const shown = batches.results.slice(0, PAGE_SIZE);
+
+type Rev = { batch_id: string; entity: string; entity_id: string; action: string; before: string | null; after: string | null };
+const details = shown.length
+  ? (
+      await database
+        .prepare(
+          `SELECT batch_id, entity, entity_id, action, before, after FROM (
+             SELECT *, row_number() OVER (PARTITION BY batch_id ORDER BY id) AS rn FROM revisions
+             WHERE batch_id IN (${shown.map(() => '?').join(', ')})
+           ) WHERE rn <= ${DETAIL_LIMIT} ORDER BY id`,
+        )
+        .bind(...shown.map((b) => b.batch_id))
+        .all<Rev>()
+    ).results
+  : [];
+
+const byBatch = new Map<string, Rev[]>();
+for (const d of details) byBatch.set(d.batch_id, [...(byBatch.get(d.batch_id) ?? []), d]);
+
+const FILE_BRIEF = ['dir', 'name', 'size', 'sha256', 'origin', 'state', 'release_id', 'slot'];
+const fmt = (v: unknown) => (v === null || v === undefined || v === '' ? t('（空）') : typeof v === 'string' ? v : JSON.stringify(v));
+function diff(rev: Rev): { field: string; before: string; after: string }[] {
+  const before = rev.before ? (JSON.parse(rev.before) as Record<string, unknown>) : {};
+  const after = rev.after ? (JSON.parse(rev.after) as Record<string, unknown>) : {};
+  // A created or deleted file carries its whole row; show the parts that identify it.
+  const brief = rev.entity === 'file' && rev.action !== 'update';
+  const fields = brief
+    ? FILE_BRIEF.filter((f) => f in before || f in after)
+    : [...new Set([...Object.keys(before), ...Object.keys(after)])];
+  return fields
+    .filter((f) => rev.action !== 'update' || fmt(before[f]) !== fmt(after[f]))
+    .map((f) => ({ field: f, before: fmt(before[f]), after: fmt(after[f]) }));
+}
+const link = (rev: Rev) =>
+  rev.entity === 'release' ? `/admin/releases/${rev.entity_id}`
+  : rev.entity === 'release_slot' ? `/admin/releases/${rev.entity_id.split('/')[0]}`
+  : rev.entity === 'file' ? `/admin/files/${rev.entity_id}`
+  : rev.entity === 'song' ? `/admin/songs/${rev.entity_id}`
+  : rev.entity === 'admin' ? '/admin/team'
+  : null;
+const [actors, releases] = await Promise.all([
+  database.prepare('SELECT DISTINCT actor FROM revisions ORDER BY actor').all<{ actor: string }>(),
+  releaseOptions(),
+]);
+const actionLabel: Record<string, string> = { create: N_('新建'), update: N_('修改'), delete: N_('删除') };
+---
+
+<Admin title={t('修改记录')}>
+  <p class="muted">
+    {t('同一次操作的修改合为一条，可以整条撤销。若之后又有人改过同一字段，撤销会被拒绝，以免覆盖别人的修改。')}
+    {entity && <> {t('当前只看：{entity} {id}', { entity: t(ENTITY_LABELS[entity]), id: entityId })} · <a href="/admin/history">{t('看全部')}</a></>}
+  </p>
+
+  <form class="filters" method="get">
+    {entity && <input type="hidden" name="entity" value={entity} />}
+    {entityId && <input type="hidden" name="id" value={entityId} />}
+    <label>{t('操作人')}
+      <select name="actor">
+        <option value="">{t('全部')}</option>
+        {actors.results.map((a) => <option value={a.actor} selected={a.actor === actorFilter}>{a.actor}</option>)}
+      </select>
+    </label>
+    <label>{t('作品')}
+      <select name="release">
+        <option value="">{t('全部')}</option>
+        {releases.map((r) => <option value={r.id} selected={r.id === releaseFilter}>{r.label}</option>)}
+      </select>
+    </label>
+    <button type="submit">{t('筛选')}</button>
+  </form>
+
+  {
+    shown.map((b) => {
+      const revs = byBatch.get(b.batch_id) ?? [];
+      return (
+        <details class:list={['batch', { reverted: b.reverted }]}>
+          <summary>
+            <span class="mono">{formatTime(b.at)}</span>
+            <span class="grow">{summaryText(b.summary, t)} <span class="muted">· {t('{n} 条', { n: b.n })}</span></span>
+            <span class="muted">{b.actor}</span>
+            {b.reverted ? (
+              <span class="chip">{t('已撤销')}</span>
+            ) : (
+              <form method="post" style="margin:0">
+                <input type="hidden" name="batch" value={b.batch_id} />
+                <button class="danger" type="submit">{t('撤销')}</button>
+              </form>
+            )}
+          </summary>
+          <div class="body">
+            <table class="grid diff">
+              <tbody>
+                {revs.map((r) => (
+                  <tr>
+                    <td>
+                      {t(actionLabel[r.action])}{' '}
+                      {isEntity(r.entity) ? t(ENTITY_LABELS[r.entity]) : r.entity}{' '}
+                      {link(r) ? <a href={link(r)!}>{r.entity_id}</a> : <span class="mono">{r.entity_id}</span>}
+                    </td>
+                    <td>
+                      {diff(r).map((d) => (
+                        <div><span class="muted">{d.field}：</span>{r.action !== 'create' && <del>{d.before}</del>} {r.action !== 'delete' && <ins>{d.after}</ins>}</div>
+                      ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {b.n > DETAIL_LIMIT && <p class="muted">{t('只显示前 {limit} 条，共 {n} 条。', { limit: DETAIL_LIMIT, n: b.n })}</p>}
+          </div>
+        </details>
+      );
+    })
+  }
+  {shown.length === 0 && <p class="muted">{t('还没有修改记录。')}</p>}
+
+  <div class="pager">
+    {page > 1 && <a href={withParams(url, { page: page - 1, msg: null, err: null })}>{t('较新')}</a>}
+    {hasMore && <a href={withParams(url, { page: page + 1, msg: null, err: null })}>{t('较早')}</a>}
+  </div>
+</Admin>

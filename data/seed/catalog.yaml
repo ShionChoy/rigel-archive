@@ -1,0 +1,634 @@
+# Initial release catalog, compiled from the design doc (2026-09-23 survey + rigeltheatre.com).
+# Same shape as the daily export. After seeding, the database is the source of truth: edit in /admin.
+#
+# Slot statuses: collected 已收录 · partial 部分缺档 · missing 缺档 · unreleased 未发行
+#                planned 预定 · not_applicable 不适用 · unknown 待确认
+# Slots not listed below default to `unknown` (待确认), which is honest for works we have not checked.
+
+defaults:
+  slot_status: unknown
+
+releases:
+  # ---------------------------------------------------------------- Rigël Theatre: physical CDs
+  - id: rtcd-013
+    catalog_no: RTCD-013
+    era: rigel-theatre
+    kind: album
+    series: SOLROS/Lengsel
+    title: "Erdelåten -Where the Marsh Still Sings-"
+    release_date: "2026-04-26"
+    track_count: 13
+    aliases: [Erdelåten]
+    links: { official: "https://rigeltheatre.com/Erdelaten/index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: missing, note: "无抓轨" }
+      digital: { status: partial, note: "有社团提供的母带 WAV 16bit/44.1kHz 13 曲；Bandcamp 24bit/48kHz 版缺档" }
+      streaming: { status: missing, note: "2026-08-07 已上架" }
+      scans: missing
+      pv: { status: missing, note: "YouTube 有 XFD" }
+
+  - id: rtcd-012
+    catalog_no: RTCD-012
+    era: rigel-theatre
+    kind: album
+    series: SOLROS/Lengsel
+    title: "Solas na Gréine"
+    release_date: "2024-10-27"
+    track_count: 14
+    links: { official: "https://rigeltheatre.com/SolasNaGreine/index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: missing, note: "只有 MP3/M4A，无损缺档" }
+      digital: { status: collected, note: "Bandcamp WAV（zip 2.3 GB）" }
+      streaming: { status: collected, note: "Amazon FLAC" }
+      scans: missing
+      pv: { status: collected, note: "XFD" }
+
+  - id: rtcd-011
+    catalog_no: RTCD-011
+    era: rigel-theatre
+    kind: album
+    series: SOLROS/Lengsel
+    title: "Liénesgarde -The Spirit of SOLROS-"
+    release_date: "2024-04-28"
+    track_count: 11
+    links: { official: "https://rigeltheatre.com/Lienesgarde/index.html" }
+    note: "抓轨 zip 内标签有误，需修正；说明 Bandcamp 新旧版差异"
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "FLAC+CUE+LOG（zip 内，标签有误），另有 MP3" }
+      digital: { status: collected, note: "Bandcamp 现行版 WAV+FLAC，另有旧版 WAV" }
+      scans: missing
+      pv: { status: collected, note: "XFD" }
+
+  - id: rtcd-010
+    catalog_no: RTCD-010
+    era: rigel-theatre
+    kind: album
+    series: 其他
+    title: "ᚣᚢᛚᛖ -YULE-"
+    release_date: "2021-10-31"
+    track_count: 6
+    aliases: [YULE]
+    links: { official: "https://rigeltheatre.com/yule/yule_index.html" }
+    note: "FLAC 目录里实为 MP3，需改标"
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "FLAC+LOG" }
+      digital: { status: collected, note: "Bandcamp WAV 7" }
+      scans: collected
+      pv: { status: collected, note: "XFD" }
+
+  - id: rtcd-009
+    catalog_no: RTCD-009
+    era: rigel-theatre
+    kind: album
+    series: SOLROS/Lengsel
+    title: "SOLROS and the Will of the Altaïr"
+    release_date: "2020-10-25"
+    track_count: 12
+    aliases: [SOLROS WOTA]
+    links: { official: "https://rigeltheatre.com/solroswota/solroswota_index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "FLAC+LOG，另有整轨 WAV+CUE" }
+      digital: { status: collected, note: "Bandcamp WAV 15 + FLAC" }
+      scans: { status: collected, note: "含壁纸" }
+      pv: { status: collected, note: "Crossfade DEMO" }
+
+  - id: rtcd-008
+    catalog_no: RTCD-008
+    era: rigel-theatre
+    kind: album
+    series: SOLROS/Lengsel
+    title: "La Flesvelka -Rewind of Memories-"
+    release_date: "2019-10-27"
+    track_count: 13
+    links: { official: "https://rigeltheatre.com/flesvelka/flesvelka_index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "FLAC+WAV+LOG" }
+      scans: collected
+      pv: { status: collected, note: "DEMO" }
+
+  - id: rtcd-007
+    catalog_no: RTCD-007
+    era: rigel-theatre
+    kind: album
+    series: SOLROS/Lengsel
+    title: "Älvorna -Wizards of Erdelåten-"
+    release_date: "2018-10-28"
+    track_count: 5
+    links: { official: "https://rigeltheatre.com/woe/woe_index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "FLAC+WAV+LOG" }
+      digital: { status: collected, note: "Bandcamp WAV+FLAC" }
+      scans: collected
+
+  - id: rtcd-006
+    catalog_no: RTCD-006
+    era: rigel-theatre
+    kind: album
+    series: SOLROS/Lengsel
+    title: "Rinn Ding Dong -L'avenir de la Flesvelka-"
+    release_date: "2018-04-29"
+    track_count: 10
+    links: { official: "https://rigeltheatre.com/rinndingdong/rinndingdong_index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "FLAC+WAV+LOG" }
+      digital: { status: collected, note: "Bandcamp WAV+FLAC" }
+      scans: collected
+
+  - id: rtcd-005
+    catalog_no: RTCD-005
+    era: rigel-theatre
+    kind: album
+    series: SOLROS/Lengsel
+    title: "Älvorna -Memories of Absence-"
+    release_date: "2017-04-30"
+    track_count: 10
+    links: { official: "https://rigeltheatre.com/alvorna/alvorna_index.html" }
+    note: "第 2 版 2020-03-01，12 曲"
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "两版：005 FLAC 10 曲，005A FLAC+WAV 12 曲" }
+      scans: collected
+      pv: { status: collected, note: "第 2 版 DEMO" }
+
+  - id: rtcd-004
+    catalog_no: RTCD-004
+    era: rigel-theatre
+    kind: album
+    series: SOLROS/Lengsel
+    title: "Lengsel -Ghosts of Memories-"
+    release_date: "2015-10-25"
+    track_count: 12
+    aliases: [Lengsel]
+    links: { official: "https://rigeltheatre.com/lengsel/lengsel_index.html" }
+    note: "第 2 版 2019-04-28，13 曲"
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "两版：004 FLAC+LOG 12 曲，004A WAV 14 个文件" }
+      digital: { status: collected, note: "Bandcamp FLAC 16 曲（WAV 只有 3 首）；DLsite MP3（RJ211928）" }
+      streaming: { status: collected, note: "Amazon FLAC" }
+      scans: collected
+
+  - id: rtcd-003
+    catalog_no: RTCD-003
+    era: rigel-theatre
+    kind: album
+    series: 其他
+    title: "Sun's of Liberty"
+    release_date: "2015-08-16"
+    track_count: 7
+    links: { official: "https://rigeltheatre.com/sunsofliberty/solbty_index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "FLAC（无 LOG），待确认抓轨来源" }
+      digital: unreleased
+      scans: collected
+
+  - id: rtcd-002
+    catalog_no: RTCD-002
+    era: rigel-theatre
+    kind: album
+    series: 其他
+    title: "LUNA -Maple Town Memories-"
+    release_date: "2014-10-26"
+    track_count: 6
+    links: { official: "https://rigeltheatre.com/luna/luna_index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "FLAC+LOG" }
+      digital: { status: collected, note: "Bandcamp WAV+FLAC（5 曲，CD 为 6 曲，待核对）" }
+      scans: collected
+
+  - id: rtcd-001
+    catalog_no: RTCD-001
+    era: rigel-theatre
+    kind: album
+    series: SOLROS/Lengsel
+    title: "SOLROS -Eternal Memory-"
+    release_date: "2014-04-27"
+    track_count: 15
+    links: { official: "https://rigeltheatre.com/solros/solros_em.html" }
+    note: "第 2 版 2016-10-30；NAS 上 001 与 001A 两份抓轨，待确认各对应哪一版"
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "两版：001 WAV+CUE，001A FLAC+LOG" }
+      digital: { status: collected, note: "DLsite MP3（RJ211925）" }
+      scans: collected
+
+  - id: rtcd-c005
+    catalog_no: RTCD-C005
+    era: rigel-theatre
+    kind: album
+    series: LYRA
+    title: "Lyra and the Beltain Ritual"
+    release_date: "2025-04-27"
+    track_count: 11
+    links: { official: "https://rigeltheatre.com/lyrabr/index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: missing, note: "无抓轨；抓轨目录里是母带 WAV 16bit/44.1kHz 11 曲，应归到官方数字版/母带" }
+      digital: { status: collected, note: "Bandcamp WAV 12；另有母带 WAV 11 曲" }
+      streaming: { status: collected, note: "Amazon FLAC" }
+      scans: missing
+      pv: { status: missing, note: "YouTube 有" }
+
+  - id: rtcd-c004
+    catalog_no: RTCD-C004
+    era: rigel-theatre
+    kind: album
+    series: LYRA
+    title: "Regulus and Mira: The Great Adventure"
+    release_date: "2023-10-29"
+    track_count: 12
+    aliases: [EMÜ42]
+    links: { official: "https://rigeltheatre.com/Regulus_and_Mira_GA/index.html" }
+    note: "10 周年作品"
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "WAV 分轨 + 整轨 CUE + LOG" }
+      digital: { status: collected, note: "Bandcamp WAV 13 + FLAC" }
+      scans: missing
+      pv: { status: collected, note: "XFD、EMÜ42 MV" }
+
+  - id: ursa-minor
+    era: rigel-theatre
+    kind: album
+    series: 其他
+    title: "Ursa Minor"
+    release_date: "2023-04-30"
+    track_count: 5
+    note: "实体形态待确认"
+    slots:
+      cd: { status: collected, note: "实体形态待确认" }
+      cd_rip: missing
+      digital: { status: collected, note: "Bandcamp WAV 5" }
+      scans: missing
+      pv: { status: collected, note: "XFD" }
+
+  - id: rtcd-c003
+    catalog_no: RTCD-C003
+    era: rigel-theatre
+    kind: album
+    series: 其他
+    title: "Solringen"
+    release_date: "2022-10-30"
+    track_count: 9
+    links: { official: "https://rigeltheatre.com/solringen/solringen_index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "FLAC+CUE+LOG" }
+      digital: { status: collected, note: "Bandcamp WAV 11（含 Ljusa Stjärnan v2.0）" }
+      scans: { status: partial, note: "只有封面" }
+      pv: { status: collected, note: "XFD" }
+
+  - id: rtcd-c002
+    catalog_no: RTCD-C002
+    era: rigel-theatre
+    kind: album
+    series: LYRA
+    title: "Lyla and the Clouds Stars"
+    release_date: "2022-04-24"
+    track_count: 10
+    links: { official: "https://rigeltheatre.com/lylacs/lylacs_index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "FLAC+CUE+LOG" }
+      digital: { status: collected, note: "Bandcamp WAV 11" }
+      scans: collected
+      pv: { status: collected, note: "XFD" }
+
+  - id: rtcd-c001
+    catalog_no: RTCD-C001
+    era: rigel-theatre
+    kind: album
+    series: LYRA
+    title: "Lyla and the Starry Fairy"
+    release_date: "2021-04-25"
+    track_count: 12
+    links: { official: "https://rigeltheatre.com/lyla/lyla_index.html" }
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "FLAC+LOG，另有整轨 WAV+CUE" }
+      digital: { status: collected, note: "Bandcamp WAV 13 + FLAC" }
+      scans: collected
+      pv: { status: collected, note: "XFD" }
+
+  - id: helados-flores-y-estrellas
+    era: rigel-theatre
+    kind: single
+    series: 其他
+    title: "Helados Flores y Estrellas"
+    release_date: "2025-10-26"
+    track_count: 2
+    note: "万圣节单曲；实体形态待确认"
+    slots:
+      cd: { status: collected, note: "实体形态待确认" }
+      cd_rip: { status: missing, note: "无抓轨；有母带 WAV 2 曲" }
+      digital: { status: collected, note: "Bandcamp WAV 2；另有母带 WAV" }
+      scans: missing
+
+  # ---------------------------------------------------------------- Rigël Theatre: Bandcamp singles
+  - id: avril
+    era: rigel-theatre
+    kind: single
+    title: "Ävril -Flicka i krans-"
+    slots: &bandcamp_single
+      cd: not_applicable
+      cd_rip: not_applicable
+      digital: { status: collected, note: "Bandcamp WAV + FLAC" }
+      scans: not_applicable
+
+  - id: zauvijek-tvoj
+    era: rigel-theatre
+    kind: single
+    title: "Zauvijek Tvoj"
+    slots: *bandcamp_single
+
+  - id: elbereth
+    era: rigel-theatre
+    kind: single
+    title: "ᛖᛚᛒᛖᚱᛖᛏᚺ -Elbereth-"
+    aliases: [Elbereth]
+    slots: *bandcamp_single
+
+  - id: solstand
+    era: rigel-theatre
+    kind: single
+    title: "Solstånd -Midsommarfirande-"
+    note: "含 ver.3.0"
+    slots: *bandcamp_single
+
+  - id: kochab-and-the-bluegrass
+    era: rigel-theatre
+    kind: single
+    title: "Kochab and the Bluegrass"
+    note: "Bandcamp 母带为 24bit/96kHz"
+    slots: *bandcamp_single
+
+  # ---------------------------------------------------------------- Singles not in the current Bandcamp list
+  # 文件已收录，发行日期与形式待补
+  - id: wendy-port-street
+    era: rigel-theatre
+    kind: single
+    title: "Wendy Port Street"
+    note: "与 Windy Port Street zip 大小相同，可能重复"
+    slots: &other_single
+      digital: { status: collected, note: "文件已收录，发行形式待补" }
+
+  - id: sunset-flowers
+    era: rigel-theatre
+    kind: single
+    title: "Sunset Flowers"
+    slots: *other_single
+
+  - id: the-long-journey-home
+    era: rigel-theatre
+    kind: single
+    title: "The Long Journey Home"
+    slots: *other_single
+
+  - id: olesnia-rings
+    era: rigel-theatre
+    kind: single
+    title: "Ölesnia Rings"
+    slots: *other_single
+
+  - id: priere-a-lange-gardien
+    era: rigel-theatre
+    kind: single
+    title: "Prière à L'Ange Gardien"
+    slots: *other_single
+
+  - id: eris
+    era: rigel-theatre
+    kind: single
+    title: "ERIS -Legend of Gaidelia-"
+    slots:
+      digital: { status: collected, note: "文件已收录，发行形式待补" }
+      bonus: { status: missing, note: "DL 卡缺档（目录名标「缺」，内有 2 个文件）" }
+
+  - id: rinn-ding-dong-garnet-star
+    era: rigel-theatre
+    kind: single
+    title: "Rinn Ding Dong -Garnet Star-"
+    note: "feat. ミーウェル"
+    slots: *other_single
+
+  - id: ljusa-stjarnan
+    era: rigel-theatre
+    kind: single
+    title: "Ljusa Stjärnan v2.0"
+    aliases: [Ljusa Stjärnan]
+    slots: *other_single
+
+  - id: aventyr-till-norrland
+    era: rigel-theatre
+    kind: single
+    title: "Äventyr Till Nørrland v2.4"
+    aliases: [Äventyr Till Nørrland]
+    slots: *other_single
+
+  # ---------------------------------------------------------------- DEMO / DL cards (RTSR)
+  - id: francbelle
+    catalog_no: RTSR-0001
+    era: rigel-theatre
+    kind: dl_card
+    title: "Francbelle"
+    aliases: [RTSR0001]
+    slots:
+      cd: not_applicable
+      cd_rip: not_applicable
+      bonus: collected
+
+  - id: little-red-train
+    catalog_no: RTSR-002
+    era: rigel-theatre
+    kind: dl_card
+    title: "Little Red Train"
+    aliases: [LittleRedTrain, RTSR002]
+    slots:
+      cd: not_applicable
+      cd_rip: not_applicable
+      digital: { status: collected, note: "Bandcamp 目录" }
+      bonus: collected
+
+  - id: grad-erlija
+    catalog_no: RTSR-003
+    era: rigel-theatre
+    kind: dl_card
+    title: "Grad Erlija"
+    aliases: [GradErlija, RTSR003]
+    slots:
+      cd: not_applicable
+      cd_rip: not_applicable
+      bonus: collected
+
+  - id: riness
+    catalog_no: RTSR-006
+    era: rigel-theatre
+    kind: dl_card
+    title: "Riness"
+    aliases: [RTSR006]
+    note: "RTSR-004/005 对应的作品待确认"
+    slots:
+      cd: not_applicable
+      cd_rip: not_applicable
+      bonus: collected
+
+  - id: erlija-gate
+    era: rigel-theatre
+    kind: dl_card
+    title: "Erlija Gäte"
+    slots:
+      cd: not_applicable
+      cd_rip: not_applicable
+      bonus: { status: missing, note: "目录名标「缺」，内有 4 个文件，待核对" }
+
+  # ---------------------------------------------------------------- SoundCloud
+  - id: wesk-peak
+    era: rigel-theatre
+    kind: web
+    title: "Wesk Peak (v2.0)"
+    aliases: [Wesk Peak]
+    release_date: "2013-08-18"
+    slots: &soundcloud
+      cd: not_applicable
+      cd_rip: not_applicable
+      digital: { status: collected, note: "SoundCloud" }
+      streaming: not_applicable
+      scans: not_applicable
+
+  - id: autumn-breeze
+    era: rigel-theatre
+    kind: web
+    title: "Autumn Breeze -Forget Regret-"
+    release_date: "2013-11-17"
+    note: "以 Rigël Theatre 名义发表的第一首（SoundCloud）"
+    slots: *soundcloud
+
+  - id: winterland-faries
+    era: rigel-theatre
+    kind: web
+    title: "Winterland Faries"
+    slots: *soundcloud
+
+  - id: la-fee-sonnette
+    era: rigel-theatre
+    kind: web
+    title: "La Fée Sonnette"
+    release_date: "2025-03-17"
+    slots: *soundcloud
+
+  - id: sunset-tracks
+    era: rigel-theatre
+    kind: web
+    title: "Sunset Tracks (Short Version)"
+    aliases: [Sunset Tracks]
+    release_date: "2014-08-02"
+    slots:
+      cd: not_applicable
+      cd_rip: not_applicable
+      digital: { status: missing, note: "SoundCloud 版缺档" }
+      streaming: not_applicable
+      scans: not_applicable
+
+  # ---------------------------------------------------------------- Grand Thaw
+  - id: gt-solros
+    era: grand-thaw
+    kind: album
+    title: "SOLROS"
+    release_date: "2012"
+    event: "M3 2012秋（第一展示场 M-05a）"
+    note: "NAS 上两个重复目录待合并"
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "CD 抓轨 + CD Plus 数据（PV、插画集、HTML）；另有论坛流出的 FLAC 分轨" }
+      streaming: not_applicable
+
+  - id: gt-fyra-varlden
+    era: grand-thaw
+    kind: album
+    title: "Fyra Världen"
+    aliases: [Fyra Varlden]
+    slots:
+      cd: collected
+      cd_rip: { status: missing, note: "「CD版」目录内的音频实为下载版" }
+      digital: { status: collected, note: "DL 版 WAV 5 曲与视觉资料" }
+      streaming: not_applicable
+
+  - id: gt-arstid
+    era: grand-thaw
+    kind: album
+    title: "ÅRSTID"
+    slots:
+      cd: collected
+      cd_rip: { status: collected, note: "CD+DVD 镜像（ISO）、WAV/FLAC+CUE" }
+      digital: { status: collected, note: "DL 版 FLAC 5 曲与视觉资料" }
+      streaming: not_applicable
+
+  # ---------------------------------------------------------------- Delta Records
+  - id: dr-old
+    era: delta-records
+    kind: web
+    title: "Delta Records Old"
+    slots: &delta
+      cd: not_applicable
+      cd_rip: not_applicable
+      digital: collected
+      streaming: not_applicable
+      scans: not_applicable
+      pv: not_applicable
+
+  - id: dr-2nd
+    era: delta-records
+    kind: web
+    title: "Delta Records 2nd"
+    note: "read me 19 份含本名，默认只显示笔名井上⊿，是否公开原件待主创决定"
+    slots: *delta
+
+  - id: dr-lala-merry
+    era: delta-records
+    kind: web
+    title: "Lala & Merry"
+    slots: *delta
+
+  # ---------------------------------------------------------------- DEZAEMON
+  - id: dz-mid-night-birds
+    era: dezaemon
+    kind: game_bgm
+    title: "MID NIGHT BIRDS"
+    slots: &dezaemon
+      cd: not_applicable
+      cd_rip: not_applicable
+      digital: collected
+      streaming: not_applicable
+      scans: not_applicable
+      pv: not_applicable
+
+  - id: dz-lost-vision
+    era: dezaemon
+    kind: game_bgm
+    title: "Lost Vision"
+    release_date: "2003"
+    note: "BGM 为模拟器录制；含当年官方网页"
+    slots: *dezaemon
+
+  - id: dz-night-rider
+    era: dezaemon
+    kind: game_bgm
+    title: "ナイトライダー（Night Rider？）"
+    note: "NAS 上目录为空，信息缺失"
+    slots:
+      cd: not_applicable
+      cd_rip: not_applicable
+      digital: missing
+      streaming: not_applicable
+      scans: not_applicable
+      pv: not_applicable

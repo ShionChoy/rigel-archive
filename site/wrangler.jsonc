@@ -1,0 +1,57 @@
+{
+  // Site name and domain are still undecided; "rigel-archive" is a placeholder.
+  "name": "rigel-archive",
+  // The Astro site plus the scheduled jobs and the processing container (src/worker.ts).
+  "main": "./src/worker.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // Private preview on <name>.<account>.workers.dev behind Cloudflare Access. Version preview URLs are
+  // off: every deployment is reached through the one protected hostname.
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "rigel-archive",
+      // From `wrangler d1 create rigel-archive --location apac`; local dev ignores it.
+      "database_id": "b75b91c5-ad17-44ea-938e-84eff3bac9aa",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "rigel-archive-media" }
+  ],
+  // The processing program (tools/ra, `ra container`) in a Cloudflare container, one instance, started
+  // by the Processor Durable Object when there is work (src/processor.ts). `wrangler deploy` builds the
+  // image from tools/ra/Dockerfile with the local Docker. standard-4: 4 vCPU, 12 GiB, 20 GB disk (video
+  // transcodes, unpacking large archives).
+  "containers": [
+    {
+      "class_name": "Processor",
+      "image": "../tools/ra/Dockerfile",
+      "instance_type": "standard-4",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "PROCESSOR", "class_name": "Processor" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Processor"] }],
+  // src/lib/schedule.ts: look for waiting work every 10 minutes; the backup at 04:17 Japan time.
+  "triggers": { "crons": ["*/10 * * * *", "17 19 * * *"] },
+  "vars": {
+    // Cloudflare Access (Zero Trust) for /admin: team domain and the application's AUD tag (not secrets).
+    // Empty = the admin answers 403 to everyone except in `astro dev`.
+    "ACCESS_TEAM_DOMAIN": "rigel-archive.cloudflareaccess.com",
+    "ACCESS_AUD": "677aebdd055244aba44acb38f35cfd3db6d656d84ca6894a9e21959df912f702",
+    // Base URL of `uv run ra serve` for admin previews; set in .dev.vars for local development only.
+    "MEDIA_DEV_BASE": "",
+    // Days a deleted file's stored content is kept (so the deletion can be undone) before cleanup.
+    "STORAGE_GRACE_DAYS": "30"
+  }
+  // Secrets, not vars (production: `wrangler secret put`; local: .dev.vars):
+  //   WORKER_TOKEN            lets `uv run ra worker` call /admin/api/worker/* (the container needs none)
+  //   B2_KEY_ID, B2_APP_KEY, B2_BUCKET, BACKUP_CRYPT_PASSWORD, BACKUP_CRYPT_SALT
+  //                           the encrypted backup (tools/ra/backup.env; `npm run secrets:backup`)
+}
