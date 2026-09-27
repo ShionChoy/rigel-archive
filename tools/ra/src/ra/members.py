@@ -79,7 +79,8 @@ def suggest_all(files: list[SurveyFile], records: dict[str, ArchiveRecord], rule
         record = records.get(f.sha256) if f.sha256 else None
         note = package_note(f, record, loose) if record else None
         if note:
+            # Kept whole: its contents are organized as the loose copies next to it.
             base = suggestion or Suggestion(rule="原始包", confidence=0.6)
-            suggestion = replace(base, role=PACKAGE_ROLE, note=note if not base.note else f"{base.note}；{note}")
+            suggestion = replace(base, role=PACKAGE_ROLE, seal=True, note=note if not base.note else f"{base.note}；{note}")
         out[f.file_id] = suggestion
     return out

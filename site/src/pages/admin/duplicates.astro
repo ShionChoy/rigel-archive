@@ -1,0 +1,76 @@
+---
+import Admin from '../../layouts/Admin.astro';
+import { FILE_STATE_LABELS } from '../../lib/constants';
+import { formatBytes, withParams } from '../../lib/format';
+import { errorText, summaryText, UserError } from '../../lib/i18n';
+import { duplicateGroups, markDuplicateGroups } from '../../lib/inbox';
+import { Places } from '../../lib/locations';
+
+const { t } = Astro.locals;
+const url = Astro.url;
+const by = url.searchParams.get('by') === 'audio' ? 'audio' : 'content';
+const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  try {
+    const groups = form.getAll('group').map(String);
+    const only = form.get('only');
+    const choices = groups
+      .filter((g) => !only || g === only)
+      .map((g) => ({ keeper: String(form.get(`keep_${g}`) ?? ''), others: String(form.get(`files_${g}`) ?? '').split(',').filter(Boolean) }))
+      .filter((c) => c.keeper && c.others.includes(c.keeper));
+    if (choices.length === 0) throw new UserError('没有选中文件');
+    const r = await markDuplicateGroups(Astro.locals.admin!.email, choices);
+    return Astro.redirect(withParams(url, { msg: t('{done}：实际改动 {n} 个', { done: summaryText(r.summary, t), n: r.changed }), undo: r.batchId, err: null }), 303);
+  } catch (e) {
+    return Astro.redirect(withParams(url, { err: errorText(e, t), msg: null }), 303);
+  }
+}
+
+const [{ groups, total }, places] = await Promise.all([duplicateGroups(by, page), Places.load()]);
+const pages = Math.max(1, Math.ceil(total / 40));
+---
+
+<Admin title={t('重复内容')}>
+  <p class="muted">{t('同一内容出现在多处时，每组一行：选定保留哪份（默认已按「已归档优先、合辑散装优先、路径最短」选好），其余一次标为重复（忽略并指向保留的那份）。整体收藏的包里的文件不在这里。可在修改记录里撤销。')}</p>
+  <div class="filters">
+    <a class:list={['button', { primary: by === 'content' }]} href={withParams(url, { by: null, page: null })}>{t('内容完全相同')}</a>
+    <a class:list={['button', { primary: by === 'audio' }]} href={withParams(url, { by: 'audio', page: null })}>{t('解码后音频相同（格式不同）')}</a>
+    <span class="muted">{t('共 {n} 组', { n: total })}</span>
+  </div>
+  {by === 'audio' && <p class="muted">{t('格式不同的同一音频（如 WAV 与 FLAC）不一定要去掉：它们可以各自留在自己的版本里。')}</p>}
+  <form method="post">
+    {groups.map((g, gi) => (
+      <div class="panel dup-group">
+        <input type="hidden" name="group" value={String(gi)} />
+        <input type="hidden" name={`files_${gi}`} value={g.files.map((f) => f.id).join(',')} />
+        <table class="grid">
+          <tbody>
+            {g.files.map((f) => {
+              const key = places.keyOf(f);
+              return (
+                <tr>
+                  <td style="width:5em"><label><input type="radio" name={`keep_${gi}`} value={f.id} checked={f.id === g.keeper} /> {t('保留')}</label></td>
+                  <td class="name"><a href={`/admin/files/${f.id}`}>{f.name}</a><div class="muted mono">{f.dir}</div></td>
+                  <td>{key ? <a href={`/admin/inbox?state=all&loc=${encodeURIComponent(key)}`}>{places.path(key, t)}</a> : <span class={`chip ${f.state}`}>{t(f.state === 'inbox' ? '未归档' : FILE_STATE_LABELS[f.state as keyof typeof FILE_STATE_LABELS])}</span>}</td>
+                  <td class="num">{formatBytes(f.size)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <button type="submit" name="only" value={String(gi)}>{t('其余 {n} 个标为重复', { n: g.files.length - 1 })}</button>
+      </div>
+    ))}
+    {groups.length === 0 && <p class="panel muted">{t('没有重复的内容。')}</p>}
+    {groups.length > 1 && <p><button class="primary" type="submit">{t('本页 {n} 组全部按所选保留，其余标为重复', { n: groups.length })}</button></p>}
+  </form>
+  {pages > 1 && (
+    <div class="pager">
+      {page > 1 && <a href={withParams(url, { page: page - 1 })}>{t('上一页')}</a>}
+      <span>{t('第 {page} / {pages} 页', { page, pages })}</span>
+      {page < pages && <a href={withParams(url, { page: page + 1 })}>{t('下一页')}</a>}
+    </div>
+  )}
+</Admin>

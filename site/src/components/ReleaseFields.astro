@@ -21,6 +21,8 @@ const { t } = Astro.locals;
   <select id="era_id" name="era_id">
     {ERAS.map((e) => <option value={e.id} selected={(r.era_id ?? 'rigel-theatre') === e.id}>{e.name}</option>)}
   </select>
+  <label for="artist">{t('艺术家（整理版标签）')}</label>
+  <input id="artist" type="text" name="artist" value={r.artist ?? ''} placeholder={t('留空则用名义名称，如 Rigël Theatre')} />
   <label for="kind">{t('形式')}</label>
   <select id="kind" name="kind">
     {RELEASE_KINDS.map((k) => <option value={k} selected={(r.kind ?? 'album') === k}>{t(RELEASE_KIND_LABELS[k])}</option>)}

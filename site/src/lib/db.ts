@@ -21,6 +21,7 @@ export interface ReleaseRow {
   note: string | null;
   cover_file_id: string | null;
   state: 'draft' | 'published';
+  artist: string | null;
 }
 
 export interface TrackRow {
@@ -34,6 +35,51 @@ export interface TrackRow {
   duration_ms: number | null;
   credits: string | null;
   note: string | null;
+  external_ids: string;
+}
+
+export type EditionStatus = 'collected' | 'partial' | 'missing' | 'planned' | 'unknown';
+
+export interface EditionRow {
+  id: string;
+  release_id: string;
+  slot: Slot;
+  name: string;
+  catalog_no: string | null;
+  release_date: string | null;
+  source: string | null;
+  status: EditionStatus;
+  based_on: string | null;
+  is_default: number;
+  track_count: number | null;
+  album_title: string | null;
+  cover_file_id: string | null;
+  external_ids: string;
+  note: string | null;
+  sort: number;
+}
+
+export interface EditionTrackRow {
+  id: string;
+  edition_id: string;
+  disc: number;
+  position: number;
+  track_id: string;
+  title: string | null;
+  duration_ms: number | null;
+  external_ids: string;
+}
+
+export interface FolderRow {
+  id: string;
+  parent_id: string | null;
+  era_id: string | null;
+  release_id: string | null;
+  edition_id: string | null;
+  name: string;
+  description: string | null;
+  readme_file_id: string | null;
+  sort: number;
 }
 
 export interface SlotRow {
@@ -49,6 +95,13 @@ export interface Suggestion {
   confidence: number;
   release_id?: string;
   slot?: Slot;
+  place?: string; // a place chosen when uploading (era:/rel:/ed:/fd: key); folder then goes below it
+  edition?: string; // name of the release's edition of this slot (made when missing)
+  edition_catalog?: string;
+  folder?: string; // folder path ('/'-separated) under the edition, release or era, or at the top
+  era_id?: string; // where the folder hangs when there is no release
+  seal?: boolean; // keep the archive whole
+  readme?: boolean; // this file describes its folder
   rights?: Rights;
   role?: string;
   state?: FileState;
@@ -87,6 +140,10 @@ export interface FileRow {
   checked_at: string | null;
   source_seen: string | null;
   replaces: string | null;
+  folder_id: string | null;
+  edition_id: string | null;
+  sealed: number;
+  sealed_in: string | null;
 }
 
 /** Machine-read facts about a file (`format` column), written by the import tools. */

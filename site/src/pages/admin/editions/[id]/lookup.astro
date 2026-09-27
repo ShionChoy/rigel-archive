@@ -1,0 +1,208 @@
+---
+// 「查找元数据」 for one edition, Picard-style: candidates from MusicBrainz (scored against the edition),
+// or a MusicBrainz release id / Bandcamp album link; then every field side by side, ticked where the
+// candidate differs, and the ticked ones are taken in one revision batch.
+import { env } from 'cloudflare:workers';
+import Admin from '../../../../layouts/Admin.astro';
+import { SLOT_LABELS } from '../../../../lib/constants';
+import { batchSince } from '../../../../lib/changes';
+import { db, type EditionRow, type ReleaseRow } from '../../../../lib/db';
+import { loadEditionTracks, parseIds, trackTitle } from '../../../../lib/editions';
+import { withParams } from '../../../../lib/format';
+import { errorText, UserError } from '../../../../lib/i18n';
+import { applyMeta, bandcampAlbum, mbCandidates, mbRelease, scoreCandidate, type AlbumMeta, type MbCandidate, type MetaChoice } from '../../../../lib/metadata';
+import { formatMs, titleKey } from '../../../../lib/tracks';
+
+const { id } = Astro.params;
+const { t } = Astro.locals;
+const database = db();
+const edition = await database.prepare('SELECT * FROM editions WHERE id = ?').bind(id).first<EditionRow>();
+if (!edition) return new Response(t('找不到版本'), { status: 404 });
+const release = (await database.prepare('SELECT * FROM releases WHERE id = ?').bind(edition.release_id).first<ReleaseRow>())!;
+const mbParam = Astro.url.searchParams.get('mb');
+const bcParam = Astro.url.searchParams.get('bc');
+
+async function loadMeta(): Promise<AlbumMeta | null> {
+  if (mbParam) return mbRelease(mbParam.trim().toLowerCase().replace(/^.*release\//, '').slice(0, 36));
+  if (bcParam) return bandcampAlbum(bcParam);
+  return null;
+}
+
+if (Astro.request.method === 'POST') {
+  const started = new Date().toISOString();
+  const form = await Astro.request.formData();
+  try {
+    const meta = await loadMeta();
+    if (!meta) throw new UserError('请先选择候选');
+    const choice: MetaChoice = {
+      fields: new Set(form.getAll('field').map(String).filter((f): f is 'album_title' | 'release_date' | 'catalog_no' | 'track_count' => ['album_title', 'release_date', 'catalog_no', 'track_count'].includes(f))),
+      ids: form.get('ids') === '1',
+      artists: form.get('artists') === '1',
+      cover: form.get('cover') === '1',
+      rows: new Set(form.getAll('row').map(Number).filter((n) => Number.isInteger(n) && n >= 0 && n < meta.tracks.length)),
+    };
+    const n = await applyMeta(Astro.locals.admin!.email, env.MEDIA, release, edition, meta, choice);
+    const undo = n ? await batchSince(database, Astro.locals.admin!.email, started) : null;
+    return Astro.redirect(`/admin/editions/${edition.id}?msg=${encodeURIComponent(n ? t('已采用（{n} 处改动）', { n }) : t('没有改动'))}${undo ? `&undo=${undo}` : ''}#tracks`, 303);
+  } catch (e) {
+    return Astro.redirect(withParams(Astro.url, { err: errorText(e, t), msg: null }), 303);
+  }
+}
+
+const rows = await loadEditionTracks(edition.id);
+const { results: fileDurations } = await database
+  .prepare(
+    `SELECT et.disc, et.position, max(json_extract(f.format, '$.duration')) AS d FROM edition_tracks et
+     LEFT JOIN files f ON f.edition_id = et.edition_id AND f.track_id = et.track_id AND f.kind = 'audio'
+     WHERE et.edition_id = ? GROUP BY et.id ORDER BY et.disc, et.position`,
+  )
+  .bind(edition.id)
+  .all<{ disc: number; position: number; d: number | null }>();
+const ids = parseIds(edition.external_ids);
+const links = JSON.parse(release.links || '{}') as Record<string, string>;
+const bandcampLink = ids.bandcamp ?? Object.entries(links).find(([k, v]) => /bandcamp/i.test(k + v))?.[1] ?? '';
+let meta: AlbumMeta | null = null;
+let candidates: (MbCandidate & { score: number })[] = [];
+let failure: string | null = null;
+try {
+  meta = await loadMeta();
+  if (!meta) {
+    const found = await mbCandidates(release);
+    const mine = { durations: fileDurations.map((r) => (r.d ? r.d * 1000 : null)), catalog: edition.catalog_no ?? release.catalog_no, title: release.title };
+    candidates = found
+      .map((c) => ({ ...c, score: scoreCandidate({ trackCount: c.trackCount, catalogs: c.catalogs, title: c.releaseGroup?.title ?? c.title }, mine) }))
+      .sort((a, b) => b.score - a.score);
+  }
+} catch (e) {
+  failure = errorText(e, t);
+}
+
+// The side-by-side comparison.
+const current = {
+  album_title: edition.album_title || release.title,
+  release_date: edition.release_date ?? '',
+  catalog_no: edition.catalog_no ?? '',
+  track_count: edition.track_count ? String(edition.track_count) : '',
+};
+const proposed = meta
+  ? { album_title: meta.title, release_date: meta.date ?? '', catalog_no: meta.catalog ?? '', track_count: String(meta.tracks.length) }
+  : null;
+const FIELDS = [
+  ['album_title', t('专辑名（整理版）')],
+  ['release_date', t('发行日')],
+  ['catalog_no', t('编号')],
+  ['track_count', t('声明的曲数')],
+] as const;
+const rowAt = (disc: number, position: number) => rows.find((r) => r.disc === disc && r.position === position);
+const lengthAt = (disc: number, position: number) => fileDurations.find((r) => r.disc === disc && r.position === position)?.d ?? null;
+---
+
+<Admin title={t('查找元数据')}>
+  <p class="muted">
+    <a href={`/admin/editions/${edition.id}`}>{release.catalog_no ? `${release.catalog_no} ` : ''}{release.title} · {t(SLOT_LABELS[edition.slot])}{edition.name ? ` · ${edition.name}` : ''}</a> ·
+    {t('候选来自外部数据库，只作参考：逐项对比后勾选要采用的。本站资料更全时，不必采用。')}
+  </p>
+  {failure && <p class="flash err">{failure}</p>}
+
+  <form method="get" class="panel inline-form">
+    <label>{t('MusicBrainz 发行 ID 或链接')} <input type="text" name="mb" value={mbParam ?? ''} size="40" /></label>
+    <button type="submit">{t('读取')}</button>
+  </form>
+  <form method="get" class="panel inline-form">
+    <label>{t('Bandcamp 专辑链接')} <input type="text" name="bc" value={bcParam ?? bandcampLink} size="60" placeholder="https://rigeltheatre.bandcamp.com/album/…" /></label>
+    <button type="submit">{t('读取')}</button>
+  </form>
+
+  {
+    !meta && candidates.length > 0 && (
+      <div class="panel">
+        <b>{t('MusicBrainz 上的候选')}</b>
+        <span class="muted">{t('按曲数、每首时长（误差 3 秒内）、编号和标题打分。')}</span>
+        <table class="grid">
+          <thead><tr><th>{t('匹配度')}</th><th>{t('发行')}</th><th>{t('格式')}</th><th class="num">{t('曲数')}</th><th>{t('编号')}</th><th></th></tr></thead>
+          <tbody>
+            {candidates.map((c) => (
+              <tr>
+                <td class="num">{Math.round(c.score * 100)}%</td>
+                <td>
+                  <a href={`https://musicbrainz.org/release/${c.id}`} target="_blank" rel="noopener">{c.title}</a>
+                  {c.disambiguation && <span class="muted"> ({c.disambiguation})</span>}
+                  <div class="muted">{[c.date, c.country].filter(Boolean).join(' · ')}</div>
+                </td>
+                <td>{c.format ?? '—'}</td>
+                <td class="num">{c.trackCount}</td>
+                <td>{c.catalogs.join(', ')}</td>
+                <td><a class="button" href={withParams(Astro.url, { mb: c.id, bc: null })}>{t('对比')}</a></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  {
+    meta && proposed && (
+      <form method="post" class="panel">
+        <p>
+          <b>{meta.source === 'musicbrainz' ? 'MusicBrainz' : 'Bandcamp'}</b>：<a href={meta.url} target="_blank" rel="noopener">{meta.title}</a>
+          {meta.disambiguation && <span class="muted"> ({meta.disambiguation})</span>}
+          <span class="muted"> · {[meta.date, meta.format, meta.catalog, meta.artist].filter(Boolean).join(' · ')}</span>
+        </p>
+        <table class="grid">
+          <thead><tr><th>{t('采用')}</th><th>{t('项目')}</th><th>{t('本站')}</th><th>{t('候选')}</th></tr></thead>
+          <tbody>
+            {FIELDS.map(([key, label]) => {
+              const differs = !!proposed[key] && proposed[key] !== current[key];
+              return (
+                <tr class:list={{ changed: differs }}>
+                  <td><input type="checkbox" name="field" value={key} checked={differs} disabled={!proposed[key]} /></td>
+                  <td>{label}</td>
+                  <td>{current[key] || '—'}</td>
+                  <td>{proposed[key] || '—'}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+
+        <h3>{t('曲目')}</h3>
+        <table class="grid">
+          <thead><tr><th>{t('采用')}</th><th>#</th><th>{t('本站标题')}</th><th>{t('候选标题')}</th><th>{t('文件时长')}</th><th>{t('候选时长')}</th></tr></thead>
+          <tbody>
+            {meta.tracks.map((m, i) => {
+              const row = rowAt(m.disc, m.position);
+              const mine = row ? trackTitle(row) : null;
+              const len = lengthAt(m.disc, m.position);
+              const off = len && m.duration_ms ? Math.abs(len * 1000 - m.duration_ms) > 3000 : false;
+              const differs = !row || mine !== m.title;
+              return (
+                <tr class:list={{ changed: differs }}>
+                  <td><input type="checkbox" name="row" value={i} checked={differs || meta!.source === 'musicbrainz'} /></td>
+                  <td class="num">{m.disc > 1 ? `${m.disc}-` : ''}{m.position}</td>
+                  <td>{mine ?? <span class="muted">{t('（新行）')}</span>}</td>
+                  <td>{m.title}{mine && titleKey(mine) === titleKey(m.title) && mine !== m.title && <span class="muted"> {t('（写法不同）')}</span>}{m.artist && m.artist !== meta!.artist && <div class="muted">{m.artist}</div>}</td>
+                  <td>{len ? formatMs(len * 1000) : '—'}</td>
+                  <td class:list={{ bad: off }}>{formatMs(m.duration_ms)}</td>
+                </tr>
+              );
+            })}
+            {rows.filter((r) => !meta!.tracks.some((m) => m.disc === r.disc && m.position === r.position)).map((r) => (
+              <tr><td></td><td class="num">{r.position}</td><td>{trackTitle(r)}</td><td class="muted">{t('（候选没有这一首）')}</td><td></td><td></td></tr>
+            ))}
+          </tbody>
+        </table>
+        <p class="options">
+          <label><input type="checkbox" name="ids" value="1" checked /> {meta.source === 'musicbrainz' ? t('写入 MusicBrainz ID（发行、录音、曲目）') : t('记下 Bandcamp 链接')}</label>
+          {meta.tracks.some((m) => m.artist && m.artist !== meta!.artist) && <label><input type="checkbox" name="artists" value="1" checked /> {t('曲目艺术家（如 feat.）填入空着的曲目条目')}</label>}
+          {meta.cover && (
+            <label class="cover-choice"><input type="checkbox" name="cover" value="1" checked={!edition.cover_file_id} /> {t('取回封面并设为这个版本的封面')} <img src={meta.cover} alt="" loading="lazy" /></label>
+          )}
+        </p>
+        <p class="muted">{t('勾选的曲目：标题不同的写成这个版本的曲名，时长与 ID 一并更新；这个版本还没有的行会新建。所有改动记为一条修改记录，可以撤销。')}</p>
+        <button class="primary" type="submit">{t('采用勾选的项目')}</button>
+        <a class="button" href={withParams(Astro.url, { mb: null, bc: null })}>{t('返回候选列表')}</a>
+      </form>
+    )
+  }
+</Admin>

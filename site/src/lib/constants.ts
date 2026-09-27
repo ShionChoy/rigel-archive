@@ -98,7 +98,7 @@ export const FILE_STATES = ['inbox', 'classified', 'published', 'ignored'] as co
 export type FileState = (typeof FILE_STATES)[number];
 export const FILE_STATE_LABELS: Record<FileState, string> = {
   inbox: N_('待整理'),
-  classified: N_('已归类'),
+  classified: N_('已归档'),
   published: N_('已发布'),
   ignored: N_('已忽略'),
 };

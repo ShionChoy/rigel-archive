@@ -6,6 +6,7 @@ export interface DirNode {
   name: string;
   path: string;
   n: number;
+  left?: number; // files still to organize, when shown
   children: DirNode[];
 }
 
@@ -13,12 +14,16 @@ interface Props {
   nodes: DirNode[];
   current: string;
   url: URL;
+  /** Other query parameters every link sets (e.g. the tree tab, or loc=unplaced). */
+  params?: Record<string, string | null>;
 }
 
-const { nodes, current, url } = Astro.props;
+const { nodes, current, url, params = {} } = Astro.props;
 const isOpen = (node: DirNode) => current === node.path || current.startsWith(`${node.path}/`);
 // An archive node lists its unpacked members (ra extract gives them the archive's path as folder).
 const mark = (node: DirNode) => (ARCHIVE_NAME.test(node.name) ? 'archive' : undefined);
+const href = (node: DirNode) => withParams(url, { ...params, dir: node.path, page: null });
+const count = (node: DirNode) => (node.left === undefined ? String(node.n) : node.left ? `${node.left} / ${node.n}` : `✓ ${node.n}`);
 ---
 
 <ul>
@@ -28,19 +33,19 @@ const mark = (node: DirNode) => (ARCHIVE_NAME.test(node.name) ? 'archive' : unde
         {node.children.length > 0 ? (
           <details open={isOpen(node)}>
             <summary>
-              <a class:list={[mark(node), { current: current === node.path }]} href={withParams(url, { dir: node.path, page: null })}>
+              <a class:list={[mark(node), { current: current === node.path, done: node.left === 0 }]} href={href(node)} data-dir={node.path}>
                 {node.name}
               </a>
-              <span class="n">{node.n}</span>
+              <span class="n">{count(node)}</span>
             </summary>
-            <Astro.self nodes={node.children} current={current} url={url} />
+            <Astro.self nodes={node.children} current={current} url={url} params={params} />
           </details>
         ) : (
           <>
-            <a class:list={[mark(node), { current: current === node.path }]} href={withParams(url, { dir: node.path, page: null })}>
+            <a class:list={[mark(node), { current: current === node.path, done: node.left === 0 }]} href={href(node)} data-dir={node.path}>
               {node.name}
             </a>
-            <span class="n">{node.n}</span>
+            <span class="n">{count(node)}</span>
           </>
         )}
       </li>

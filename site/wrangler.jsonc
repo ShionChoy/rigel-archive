@@ -10,6 +10,9 @@
   "workers_dev": true,
   "preview_urls": false,
   "observability": { "enabled": true },
+  // A whole edition downloads as a zip made on the fly (CRC-32 of every byte, ~6 s of CPU for 2 GB);
+  // CPU time is billed as used, so the higher ceiling costs nothing by itself.
+  "limits": { "cpu_ms": 300000 },
   "d1_databases": [
     {
       "binding": "DB",

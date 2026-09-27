@@ -1,0 +1,31 @@
+---
+// The 「移动到…」 dialog: every place in the archive tree, searchable, recent places first. Opened by
+// scripts/place-picker.ts (openPicker), which resolves with the chosen place.
+import type { Places } from '../lib/locations';
+
+interface Props {
+  places: Places;
+}
+
+const { places } = Astro.props;
+const { t } = Astro.locals;
+const options = [{ key: 'top', path: t('顶层'), kind: 'top', depth: 0 }, ...places.options(t)];
+---
+
+<dialog id="place-picker" class="picker">
+  <form method="dialog">
+    <h3 data-title>{t('移动到…')}</h3>
+    <input type="search" data-search placeholder={t('搜索：作品名、编号、版本或文件夹，如「lengsel 第 2 版」')} autocomplete="off" />
+    <ul data-list role="listbox" aria-label={t('位置')}></ul>
+    <div class="picker-extra">
+      <label>{t('在所选位置下新建文件夹（可选）')} <input type="text" data-new-folder maxlength="100" /></label>
+      <label data-keep-row hidden><input type="checkbox" data-keep /> <span data-keep-label></span></label>
+    </div>
+    <p class="picker-chosen muted" data-chosen></p>
+    <div class="picker-buttons">
+      <button value="cancel" type="submit">{t('取消')}</button>
+      <button class="primary" value="ok" type="submit" data-ok disabled>{t('移动到这里')}</button>
+    </div>
+  </form>
+  <script type="application/json" data-options set:html={JSON.stringify(options).replace(/</g, '\\u003c')} />
+</dialog>

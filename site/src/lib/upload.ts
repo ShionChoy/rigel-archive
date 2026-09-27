@@ -5,6 +5,7 @@ import { SHA256_HEX, blobKey } from './api';
 import { ChangeSet } from './changes';
 import { SLOTS, UPLOAD_ROOT, isOneOf, kindFor } from './constants';
 import { N_, summary, UserError } from './i18n';
+import { newId } from './ids';
 
 export interface UploadInput {
   batch: string; // one upload session = one revision batch, undone together
@@ -15,6 +16,10 @@ export interface UploadInput {
   sha256: string;
   release: string | null;
   slot: string | null;
+  place: string | null; // era:/rel:/ed:/fd: key chosen on the upload page
+  keep: boolean; // the uploaded folders come along below the place
+  folder: string | null; // a new folder under the place, chosen in the picker
+  sealed: boolean; // archives are kept whole
   note: string | null;
 }
 
@@ -47,8 +52,11 @@ export function parseUpload(body: Record<string, unknown>): UploadInput {
   if (slot && !isOneOf(SLOTS, slot)) throw new UserError('未知的版本栏位');
   const release = text(body.release, 100);
   if (slot && !release) throw new UserError('选择版本栏位前要先选作品');
+  const place = text(body.place, 80);
+  if (place && !/^(era|rel|ed|fd):[\w-]{1,80}$/.test(place)) throw new UserError('找不到这个位置');
   return {
-    batch, batchDir, sha256, size, slot, release,
+    batch, batchDir, sha256, size, slot, release, place, keep: body.keep === true, sealed: body.sealed === true,
+    folder: text(body.folder, 200)?.replace(/\//g, '_') ?? null,
     path: String(body.path ?? ''),
     mtime: mtime ? new Date(mtime).toISOString().replace(/\.\d{3}Z$/, 'Z') : null,
     note: text(body.note, 2000),
@@ -65,8 +73,7 @@ export function splitPath(path: string): { dirs: string[]; name: string } {
 }
 
 function newFileId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  return `f_${[...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}`;
+  return newId('f');
 }
 
 export async function registerUpload(db: D1Database, media: R2Bucket, actor: string, input: UploadInput): Promise<string> {
@@ -90,15 +97,20 @@ export async function registerUpload(db: D1Database, media: R2Bucket, actor: str
 
   const dot = name.lastIndexOf('.');
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
-  const suggest = input.release
-    ? JSON.stringify({ rule: N_('上传时指定'), confidence: 1, release_id: input.release, rights: 'own', ...(input.slot ? { slot: input.slot } : {}) })
-    : null;
+  // A place chosen on the upload page is a suggestion with full confidence: 「按建议确认」 files it.
+  const kept = [input.folder ?? '', ...(input.keep ? dirs.map((d) => d.slice(0, 200)) : [])].filter(Boolean).join('/');
+  const suggest = input.place
+    ? JSON.stringify({ rule: N_('上传时指定'), confidence: 1, place: input.place, ...(kept ? { folder: kept } : {}), ...(input.place.startsWith('rel:') || input.place.startsWith('ed:') ? { rights: 'own' } : {}) })
+    : input.release
+      ? JSON.stringify({ rule: N_('上传时指定'), confidence: 1, release_id: input.release, rights: 'own', ...(input.slot ? { slot: input.slot } : {}) })
+      : null;
+  const archive = ['archive', 'disc_image'].includes(kindFor(name.slice(name.lastIndexOf('.') + 1)));
   const id = newFileId();
   const cs = new ChangeSet(db, actor, summary, input.batch);
   cs.create('file', {
     id, origin: 'upload', dir: [input.batchDir, ...dirs].join('/'), name, ext, size: input.size, mtime: input.mtime,
     sha256: input.sha256, blob_key: key, kind: kindFor(ext), rights: 'unknown', state: 'inbox', suggest,
-    note: input.note, uploaded_by: actor,
+    note: input.note, uploaded_by: actor, sealed: input.sealed && archive ? 1 : 0,
   });
   await cs.commit();
   return id;
@@ -131,7 +143,7 @@ export async function replaceFile(
   cs.create('file', {
     id, origin: 'upload', dir: REPLACED_DIR, name, ext, size: input.size, mtime: input.mtime, sha256: input.sha256,
     blob_key: blobKey(input.sha256), kind: kindFor(ext), rights: old.rights, release_id: old.release_id, slot: old.slot,
-    track_id: old.track_id, role: old.role, download_name: null,
+    edition_id: old.edition_id, folder_id: old.folder_id, track_id: old.track_id, role: old.role, download_name: null,
     // A published file's replacement is checked before it goes public again.
     state: old.state === 'published' ? 'classified' : old.state,
     note: `替换 ${old.name}`, uploaded_by: actor, replaces: old.id,

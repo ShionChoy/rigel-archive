@@ -148,6 +148,42 @@ def test_rule_validation():
         parse_rules([{"match": "x", "slot": "pv"}], index)
 
 
+def test_rules_suggest_editions_folders_and_kept_structure():
+    releases, index = _index()
+    rules = RuleSet(parse_rules([
+        {"name": "rip A", "match": r"^rips/\[(?P<cn>(?P<cat>RTCD-\d{3})A)\][^/]*/", "release": {"catalog": "cat"},
+         "slot": "cd_rip", "edition": {"name": "第 2 版", "catalog": "cn"}, "keep": True, "rights": "own"},
+        {"name": "rip", "match": r"^rips/\[(?P<cat>RTCD-\d{3})\][^/]*/", "release": {"catalog": "cat"}, "slot": "cd_rip"},
+        {"name": "web", "match": "^web/", "era": "rigel-theatre", "folder": "官网存档", "keep": True},
+        {"name": "bms", "match": "^bms/", "era": "grand-thaw", "folder": "BMS", "seal": True},
+        {"name": "readme", "match": r"^notes/说明\.txt$", "folder": "关于/说明", "readme": True},
+    ], index), index)
+
+    s = rules.suggest(SurveyFile("rips/[RTCD-004A] Lengsel/Scans/1.jpg", 1, None))
+    assert (s.release_id, s.slot, s.edition, s.edition_catalog, s.folder) == ("rtcd-004", "cd_rip", "第 2 版", "RTCD-004A", "Scans")
+    s = rules.suggest(SurveyFile("rips/[RTCD-004] Lengsel/01.flac", 1, None))
+    assert (s.edition, s.edition_catalog, s.folder) == ("", None, None)
+    s = rules.suggest(SurveyFile("web/20200616/rigeltheatre/index.html", 1, None))
+    assert (s.era_id, s.folder, s.release_id) == ("rigel-theatre", "官网存档/20200616/rigeltheatre", None)
+    assert rules.suggest(SurveyFile("bms/x.rar", 1, None)).seal is True
+    assert rules.suggest(SurveyFile("bms/x.ogg", 1, None)).seal is None  # only archives are kept whole
+    s = rules.suggest(SurveyFile("notes/说明.txt", 1, None))
+    assert (s.folder, s.readme) == ("关于/说明", True)
+    assert "seal" not in s.to_json() and s.to_json()["readme"] is True
+
+
+def test_new_rule_keys_are_validated():
+    _, index = _index()
+    with pytest.raises(ValueError, match="edition needs a slot"):
+        parse_rules([{"match": "x", "release": "garnet", "edition": "初版"}], index)
+    with pytest.raises(ValueError, match="bad folder"):
+        parse_rules([{"match": "x", "folder": "a//b"}], index)
+    with pytest.raises(ValueError, match="unknown era"):
+        parse_rules([{"match": "x", "era": "nope", "folder": "a"}], index)
+    with pytest.raises(ValueError, match="era is for folders"):
+        parse_rules([{"match": "x", "release": "garnet", "era": "grand-thaw"}], index)
+
+
 def test_project_rules_load():
     RuleSet.load(DEFAULT_RULES, load_catalog(DEFAULT_CATALOG))
 
@@ -323,7 +359,7 @@ def test_archive_with_all_members_loose_is_an_original_package():
     rules = RuleSet([], ReleaseIndex([]))
     suggestions = suggest_all(expand(loose, records), records, rules)
     s = suggestions[loose[0].file_id]
-    assert s.role == PACKAGE_ROLE and "dl/RJ1" in s.note
+    assert s.role == PACKAGE_ROLE and s.seal is True and "dl/RJ1" in s.note
 
     partial = expand(loose[:2], records)  # the jpg exists only inside the archive
     assert suggest_all(partial, records, rules)[loose[0].file_id] is None

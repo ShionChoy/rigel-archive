@@ -1,15 +1,18 @@
 ---
 // A minimal version of the public album page, to check the organizing result: the 7 slots with their
-// placeholders, the track list with a player (best available version of each track) and the files.
+// editions and placeholders, one edition's track list (switchable) with a player, the comparison of the
+// editions, and the scans and other files. Each track plays the best-sounding copy of the same recording
+// (the same audio, or the same master in another format) — e.g. the 2nd edition's CD rip plays from the
+// 24-bit Bandcamp FLAC.
 import { env } from 'cloudflare:workers';
-import { RELEASE_KIND_LABELS, SLOTS, SLOT_LABELS, SLOT_STATUS_LABELS, type Slot } from '../../../../lib/constants';
-import { db, parseFormat, type FileRow, type ReleaseRow, type SlotRow } from '../../../../lib/db';
-import { formatBytes, formatSpec } from '../../../../lib/format';
+import { RELEASE_KIND_LABELS, SLOTS, SLOT_LABELS, SLOT_STATUS_LABELS, mimeFor, type Slot } from '../../../../lib/constants';
+import { db, parseFormat, type EditionRow, type FileRow, type ReleaseRow, type SlotRow } from '../../../../lib/db';
+import { EDITION_STATUS_LABELS, RELATION_MARK, RELATION_TEXT, classify, comparison, defaultEdition, loadEditionTracks, loadEditions, trackTitle } from '../../../../lib/editions';
+import { formatBytes, formatSpec, withParams } from '../../../../lib/format';
 import { HTML_LANG } from '../../../../lib/i18n';
 import { audioSources, imageSrc, mediaSrc } from '../../../../lib/media';
 import { derivedFor } from '../../../../lib/processing';
-import { formatMs, loadTracks } from '../../../../lib/tracks';
-import { mimeFor } from '../../../../lib/constants';
+import { formatMs } from '../../../../lib/tracks';
 
 const { id } = Astro.params;
 const { t, lang } = Astro.locals;
@@ -18,59 +21,80 @@ const release = await database.prepare('SELECT * FROM releases WHERE id = ?').bi
 if (!release) return new Response(t('找不到作品'), { status: 404 });
 const base = env.MEDIA_DEV_BASE ?? '';
 
-type F = Pick<FileRow, 'id' | 'name' | 'kind' | 'ext' | 'slot' | 'track_id' | 'role' | 'format' | 'size' | 'sha256' | 'blob_key' | 'source_path' | 'member_path' | 'rights'>;
-const [slotsResult, filesResult, tracks, titles] = await Promise.all([
+type F = Pick<FileRow, 'id' | 'name' | 'kind' | 'ext' | 'slot' | 'edition_id' | 'track_id' | 'role' | 'format' | 'size' | 'sha256' | 'pcm_md5' | 'blob_key' | 'source_path' | 'member_path' | 'rights'>;
+const [slotsResult, filesResult, editions, titles, matrix] = await Promise.all([
   database.prepare('SELECT * FROM release_slots WHERE release_id = ?').bind(release.id).all<SlotRow>(),
   database
     .prepare(
-      `SELECT id, name, kind, ext, slot, track_id, role, format, size, sha256, blob_key, source_path, member_path, rights FROM files f
-       WHERE release_id = ? AND state IN ('classified', 'published') AND dup_of IS NULL
+      `SELECT id, name, kind, ext, slot, edition_id, track_id, role, format, size, sha256, pcm_md5, blob_key, source_path, member_path, rights FROM files f
+       WHERE release_id = ? AND state IN ('classified', 'published') AND dup_of IS NULL AND sealed_in IS NULL
          AND NOT EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id)
        ORDER BY slot, name`,
     )
     .bind(release.id)
     .all<F>(),
-  loadTracks(release.id),
+  loadEditions(release.id),
   database
     .prepare("SELECT field, lang, value FROM translations WHERE entity = 'release' AND entity_id = ? AND status = 'approved'")
     .bind(release.id)
     .all<{ field: string; lang: string; value: string }>(),
+  comparison(release.id),
 ]);
 const files = filesResult.results;
 const slots = new Map(slotsResult.results.map((s) => [s.slot, s]));
-const bySlot = new Map<Slot | null, F[]>();
-for (const f of files) bySlot.set(f.slot, [...(bySlot.get(f.slot) ?? []), f]);
+const { results: etCounts } = await database
+  .prepare('SELECT et.edition_id, count(*) AS n FROM edition_tracks et JOIN editions e ON e.id = et.edition_id WHERE e.release_id = ? GROUP BY et.edition_id')
+  .bind(release.id)
+  .all<{ edition_id: string; n: number }>();
+const trackCounts = new Map(etCounts.map((r) => [r.edition_id, r.n]));
+const listed = editions.filter((e) => trackCounts.get(e.id));
+const chosenParam = Astro.url.searchParams.get('edition');
+const chosen: EditionRow | null = listed.find((e) => e.id === chosenParam) ?? defaultEdition(editions, trackCounts);
+const rows = chosen ? await loadEditionTracks(chosen.id) : [];
 const tx = (field: string, code: string) => titles.results.find((x) => x.field === field && x.lang === code)?.value;
 const derived = await derivedFor(database, files.map((f) => f.sha256));
 const derivedOf = (f: F) => (f.sha256 ? derived.get(f.sha256) : undefined);
-// Titles in the other languages under the original, like the public page (the admin's language first).
 const subtitles = (lang === 'ja' ? ['ja', 'en', 'zh'] : ['zh', 'en', 'ja']).map((code) => tx('title', code)).filter((v): v is string => !!v && v !== release.title);
 const description = tx('description', lang) ?? release.description;
 
-// The version a track plays by default: the best-sounding source among the slots that have it.
-const SLOT_RANK: Slot[] = ['digital', 'cd_rip', 'cd', 'bonus', 'streaming', 'pv', 'scans'];
+// Acoustic matches between this release's audio, to find other copies of the same recording.
+const shas = [...new Set(files.filter((f) => f.kind === 'audio' && f.sha256).map((f) => f.sha256!))];
+const matches = new Map<string, { score: number; matched_ms: number }>();
+const lengths = new Map<string, number>();
+if (shas.length) {
+  const [m, fp] = await database.batch([
+    database.prepare('SELECT a, b, score, matched_ms FROM acoustic_matches WHERE a IN (SELECT value FROM json_each(?1)) AND b IN (SELECT value FROM json_each(?1))').bind(JSON.stringify(shas)),
+    database.prepare('SELECT sha256, duration FROM fingerprints WHERE sha256 IN (SELECT value FROM json_each(?))').bind(JSON.stringify(shas)),
+  ]);
+  for (const r of m.results as { a: string; b: string; score: number; matched_ms: number }[]) matches.set(`${r.a}/${r.b}`, r);
+  for (const r of fp.results as { sha256: string; duration: number }[]) lengths.set(r.sha256, r.duration);
+}
+const sameRecording = (x: F, y: F) => {
+  if (x.sha256 === y.sha256 || (x.pcm_md5 && x.pcm_md5 === y.pcm_md5)) return true;
+  if (!x.sha256 || !y.sha256) return false;
+  const m = matches.get(x.sha256 < y.sha256 ? `${x.sha256}/${y.sha256}` : `${y.sha256}/${x.sha256}`);
+  return !!m && classify(m.score, m.matched_ms, Math.min(lengths.get(x.sha256) ?? 0, lengths.get(y.sha256) ?? 0)).relation === 'master';
+};
 const quality = (f: F) => {
   const fmt = parseFormat(f.format);
   return (fmt.lossless ? 1e6 : 0) + (fmt.bits ?? 0) * 1e3 + (fmt.rate ?? 0) / 1e3 + (fmt.kbps ?? 0) / 1e3;
 };
 const playable = (f: F) => f.kind === 'audio' && f.rights !== 'third_party' && mediaSrc(f, base) !== null;
-const sourceFor = (trackId: string) =>
-  files
-    .filter((f) => f.track_id === trackId && playable(f))
-    .sort((a, b) => SLOT_RANK.indexOf(a.slot as Slot) - SLOT_RANK.indexOf(b.slot as Slot) || quality(b) - quality(a))[0];
-const cover = files.find((f) => f.id === release.cover_file_id);
-const coverSrc = cover ? imageSrc(mediaSrc(cover, base), derivedOf(cover), 640) : null;
-const queue = tracks.map((tr) => ({ tr, src: sourceFor(tr.id) }));
-const multiDisc = tracks.some((tr) => tr.disc > 1);
-const slotAudio = (s: Slot) => (bySlot.get(s) ?? []).filter((f) => f.kind === 'audio');
-const slotSpec = (s: Slot) => {
-  const audio = slotAudio(s);
-  if (audio.length === 0) return (bySlot.get(s) ?? []).length ? t('{n} 个文件', { n: (bySlot.get(s) ?? []).length }) : '';
-  return formatSpec({ ...parseFormat(audio[0].format), duration: undefined }) + ` · ${t('{n} 个音频', { n: audio.length })}`;
+/** The file a row plays: the best-sounding copy of the chosen edition's recording of that track. */
+const sourceFor = (trackId: string) => {
+  const mine = files.filter((f) => f.track_id === trackId && f.edition_id === chosen?.id && playable(f)).sort((a, b) => quality(b) - quality(a))[0];
+  if (!mine) return null;
+  const same = files.filter((f) => f.track_id === trackId && playable(f) && sameRecording(mine, f));
+  return [mine, ...same].sort((a, b) => quality(b) - quality(a))[0];
 };
+const cover = files.find((f) => f.id === (chosen?.cover_file_id ?? release.cover_file_id));
+const coverSrc = cover ? imageSrc(mediaSrc(cover, base), derivedOf(cover), 640) : null;
+const queue = rows.map((row) => ({ row, src: sourceFor(row.track_id) }));
+const multiDisc = rows.some((r) => r.disc > 1);
 const placeholder = new Set(['missing', 'partial', 'unknown']);
 const gallery = files.filter((f) => f.kind === 'image' && (f.slot === 'scans' || f.slot === null)).slice(0, 40);
 const others = files.filter((f) => f.kind !== 'audio' && !gallery.includes(f));
+const editionName = (e: EditionRow) => `${t(SLOT_LABELS[e.slot])}${e.name ? ` · ${e.name}` : ''}`;
 ---
 
 <!doctype html>
@@ -86,7 +110,7 @@ const others = files.filter((f) => f.kind !== 'audio' && !gallery.includes(f));
       body { margin: 0; font: 15px/1.6 system-ui, -apple-system, 'Noto Sans SC', 'Noto Sans JP', sans-serif; color: var(--ink); background: var(--bg); padding-bottom: 96px; }
       .bar { background: #2b3040; color: #fff; padding: 8px 16px; font-size: 13px; }
       .bar a { color: #cdd6ff; }
-      main { max-width: 980px; margin: 0 auto; padding: 24px 16px; }
+      main { max-width: 1040px; margin: 0 auto; padding: 24px 16px; }
       header.album { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
       .cover { width: 220px; aspect-ratio: 1; background: #ddd center/cover; border-radius: 6px; display: grid; place-items: center; color: var(--muted); }
       h1 { margin: 0 0 4px; font-size: 26px; }
@@ -94,9 +118,12 @@ const others = files.filter((f) => f.kind !== 'audio' && !gallery.includes(f));
       section { margin-top: 28px; }
       h2 { font-size: 17px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
       table { width: 100%; border-collapse: collapse; }
-      td { padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+      td, th { padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; text-align: left; }
       .ph { display: inline-block; border: 1px dashed #b9b9b0; color: var(--muted); padding: 0 8px; border-radius: 4px; }
       .ok { color: #2d6a3a; }
+      .editions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+      .editions a { border: 1px solid var(--line); border-radius: 14px; padding: 2px 10px; color: var(--ink); text-decoration: none; font-size: 13px; background: #fff; }
+      .editions a.on { background: var(--accent); color: #fff; border-color: var(--accent); }
       button.play { border: 1px solid var(--line); background: #fff; border-radius: 50%; width: 30px; height: 30px; cursor: pointer; }
       button.play:disabled { opacity: 0.3; cursor: default; }
       button.all { background: var(--accent); color: #fff; border: 0; border-radius: 4px; padding: 6px 14px; cursor: pointer; }
@@ -106,12 +133,16 @@ const others = files.filter((f) => f.kind !== 'audio' && !gallery.includes(f));
       footer.player { position: fixed; left: 0; right: 0; bottom: 0; background: #fff; border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 12px; align-items: center; }
       footer.player audio { flex: 1; }
       .muted { color: var(--muted); }
+      .compare { overflow-x: auto; }
+      .compare td, .compare th { font-size: 12px; white-space: nowrap; text-align: center; }
+      .compare td:first-child, .compare th:first-child { text-align: left; white-space: normal; }
+      .r-new { background: #e8eefa; } .r-same, .r-master { background: #e3f3ea; } .r-remix { background: #f3f7e6; } .r-part { background: #fbf0d9; } .r-other { background: #fbe6e4; }
       @media (max-width: 640px) { header.album { grid-template-columns: 1fr; } .cover { width: 100%; } }
     </style>
   </head>
   <body>
     <div class="bar">
-      {t('后台预览：只显示「已归类 / 已发布」的文件（重复与旧版本不显示）；公开站点上线前的样子。')}
+      {t('后台预览：只显示「已归档 / 已发布」的文件（重复与旧版本不显示）；公开站点上线前的样子。')}
       <a href={`/admin/releases/${release.id}`}>{t('← 回到作品编辑')}</a>
       {release.state !== 'published' && ` · ${t('本作品还是草稿，不会公开')}`}
     </div>
@@ -119,15 +150,75 @@ const others = files.filter((f) => f.kind !== 'audio' && !gallery.includes(f));
       <header class="album">
         <div class="cover" style={coverSrc ? `background-image:url('${coverSrc}')` : undefined}>{!coverSrc && t('无封面')}</div>
         <div>
-          <h1>{release.title}</h1>
+          <h1>{chosen?.album_title || release.title}</h1>
           {subtitles.length > 0 && <div class="sub">{subtitles.slice(0, 2).join(' / ')}</div>}
           <p class="sub">
-            {[release.catalog_no, release.release_date, release.event, tracks.length ? t('{n} 曲', { n: tracks.length }) : release.track_count ? t('{n} 曲', { n: release.track_count }) : null, release.series, t(RELEASE_KIND_LABELS[release.kind])].filter(Boolean).join(' · ')}
+            {[chosen?.catalog_no ?? release.catalog_no, chosen?.release_date ?? release.release_date, release.event, rows.length ? t('{n} 曲', { n: rows.length }) : release.track_count ? t('{n} 曲', { n: release.track_count }) : null, release.series, t(RELEASE_KIND_LABELS[release.kind])].filter(Boolean).join(' · ')}
           </p>
+          {listed.length > 1 && (
+            <div class="editions">
+              {listed.map((e) => <a href={withParams(Astro.url, { edition: e.id })} class:list={{ on: e.id === chosen?.id }}>{editionName(e)}{e.catalog_no ? ` ${e.catalog_no}` : ''}</a>)}
+            </div>
+          )}
           {queue.some((q) => q.src) && <button class="all" id="play-all">{t('▶ 播放全部')}</button>}
           {description && <p style="white-space:pre-wrap">{description}</p>}
         </div>
       </header>
+
+      <section>
+        <h2>{chosen ? t('曲目（{edition}）', { edition: editionName(chosen) }) : t('曲目')}</h2>
+        {rows.length === 0 && <p class="muted">{t('还没有曲目表（在版本页生成或导入）。')}</p>}
+        <table id="tracks">
+          <tbody>
+            {
+              queue.map(({ row, src }, i) => (
+                <tr data-sources={src ? JSON.stringify(audioSources(mediaSrc(src, base), derivedOf(src), mimeFor(src.ext))) : undefined} data-title={trackTitle(row)} data-index={i}>
+                  <td style="width:3em" class="muted">{multiDisc ? `${row.disc}-` : ''}{String(row.position).padStart(2, '0')}</td>
+                  <td>
+                    {trackTitle(row)}
+                    {src && (
+                      <div class="muted" style="font-size:12px">
+                        {formatSpec(parseFormat(src.format))}
+                        {src.edition_id !== chosen?.id && ` · ${t('播放同一录音的 {edition}', { edition: editionName(editions.find((e) => e.id === src.edition_id)!) })}`}
+                      </div>
+                    )}
+                    {!src && <div class="muted" style="font-size:12px">{t('这一版的文件还没收录')}</div>}
+                  </td>
+                  <td class="muted" style="width:4em">{formatMs(row.duration_ms ?? row.entry_duration)}</td>
+                  <td style="width:3em"><button class="play" disabled={!src} aria-label={t('播放')}>▶</button></td>
+                  <td style="width:7em">{row.song_id && <a href={`/admin/songs/${row.song_id}`}>{t('所有版本 ›')}</a>}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </section>
+
+      {
+        matrix.editions.length > 1 && matrix.rows.length > 0 && (
+          <section>
+            <h2>{t('版本对照')}</h2>
+            <div class="compare">
+              <table>
+                <thead><tr><th></th>{matrix.editions.map((e) => <th>{editionName(e)}<div class="muted">{e.catalog_no ?? ''}</div></th>)}</tr></thead>
+                <tbody>
+                  {matrix.rows.map(({ track, cells }) => (
+                    <tr>
+                      <td>{track.title}</td>
+                      {cells.map((c) => (
+                        <td class={c ? `r-${c.relation}` : ''} title={c ? t(RELATION_TEXT[c.relation]) : t('这一版没有')}>
+                          {c ? `${c.position ?? '·'} ${RELATION_MARK[c.relation]}${c.relation === 'part' && c.share !== undefined ? ` ${Math.round(c.share * 100)}%` : ''}` : '—'}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p class="muted" style="font-size:12px">{t('= 完全相同　≈ 同一母带　△ 重新混音或母带　◐ 部分相同　≠ 不同录音　+ 这一版新增')}</p>
+          </section>
+        )
+      }
 
       <section>
         <h2>{t('版本栏位')}</h2>
@@ -137,6 +228,7 @@ const others = files.filter((f) => f.kind !== 'audio' && !gallery.includes(f));
               SLOTS.map((s) => {
                 const row = slots.get(s);
                 const status = row?.status ?? 'unknown';
+                const mine = editions.filter((e) => e.slot === s);
                 return (
                   <tr>
                     <td style="width:9em">{t(SLOT_LABELS[s])}</td>
@@ -148,35 +240,16 @@ const others = files.filter((f) => f.kind !== 'audio' && !gallery.includes(f));
                       ) : (
                         <span class="muted">{t(SLOT_STATUS_LABELS[status])}{status === 'planned' && row?.planned_date ? ` ${row.planned_date}` : ''}</span>
                       )}
-                      {' '}<span class="muted">{slotSpec(s)}</span>
+                      {mine.length > 0 && (
+                        <div class="muted" style="font-size:13px">
+                          {mine.map((e) => `${e.name || t(SLOT_LABELS[s as Slot])}${e.catalog_no ? ` ${e.catalog_no}` : ''}${e.status !== 'collected' ? `（${t(EDITION_STATUS_LABELS[e.status])}）` : ''}`).join(' · ')}
+                        </div>
+                      )}
                       {row?.note && <div class="muted">{row.note}</div>}
                     </td>
                   </tr>
                 );
               })
-            }
-          </tbody>
-        </table>
-      </section>
-
-      <section>
-        <h2>{t('曲目')}</h2>
-        {tracks.length === 0 && <p class="muted">{t('还没有曲目表（在作品编辑页录入，或从文件生成）。')}</p>}
-        <table id="tracks">
-          <tbody>
-            {
-              queue.map(({ tr, src }, i) => (
-                <tr data-sources={src ? JSON.stringify(audioSources(mediaSrc(src, base), derivedOf(src), mimeFor(src.ext))) : undefined} data-title={tr.title} data-index={i}>
-                  <td style="width:3em" class="muted">{multiDisc ? `${tr.disc}-` : ''}{String(tr.position).padStart(2, '0')}</td>
-                  <td>
-                    {tr.title}{tr.version_label && <span class="muted"> （{tr.version_label}）</span>}
-                    {src && <div class="muted" style="font-size:12px">{src.slot ? t(SLOT_LABELS[src.slot]) : ''} · {formatSpec(parseFormat(src.format))}</div>}
-                  </td>
-                  <td class="muted" style="width:4em">{formatMs(tr.duration_ms)}</td>
-                  <td style="width:3em"><button class="play" disabled={!src} aria-label={t('播放')}>▶</button></td>
-                  <td style="width:7em">{tr.song_id && <a href={`/admin/songs/${tr.song_id}`}>{t('所有版本 ›')}</a>}</td>
-                </tr>
-              ))
             }
           </tbody>
         </table>

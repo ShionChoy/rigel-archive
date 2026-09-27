@@ -1,0 +1,198 @@
+---
+// Import editions from MusicBrainz: every release of the matching release group(s), each to be made a
+// new edition, merged into an existing one, or skipped. The chosen releases' track lists become the
+// editions' track orders (see applyMeta).
+import { env } from 'cloudflare:workers';
+import Admin from '../../../../layouts/Admin.astro';
+import { SLOTS, SLOT_LABELS, isOneOf, type Slot } from '../../../../lib/constants';
+import { ChangeSet, batchSince } from '../../../../lib/changes';
+import { db, type EditionRow, type ReleaseRow } from '../../../../lib/db';
+import { loadEditionTracks, loadEditions, parseIds } from '../../../../lib/editions';
+import { withParams } from '../../../../lib/format';
+import { errorText, summary, UserError } from '../../../../lib/i18n';
+import { newId } from '../../../../lib/ids';
+import { MBID, applyMeta, editionFor, mbCandidates, mbRelease, scoreCandidate, type MbCandidate } from '../../../../lib/metadata';
+import { syncSlots } from '../../../../lib/releases';
+
+const { id } = Astro.params;
+const { t } = Astro.locals;
+const database = db();
+const release = await database.prepare('SELECT * FROM releases WHERE id = ?').bind(id).first<ReleaseRow>();
+if (!release) return new Response(t('找不到作品'), { status: 404 });
+
+if (Astro.request.method === 'POST') {
+  const started = new Date().toISOString();
+  const form = await Astro.request.formData();
+  const actor = Astro.locals.admin!.email;
+  try {
+    const chosen = form.getAll('mbid').map(String).filter((x) => MBID.test(x));
+    if (chosen.length === 0) throw new UserError('请至少勾选一个发行');
+    let done = 0;
+    for (const mbid of chosen) {
+      const target = String(form.get(`target_${mbid}`) ?? 'new');
+      const meta = await mbRelease(mbid);
+      const editions = await loadEditions(release.id);
+      let edition: EditionRow | undefined = editions.find((e) => e.id === target);
+      if (!edition) {
+        const slot = String(form.get(`slot_${mbid}`) ?? 'digital');
+        if (!isOneOf(SLOTS, slot)) throw new UserError('未知的版本类型');
+        const name = String(form.get(`name_${mbid}`) ?? '').trim().slice(0, 100);
+        if (editions.some((e) => e.slot === slot && e.name === name)) {
+          throw new UserError('这个作品已经有同类型、同名的版本：{name}', { name: name || t(SLOT_LABELS[slot as Slot]) });
+        }
+        const editionId = newId('e');
+        const cs = new ChangeSet(database, actor, summary('作品 {release}：从 MusicBrainz 新建版本 {edition}', { release: release.catalog_no ?? release.title, edition: name || slot }));
+        const row = {
+          id: editionId, release_id: release.id, slot, name, catalog_no: null, release_date: null, source: 'MusicBrainz', status: 'missing',
+          based_on: null, is_default: 0, track_count: null, album_title: null, cover_file_id: null, external_ids: '{}', note: null, sort: editions.length,
+        };
+        cs.create('edition', row);
+        await syncSlots(cs, release.id, [...editions, row]);
+        await cs.commit();
+        edition = (await database.prepare('SELECT * FROM editions WHERE id = ?').bind(editionId).first<EditionRow>())!;
+      }
+      const rows = await loadEditionTracks(edition.id);
+      await applyMeta(actor, env.MEDIA, release, edition, meta, {
+        fields: new Set(['album_title', 'release_date', 'catalog_no', 'track_count']),
+        ids: true,
+        artists: true,
+        titles: rows.length === 0,
+        // An edition that already has a track order keeps it: its rows only get ids and lengths where
+        // the titles agree (titles are compared and taken on the edition's 「查找元数据」 page).
+        rows: new Set(meta.tracks.map((_, i) => i).filter((i) => !rows.length || rows.some((r) => r.disc === meta.tracks[i].disc && r.position === meta.tracks[i].position))),
+        cover: form.get(`cover_${mbid}`) === '1',
+      });
+      done += 1;
+    }
+    // Each release is its own batch (undone one by one in 修改记录); the button undoes the last one.
+    const undo = await batchSince(database, actor, started);
+    return Astro.redirect(`/admin/releases/${release.id}?msg=${encodeURIComponent(t('已从 MusicBrainz 导入 {n} 个发行', { n: done }))}${undo ? `&undo=${undo}` : ''}#editions`, 303);
+  } catch (e) {
+    return Astro.redirect(withParams(Astro.url, { err: errorText(e, t), msg: null }), 303);
+  }
+}
+
+let candidates: MbCandidate[] = [];
+let failure: string | null = null;
+try {
+  candidates = await mbCandidates(release);
+} catch (e) {
+  failure = errorText(e, t);
+}
+const editions = await loadEditions(release.id);
+// Tracks per edition: its track order where it has one, else its audio files.
+const { results: counts } = await database
+  .prepare(
+    `SELECT e.id AS edition_id, coalesce(
+       (SELECT nullif(count(*), 0) FROM edition_tracks et WHERE et.edition_id = e.id),
+       (SELECT count(*) FROM files f WHERE f.edition_id = e.id AND f.kind = 'audio' AND f.sealed_in IS NULL AND f.state != 'ignored' AND f.dup_of IS NULL)) AS n
+     FROM editions e WHERE e.release_id = ?`,
+  )
+  .bind(release.id)
+  .all<{ edition_id: string; n: number }>();
+const audioCount = new Map(counts.map((c) => [c.edition_id, c.n]));
+const imported = new Set(editions.map((e) => parseIds(e.external_ids).musicbrainz_release).filter(Boolean));
+/**
+ * The existing edition each MusicBrainz release most likely is, one to one: already imported, else the
+ * same catalog number, else the same number of tracks (CDs with rips, digital with digital or
+ * streaming editions).
+ */
+const assigned = (() => {
+  const pairs: { c: string; e: string; score: number }[] = [];
+  for (const c of candidates) {
+    const cd = editionFor(c, candidates).slot === 'cd_rip';
+    for (const e of editions) {
+      let score = 0;
+      const family = (cd ? ['cd', 'cd_rip'] : ['digital', 'streaming']).includes(e.slot);
+      const audio = ['cd', 'cd_rip', 'digital', 'streaming'].includes(e.slot);
+      if (parseIds(e.external_ids).musicbrainz_release === c.id) score = 10;
+      else if (!audio) score = 0;
+      // The catalog number wins over the format (MusicBrainz sometimes has a CD entered as digital).
+      else if (e.catalog_no && c.catalogs.some((x) => x.replace(/\s/g, '').toUpperCase() === e.catalog_no!.toUpperCase())) score = 5;
+      else if (family) {
+        const n = audioCount.get(e.id) ?? 0;
+        score = n === c.trackCount ? 3 : n && Math.abs(n - c.trackCount) === 1 ? 1 : 0;
+      }
+      if (score) pairs.push({ c: c.id, e: e.id, score });
+    }
+  }
+  const out = new Map<string, EditionRow>();
+  const used = new Set<string>();
+  for (const p of pairs.sort((a, b) => b.score - a.score)) {
+    if (out.has(p.c) || used.has(p.e)) continue;
+    out.set(p.c, editions.find((e) => e.id === p.e)!);
+    used.add(p.e);
+  }
+  return out;
+})();
+const guess = (c: MbCandidate): EditionRow | undefined => assigned.get(c.id);
+const groups = [...new Set(candidates.map((c) => c.releaseGroup?.title ?? ''))];
+---
+
+<Admin title={t('从 MusicBrainz 导入版本')}>
+  <p class="muted">
+    <a href={`/admin/releases/${release.id}`}>{release.catalog_no ? `${release.catalog_no} ` : ''}{release.title}</a> ·
+    {t('按编号与标题在 MusicBrainz 搜索，列出同一作品（release group）的全部发行。勾选要导入的，选择新建版本或并入现有版本；会写入编号、发行日、曲目顺序和 MusicBrainz ID。')}
+  </p>
+  {failure && <p class="flash err">{failure}</p>}
+  {!failure && candidates.length === 0 && <p class="panel muted">{t('MusicBrainz 上没有找到这个作品。')}</p>}
+  {
+    candidates.length > 0 && (
+      <form method="post" class="panel">
+        {groups.map((g) => (
+          <>
+            <h3>{g || t('（未分组）')}</h3>
+            <table class="grid">
+              <thead><tr><th></th><th>{t('发行')}</th><th>{t('格式')}</th><th class="num">{t('曲数')}</th><th>{t('编号')}</th><th>{t('导入为')}</th><th>{t('封面')}</th></tr></thead>
+              <tbody>
+                {candidates.filter((c) => (c.releaseGroup?.title ?? '') === g).map((c) => {
+                  const match = guess(c);
+                  const proposal = editionFor(c, candidates);
+                  const score = match ? scoreCandidate({ trackCount: c.trackCount, catalogs: c.catalogs, title: c.title }, { durations: Array(audioCount.get(match.id) ?? 0).fill(null), catalog: match.catalog_no, title: release.title }) : null;
+                  return (
+                    <tr>
+                      <td><input type="checkbox" name="mbid" value={c.id} checked={!imported.has(c.id)} /></td>
+                      <td>
+                        <a href={`https://musicbrainz.org/release/${c.id}`} target="_blank" rel="noopener">{c.title}</a>
+                        {c.disambiguation && <span class="muted"> ({c.disambiguation})</span>}
+                        <div class="muted">{[c.date, c.country].filter(Boolean).join(' · ')}{imported.has(c.id) && ` · ${t('已导入')}`}</div>
+                      </td>
+                      <td>{c.format ?? '—'}</td>
+                      <td class="num">{c.trackCount}</td>
+                      <td>{c.catalogs.join(', ')}</td>
+                      <td>
+                        <select name={`target_${c.id}`}>
+                          <option value="new" selected={!match}>{t('新建版本')}</option>
+                          {editions.map((e) => <option value={e.id} selected={match?.id === e.id}>{t('并入：{edition}', { edition: `${t(SLOT_LABELS[e.slot])}${e.name ? ` · ${e.name}` : ''}` })}{audioCount.get(e.id) ? t('（{n} 曲）', { n: audioCount.get(e.id)! }) : ''}</option>)}
+                        </select>
+                        <div class="new-edition">
+                          <select name={`slot_${c.id}`} aria-label={t('类型')}>{SLOTS.map((s) => <option value={s} selected={proposal.slot === s}>{t(SLOT_LABELS[s])}</option>)}</select>
+                          <input type="text" name={`name_${c.id}`} value={proposal.name} placeholder={t('名称')} size="12" />
+                        </div>
+                        {score !== null && <span class="muted">{t('匹配度 {p}', { p: `${Math.round(score * 100)}%` })}</span>}
+                      </td>
+                      <td><label><input type="checkbox" name={`cover_${c.id}`} value="1" /> {t('取封面')}</label></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </>
+        ))}
+        <p class="muted">{t('「新建版本」时用右侧的类型和名称；CD 默认是「CD 抓轨」（合辑里收的是抓轨）。并入已有曲目顺序的版本时，只给标题一致的行补 MusicBrainz ID 和时长，不改顺序和曲名（要逐项比较时用版本页的「查找元数据」）。每个发行要向 MusicBrainz 请求一次（每秒一次），请稍候。')}</p>
+        <button class="primary" type="submit">{t('导入勾选的发行')}</button>
+      </form>
+    )
+  }
+</Admin>
+
+<script>
+  // The type and name only matter for a new edition.
+  for (const select of Array.from(document.querySelectorAll('select[name^="target_"]')) as HTMLInputElement[]) {
+    const extra = select.parentElement?.querySelector('.new-edition');
+    const fields = Array.from(extra?.querySelectorAll('input, select') ?? []) as HTMLInputElement[];
+    const sync = () => fields.forEach((el) => (el.disabled = select.value !== 'new'));
+    select.addEventListener('change', sync);
+    sync();
+  }
+</script>

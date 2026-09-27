@@ -1,0 +1,397 @@
+---
+import Admin from '../../../layouts/Admin.astro';
+import { FILE_KIND_LABELS, FILE_STATE_LABELS, SLOTS, SLOT_LABELS } from '../../../lib/constants';
+import { db, parseFormat, type EditionRow, type FileRow, type ReleaseRow } from '../../../lib/db';
+import {
+  CREDIT_FIELDS, EDITION_STATUSES, EDITION_STATUS_LABELS, deleteEdition, generateEditionTracks, importEmbeddedTags,
+  loadEditionTracks, loadEditions, matchEditionFiles, parseCredits, parseIds, saveEdition, saveEditionFileTracks, saveEditionTracks,
+  trackTitle,
+} from '../../../lib/editions';
+import { formatBytes, formatSpec, withParams } from '../../../lib/format';
+import { ChangeSet, batchSince } from '../../../lib/changes';
+import { N_, errorText, summary, UserError } from '../../../lib/i18n';
+import { Places } from '../../../lib/locations';
+import { albumArtist, editionContext, tagSet } from '../../../lib/tags';
+import { formatMs, loadTracks, titleKey } from '../../../lib/tracks';
+
+const { id } = Astro.params;
+const { t } = Astro.locals;
+const database = db();
+const edition = await database.prepare('SELECT * FROM editions WHERE id = ?').bind(id).first<EditionRow>();
+if (!edition) return new Response(t('找不到版本'), { status: 404 });
+const release = (await database
+  .prepare('SELECT r.*, e.name AS era_name FROM releases r JOIN eras e ON e.id = r.era_id WHERE r.id = ?')
+  .bind(edition.release_id)
+  .first<ReleaseRow & { era_name: string }>())!;
+
+if (Astro.request.method === 'POST') {
+  const started = new Date().toISOString();
+  const form = await Astro.request.formData();
+  const actor = Astro.locals.admin!.email;
+  const saved = (n: number) => (n ? t('已保存（{n} 处改动）', { n }) : t('没有改动'));
+  try {
+    let msg: string;
+    switch (form.get('section')) {
+      case 'info':
+        msg = saved(await saveEdition(actor, release, edition, form));
+        break;
+      case 'delete':
+        await deleteEdition(actor, release, edition);
+        return Astro.redirect(`/admin/releases/${release.id}?msg=${encodeURIComponent(t('已删除版本'))}`, 303);
+      case 'tracks':
+        msg = saved(await saveEditionTracks(actor, release, edition, form));
+        break;
+      case 'generate':
+        msg = t('已生成曲目顺序（{n} 处改动）', { n: await generateEditionTracks(actor, release, edition) });
+        break;
+      case 'match': {
+        const r = await matchEditionFiles(actor, release, edition);
+        msg = r.left ? t('已对应 {n} 个文件，{left} 个没找到对应曲目，请手动选择', { n: r.matched, left: r.left }) : t('已对应 {n} 个文件', { n: r.matched });
+        break;
+      }
+      case 'file_tracks':
+        msg = saved(await saveEditionFileTracks(actor, release, edition, form));
+        break;
+      case 'import_tags':
+        msg = saved(await importEmbeddedTags(actor, release, edition));
+        break;
+      case 'cover': {
+        const fileId = String(form.get('cover_file_id') ?? '') || null;
+        if (fileId) {
+          const ok = await database.prepare("SELECT 1 FROM files WHERE id = ? AND release_id = ? AND kind = 'image'").bind(fileId, release.id).first();
+          if (!ok) throw new UserError('封面要从这个作品的图片文件里选');
+        }
+        const cs = new ChangeSet(database, actor, summary(fileId ? N_('版本 {edition}：设置封面') : N_('版本 {edition}：取消封面'), { edition: `${release.catalog_no ?? release.title} ${edition.name}`.trim() }));
+        cs.updateKnown('edition', { id: edition.id }, { cover_file_id: edition.cover_file_id }, { cover_file_id: fileId });
+        msg = saved(await cs.commit());
+        break;
+      }
+      default:
+        throw new UserError('未知的表单');
+    }
+    const undo = await batchSince(database, actor, started);
+    return Astro.redirect(withParams(Astro.url, { msg, err: null, undo }) + (form.get('anchor') ? `#${form.get('anchor')}` : ''), 303);
+  } catch (e) {
+    return Astro.redirect(withParams(Astro.url, { err: errorText(e, t), msg: null }), 303);
+  }
+}
+
+type F = Pick<FileRow, 'id' | 'name' | 'ext' | 'size' | 'kind' | 'state' | 'dir' | 'folder_id' | 'track_id' | 'format' | 'sha256' | 'blob_key' | 'edition_id' | 'mtime'> & { old: number; stream: number };
+const [siblings, rows, entries, filesResult, images, places, ctx] = await Promise.all([
+  loadEditions(release.id),
+  loadEditionTracks(edition.id),
+  loadTracks(release.id),
+  database
+    .prepare(
+      `SELECT id, name, ext, size, kind, state, dir, folder_id, track_id, format, sha256, blob_key, edition_id, mtime,
+              EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id) AS old,
+              EXISTS (SELECT 1 FROM derived d WHERE d.sha256 = f.sha256 AND d.kind = 'stream') AS stream
+       FROM files f WHERE edition_id = ? AND sealed_in IS NULL ORDER BY folder_id IS NOT NULL, folder_id, dir, name`,
+    )
+    .bind(edition.id)
+    .all<F>(),
+  database.prepare("SELECT id, name, edition_id FROM files WHERE release_id = ? AND kind = 'image' AND sealed_in IS NULL ORDER BY edition_id = ? DESC, name").bind(release.id, edition.id).all<{ id: string; name: string; edition_id: string | null }>(),
+  Places.load(),
+  editionContext(edition.id),
+]);
+const files = filesResult.results;
+const audio = files.filter((f) => f.kind === 'audio' && !f.old && f.state !== 'ignored');
+const fileOfTrack = new Map<string, F[]>();
+for (const f of audio) if (f.track_id) fileOfTrack.set(f.track_id, [...(fileOfTrack.get(f.track_id) ?? []), f]);
+const unlinked = audio.filter((f) => !f.track_id).length;
+const ids = parseIds(edition.external_ids);
+const artist = albumArtist(release, release.era_name);
+const album = edition.album_title || release.title;
+const taggable = (f: F) => ['flac', 'mp3'].includes(f.ext.toLowerCase()) || (['wav', 'aif', 'aiff'].includes(f.ext.toLowerCase()) && !!f.stream);
+const entryLabel = new Map(entries.map((x) => [x.id, x.title]));
+const sampleTags = ctx && rows[0] ? tagSet(ctx, rows[0], '') : null;
+const editionTitle = `${release.catalog_no ? `${release.catalog_no} ` : ''}${release.title} · ${t(SLOT_LABELS[edition.slot])}${edition.name ? ` · ${edition.name}` : ''}`;
+// Differences between what the catalog would write and what the files carry now.
+const embedded = (f: F | undefined) => (f ? parseFormat(f.format).tags ?? {} : {});
+const differs = (a: string | undefined, b: string | null | undefined) => !!a && !!b && titleKey(a) !== titleKey(b);
+const folderName = (fid: string | null) => (fid ? places.path(`fd:${fid}`, t).split(' / ').slice(places.chain(`ed:${edition.id}`).length).join(' / ') : '');
+---
+
+<Admin title={editionTitle}>
+  <p class="muted">
+    {places.chain(`ed:${edition.id}`).map((k, i) => <>{i > 0 && ' / '}<a href={k.startsWith('rel:') ? `/admin/releases/${release.id}` : `/admin/inbox?loc=${encodeURIComponent(k)}&state=all`}>{places.name(k, t)}</a></>)}
+    · <a href={`/admin/inbox?loc=ed:${edition.id}&state=all`}>{t('在整理台查看 {n} 个文件', { n: files.length })}</a>
+    · <a href={`/admin/releases/${release.id}/preview?edition=${edition.id}`}>{t('预览公开页')}</a>
+    · <a href={`/admin/history?release=${release.id}`}>{t('修改记录')}</a>
+  </p>
+
+  <div class="panel edition-summary">
+    <div>
+      <b>{t('整理版标签')}</b>
+      <span class="muted">{t('下载时写入文件；改动这里和下面的曲目表即可，原件不变。')}</span>
+      <div class="form-grid compact">
+        <label>ALBUM</label><span>{album}</span>
+        <label>ALBUMARTIST</label><span>{artist}</span>
+        <label>DATE</label><span>{edition.release_date || release.release_date || '—'}</span>
+        <label>CATALOGNUMBER</label><span>{edition.catalog_no || release.catalog_no || '—'}</span>
+        {ids.musicbrainz_release && (<><label>MusicBrainz</label><span><a href={`https://musicbrainz.org/release/${ids.musicbrainz_release}`} target="_blank" rel="noopener">{ids.musicbrainz_release}</a></span></>)}
+        {ids.bandcamp && (<><label>Bandcamp</label><span><a href={ids.bandcamp} target="_blank" rel="noopener">{ids.bandcamp}</a></span></>)}
+        <label>{t('封面')}</label><span>{sampleTags?.cover ? t('已设（下载时嵌入）') : t('未设')}</span>
+      </div>
+    </div>
+    <div class="edition-actions">
+      <a class="button primary" href={`/admin/editions/${edition.id}/zip`}>{t('下载整个版本（整理版 zip）')}</a>
+      <a class="button" href={`/admin/editions/${edition.id}/lookup`}>{t('查找元数据…')}</a>
+      {audio.length > 0 && <form method="post" class="inline"><input type="hidden" name="section" value="import_tags" /><input type="hidden" name="anchor" value="tracks" /><button type="submit" title={t('把文件内嵌的曲名和艺术家复制进来（只填空着的）')}>{t('从文件标签导入')}</button></form>}
+    </div>
+  </div>
+
+  <h2 id="tracks">{t('曲目顺序与标签')}</h2>
+  {
+    rows.length === 0 ? (
+      <div class="panel">
+        <p class="muted">{t('这个版本还没有曲目顺序。可以从版本里的音频文件生成，或用「查找元数据」从 MusicBrainz、Bandcamp 导入。')}</p>
+        {audio.length > 0 && (
+          <form method="post" class="inline">
+            <input type="hidden" name="section" value="generate" />
+            <input type="hidden" name="anchor" value="tracks" />
+            <button class="primary" type="submit">{t('从 {n} 个音频文件生成', { n: audio.length })}</button>
+          </form>
+        )}
+      </div>
+    ) : (
+      <form method="post" class="panel">
+        <input type="hidden" name="section" value="tracks" />
+        <input type="hidden" name="anchor" value="tracks" />
+        <p class="muted">{t('拖动 ⠿ 调整顺序，序号按顺序自动编排。「标题」留空则用曲目条目的标题；艺术家、作曲、作词、编曲属于曲目条目，所有版本共用。标黄的格子与文件内嵌的标签不同。')}</p>
+        <div class="wide-table">
+          <table class="grid track-table tag-table" id="track-table">
+            <thead>
+              <tr>
+                <th></th><th>{t('碟')}</th><th class="num">#</th><th>{t('标题（此版）')}</th><th>{t('曲目条目')}</th>
+                <th>{t('艺术家')}</th><th>{t('作曲')}</th><th>{t('作词')}</th><th>{t('编曲')}</th><th>{t('时长')}</th><th>{t('文件')}</th><th>{t('删除')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const credits = parseCredits(r.credits);
+                const linked = fileOfTrack.get(r.track_id) ?? [];
+                const tags = embedded(linked[0]);
+                const title = trackTitle(r);
+                return (
+                  <tr draggable="true">
+                    <td class="handle" title={t('拖动排序')}>⠿<input type="hidden" name="et_id" value={r.id} /></td>
+                    <td><input type="number" name="disc" value={r.disc} min="1" max="99" style="width:3.2em" /></td>
+                    <td class="num pos">{r.position}</td>
+                    <td class:list={{ differs: differs(tags.title, title) }} title={tags.title ? t('文件内嵌：{value}', { value: tags.title }) : undefined}>
+                      <input type="text" name="title" value={r.title ?? ''} placeholder={r.version_label ? `${r.entry_title} (${r.version_label})` : r.entry_title} />
+                    </td>
+                    <td>
+                      <select name="entry">
+                        {entries.map((x) => <option value={x.id} selected={x.id === r.track_id}>{x.title}{x.version_label ? ` (${x.version_label})` : ''}</option>)}
+                        <option value="new">{t('新曲目条目（用左边的标题）')}</option>
+                      </select>
+                    </td>
+                    {CREDIT_FIELDS.map((c) => (
+                      <td class:list={{ differs: c === 'artist' && differs(tags.artist, credits.artist || artist) }} title={c === 'artist' && tags.artist ? t('文件内嵌：{value}', { value: tags.artist }) : undefined}>
+                        <input type="text" name={c} value={credits[c] ?? ''} placeholder={c === 'artist' ? artist : ''} size="10" />
+                      </td>
+                    ))}
+                    <td><input type="text" name="duration" value={formatMs(r.duration_ms)} size="5" placeholder="4:32" /></td>
+                    <td class="files-cell">
+                      {linked.map((f) => (
+                        <div>
+                          <a href={`/admin/files/${f.id}`} title={f.name}>{f.ext.toUpperCase()}</a>{' '}
+                          <span class="muted">{formatSpec({ ...parseFormat(f.format), duration: undefined })}</span>
+                          {taggable(f) && <a href={`/admin/download/${f.id}?tagged=1`} title={t('下载整理版')}>↓</a>}
+                        </div>
+                      ))}
+                      {linked.length === 0 && <span class="muted">—</span>}
+                    </td>
+                    <td><input type="checkbox" name="remove" value={r.id} aria-label={t('删除这一行')} /></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <template id="track-row">
+          <tr draggable="true">
+            <td class="handle">⠿<input type="hidden" name="et_id" value="new" /></td>
+            <td><input type="number" name="disc" value="1" min="1" max="99" style="width:3.2em" /></td>
+            <td class="num pos"></td>
+            <td><input type="text" name="title" placeholder={t('标题')} /></td>
+            <td>
+              <select name="entry">
+                <option value="new">{t('新曲目条目（用左边的标题）')}</option>
+                {entries.map((x) => <option value={x.id}>{x.title}</option>)}
+              </select>
+            </td>
+            {CREDIT_FIELDS.map((c) => <td><input type="text" name={c} size="10" /></td>)}
+            <td><input type="text" name="duration" size="5" placeholder="4:32" /></td>
+            <td></td><td></td>
+          </tr>
+        </template>
+        <p>
+          <button type="button" id="add-track">{t('添加一行')}</button>
+          <button class="primary" type="submit">{t('保存曲目与标签')}</button>
+        </p>
+      </form>
+    )
+  }
+  {
+    rows.length > 0 && unlinked > 0 && (
+      <form method="post" class="panel">
+        <input type="hidden" name="section" value="match" />
+        <input type="hidden" name="anchor" value="files" />
+        {t('有 {n} 个音频文件还没对应到曲目。', { n: unlinked })}
+        <button type="submit">{t('对应文件')}</button>
+        <span class="muted">{t('按曲号、标题和时长（误差 2 秒内）对应；其余的在下面「文件」里逐个选择。')}</span>
+      </form>
+    )
+  }
+
+  <h2 id="files">{t('文件')}</h2>
+  <form method="post" class="panel">
+    <input type="hidden" name="section" value="file_tracks" />
+    <input type="hidden" name="anchor" value="files" />
+    <table class="grid">
+      <tbody>
+        {files.map((f) => (
+          <tr>
+            <td class="name">
+              <a href={`/admin/files/${f.id}`}>{f.name}</a>
+              {f.old ? <span class="chip ignored">{t('旧版本')}</span> : null}
+              {f.folder_id && <div class="muted">{folderName(f.folder_id)}</div>}
+            </td>
+            <td><span class="chip">{t(FILE_KIND_LABELS[f.kind] ?? f.kind)}</span></td>
+            <td class="spec">{formatSpec(parseFormat(f.format))}</td>
+            <td class="num">{formatBytes(f.size)}</td>
+            <td><span class={`chip ${f.state}`}>{t(FILE_STATE_LABELS[f.state])}</span></td>
+            <td>
+              {f.kind === 'audio' && entries.length > 0 ? (
+                <>
+                  <input type="hidden" name="file_id" value={f.id} />
+                  <select name="file_track" aria-label={t('对应曲目')}>
+                    <option value="">{t('（不对应曲目）')}</option>
+                    {entries.map((x) => <option value={x.id} selected={f.track_id === x.id}>{x.title}</option>)}
+                  </select>
+                </>
+              ) : f.track_id ? <span class="muted">{entryLabel.get(f.track_id)}</span> : null}
+            </td>
+            <td class="downloads">
+              {f.kind === 'audio' && taggable(f) && f.track_id && <a href={`/admin/download/${f.id}?tagged=1`}>{t('整理版')}</a>}
+              {f.blob_key && <a href={`/admin/download/${f.id}`}>{t('原件')}</a>}
+            </td>
+          </tr>
+        ))}
+        {files.length === 0 && <tr><td class="muted">{t('还没有文件放进这个版本。在整理台把文件「移动到…」这个版本。')}</td></tr>}
+      </tbody>
+    </table>
+    {audio.length > 0 && entries.length > 0 && <p><button class="primary" type="submit">{t('保存文件与曲目的对应')}</button></p>}
+  </form>
+
+  <h2>{t('封面')}</h2>
+  <form method="post" class="panel">
+    <input type="hidden" name="section" value="cover" />
+    {
+      images.results.length === 0 ? (
+        <p class="muted">{t('这个作品还没有图片文件。可以用「查找元数据」从 MusicBrainz 或 Bandcamp 取回封面。')}</p>
+      ) : (
+        <>
+          <select name="cover_file_id">
+            <option value="">{t('（用作品的封面）')}</option>
+            {images.results.map((f) => <option value={f.id} selected={edition.cover_file_id === f.id}>{f.edition_id === edition.id ? '' : '· '}{f.name}</option>)}
+          </select>
+          <button type="submit">{t('保存封面')}</button>
+          <span class="muted">{t('整理版下载时嵌入 JPEG / PNG 封面。')}</span>
+        </>
+      )
+    }
+  </form>
+
+  <h2>{t('版本信息')}</h2>
+  <form method="post" class="panel">
+    <input type="hidden" name="section" value="info" />
+    <div class="form-grid">
+      <label for="slot">{t('类型')}</label>
+      <select id="slot" name="slot">{SLOTS.map((s) => <option value={s} selected={edition.slot === s}>{t(SLOT_LABELS[s])}</option>)}</select>
+      <label for="name">{t('名称')}</label>
+      <input id="name" type="text" name="name" value={edition.name} placeholder={t('如「初版」「第 2 版」「Bandcamp」；留空为该类型的默认版本')} />
+      <label for="catalog_no">{t('编号')}</label>
+      <input id="catalog_no" type="text" name="catalog_no" value={edition.catalog_no ?? ''} placeholder="RTCD-004A" />
+      <label for="release_date">{t('发行日')}</label>
+      <input id="release_date" type="text" name="release_date" value={edition.release_date ?? ''} placeholder="2019-04-28" />
+      <label for="status">{t('状态')}</label>
+      <select id="status" name="status">{EDITION_STATUSES.map((s) => <option value={s} selected={edition.status === s}>{t(EDITION_STATUS_LABELS[s])}</option>)}</select>
+      <label for="track_count">{t('声明的曲数')}</label>
+      <input id="track_count" type="number" name="track_count" value={edition.track_count ?? ''} min="0" max="999" style="width:6em" />
+      <label for="album_title">{t('专辑名（整理版）')}</label>
+      <input id="album_title" type="text" name="album_title" value={edition.album_title ?? ''} placeholder={release.title} />
+      <label for="source">{t('来源')}</label>
+      <input id="source" type="text" name="source" value={edition.source ?? ''} placeholder={t('商店、平台或抓轨者')} />
+      <label for="based_on">{t('源于')}</label>
+      <select id="based_on" name="based_on">
+        <option value="">{t('（无）')}</option>
+        {siblings.filter((e) => e.id !== edition.id).map((e) => <option value={e.id} selected={edition.based_on === e.id}>{t(SLOT_LABELS[e.slot])}{e.name ? ` · ${e.name}` : ''}</option>)}
+      </select>
+      <label for="musicbrainz_release">MusicBrainz</label>
+      <input id="musicbrainz_release" type="text" name="musicbrainz_release" value={ids.musicbrainz_release ?? ''} placeholder={t('发行 ID')} />
+      <label for="bandcamp">Bandcamp</label>
+      <input id="bandcamp" type="text" name="bandcamp" value={ids.bandcamp ?? ''} placeholder="https://rigeltheatre.bandcamp.com/album/…" />
+      <label for="note">{t('备注')}</label>
+      <textarea id="note" name="note">{edition.note ?? ''}</textarea>
+      <label></label>
+      <label style="color:inherit"><input type="checkbox" name="is_default" value="1" checked={!!edition.is_default} /> {t('公开页默认显示这个版本')}</label>
+    </div>
+    <p><button class="primary" type="submit">{t('保存版本信息')}</button></p>
+  </form>
+
+  <form method="post" class="panel danger-zone">
+    <input type="hidden" name="section" value="delete" />
+    <b>{t('删除版本')}</b>
+    <p class="muted">{t('只能删除没有文件、没有文件夹的版本；它的曲目顺序一并删除，可在修改记录里撤销。')}</p>
+    <button class="danger" type="submit" disabled={files.length > 0}>{t('删除这个版本')}</button>
+  </form>
+</Admin>
+
+<script>
+  const table = document.querySelector<HTMLTableElement>('#track-table');
+  const body = table?.tBodies[0];
+  const renumber = () => {
+    const counters = new Map<string, number>();
+    for (const row of Array.from(body?.rows ?? [])) {
+      const disc = (row.querySelector('input[name="disc"]') as HTMLInputElement).value || '1';
+      const removed = (row.querySelector('input[name="remove"]') as HTMLInputElement | null)?.checked;
+      row.classList.toggle('removed', Boolean(removed));
+      const cell = row.querySelector('.pos') as HTMLElement;
+      if (removed) {
+        cell.textContent = '—';
+        continue;
+      }
+      const n = (counters.get(disc) ?? 0) + 1;
+      counters.set(disc, n);
+      cell.textContent = String(n);
+    }
+  };
+  let dragged: HTMLTableRowElement | null = null;
+  body?.addEventListener('dragstart', (e) => {
+    dragged = (e.target as HTMLElement).closest('tr');
+    dragged?.classList.add('dragging');
+  });
+  body?.addEventListener('dragend', () => {
+    dragged?.classList.remove('dragging');
+    dragged = null;
+    renumber();
+  });
+  body?.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    const over = (e.target as HTMLElement).closest('tr');
+    if (!dragged || !over || over === dragged) return;
+    const rect = over.getBoundingClientRect();
+    body.insertBefore(dragged, e.clientY > rect.top + rect.height / 2 ? over.nextSibling : over);
+  });
+  body?.addEventListener('change', renumber);
+  document.querySelector('#add-track')?.addEventListener('click', () => {
+    const template = document.querySelector<HTMLTemplateElement>('#track-row');
+    if (!template || !body) return;
+    body.appendChild(template.content.cloneNode(true));
+    renumber();
+    (body.rows[body.rows.length - 1].querySelector('input[name="title"]') as HTMLInputElement).focus();
+  });
+</script>

@@ -2,6 +2,7 @@
 import Admin from '../../layouts/Admin.astro';
 import { SLOTS, SLOT_LABELS, SLOT_STATUSES, SLOT_STATUS_LABELS, isOneOf, type Slot, type SlotStatus } from '../../lib/constants';
 import { db } from '../../lib/db';
+import { EDITION_STATUS_LABELS } from '../../lib/editions';
 import { withParams } from '../../lib/format';
 
 const url = Astro.url;
@@ -25,6 +26,14 @@ const [summary, rows] = await Promise.all([
     .all<{ release_id: string; slot: Slot; status: SlotStatus; planned_date: string | null; note: string | null; catalog_no: string | null; title: string; release_date: string | null }>(),
 ]);
 
+// Editions known to exist but not (fully) collected: the concrete versions to look for.
+const { results: missingEditions } = await database
+  .prepare(
+    `SELECT e.id, e.slot, e.name, e.catalog_no, e.release_date, e.status, e.note, r.id AS release_id, r.catalog_no AS release_catalog, r.title
+     FROM editions e JOIN releases r ON r.id = e.release_id JOIN eras er ON er.id = r.era_id
+     WHERE e.status IN ('missing', 'partial', 'planned') ORDER BY er.sort, r.release_date DESC NULLS LAST, e.slot`,
+  )
+  .all<{ id: string; slot: Slot; name: string; catalog_no: string | null; release_date: string | null; status: 'missing' | 'partial' | 'planned'; note: string | null; release_id: string; release_catalog: string | null; title: string }>();
 const count = (s: Slot, st: SlotStatus) => summary.results.find((r) => r.slot === s && r.status === st)?.n ?? 0;
 const statusLink = (st: SlotStatus) => {
   const next = new URL(url);
@@ -56,6 +65,27 @@ const statusLink = (st: SlotStatus) => {
       }
     </tbody>
   </table>
+
+  {
+    missingEditions.length > 0 && (
+      <>
+        <h2>{t('缺档的版本：{n} 个', { n: missingEditions.length })}</h2>
+        <table class="grid">
+          <thead><tr><th>{t('作品')}</th><th>{t('版本')}</th><th>{t('状态')}</th><th>{t('说明')}</th></tr></thead>
+          <tbody>
+            {missingEditions.map((e) => (
+              <tr>
+                <td><a href={`/admin/releases/${e.release_id}`}>{e.release_catalog ? `${e.release_catalog} ` : ''}{e.title}</a></td>
+                <td><a href={`/admin/editions/${e.id}`}>{t(SLOT_LABELS[e.slot])}{e.name ? ` · ${e.name}` : ''}</a> <span class="muted">{[e.catalog_no, e.release_date].filter(Boolean).join(' · ')}</span></td>
+                <td><span class={`chip ${e.status}`}>{t(EDITION_STATUS_LABELS[e.status])}</span></td>
+                <td>{e.note ?? ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </>
+    )
+  }
 
   <h2>
     {statuses.map((st) => t(SLOT_STATUS_LABELS[st])).join(t('、'))}{slot && ` · ${t(SLOT_LABELS[slot])}`}{t('：{n} 项', { n: rows.results.length })}

@@ -67,6 +67,7 @@ interface ArchiveRow {
   name: string;
   suggest: string | null;
   uploaded_by: string | null;
+  sealed: number;
 }
 
 /** Rows for the members of one uploaded archive, parents before their members. */
@@ -89,6 +90,8 @@ export function memberRows(archive: ArchiveRow, members: MemberInput[], now: str
       size: m.size, mtime: m.mtime, sha256: m.sha256, blob_key: m.sha256 ? blobKey(m.sha256) : null, kind: kindFor(ext),
       format: m.format ? JSON.stringify(m.format) : null, pcm_md5: m.pcm_md5, rights: 'unknown', state: 'inbox',
       suggest: suggest ? JSON.stringify(suggest) : null, note: m.note, uploaded_by: archive.uploaded_by, checked_at: now,
+      // An archive uploaded to be kept whole: its members are listed, not organized one by one.
+      sealed_in: archive.sealed ? archive.id : null,
     };
   });
 }
@@ -100,7 +103,7 @@ export function memberRows(archive: ArchiveRow, members: MemberInput[], now: str
 export async function registerMembers(db: D1Database, actor: string, sha256: string, members: MemberInput[]): Promise<number> {
   const { results: archives } = await db
     .prepare(
-      `SELECT id, dir, name, suggest, uploaded_by FROM files a
+      `SELECT id, dir, name, suggest, uploaded_by, sealed FROM files a
        WHERE sha256 = ? AND origin = 'upload' AND member_of IS NULL
          AND NOT EXISTS (SELECT 1 FROM files m WHERE m.member_of = a.id)`,
     )

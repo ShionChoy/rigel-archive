@@ -73,6 +73,7 @@ export function releaseInfoPatch(form: FormData): Record<string, unknown> {
     links: parseLinks(text(form, 'links')),
     description: text(form, 'description'),
     note: text(form, 'note'),
+    artist: text(form, 'artist'),
     state,
   };
 }
@@ -173,4 +174,31 @@ export async function markCollected(cs: ChangeSet, pairs: Iterable<readonly [str
     .bind(JSON.stringify(keys))
     .all<{ release_id: string; slot: string; status: string }>();
   for (const row of results) cs.updateKnown('release_slot', { release_id: row.release_id, slot: row.slot }, row, { status: 'collected' });
+}
+
+/**
+ * A slot's status once it has editions: collected when every edition is, partial when some are and some
+ * are missing, missing when none is; planned / unknown editions leave it as it is.
+ */
+export function derivedSlotStatus(statuses: string[]): SlotRow['status'] | null {
+  if (statuses.length === 0) return null;
+  const have = statuses.filter((s) => s === 'collected').length;
+  const partial = statuses.some((s) => s === 'partial');
+  const missing = statuses.filter((s) => s === 'missing').length;
+  if (have && !partial && !missing) return 'collected';
+  if (have || partial) return missing || partial ? 'partial' : 'collected';
+  if (missing) return 'missing';
+  return null;
+}
+
+/** Bring the slots of a release in line with its editions (in the same batch). */
+export async function syncSlots(cs: ChangeSet, releaseId: string, editions: { slot: string; status: string }[]) {
+  const { results } = await db().prepare('SELECT * FROM release_slots WHERE release_id = ?').bind(releaseId).all<SlotRow>();
+  for (const slot of SLOTS) {
+    const status = derivedSlotStatus(editions.filter((e) => e.slot === slot).map((e) => e.status));
+    if (!status) continue;
+    const row = results.find((r) => r.slot === slot);
+    if (row) cs.updateKnown('release_slot', { release_id: releaseId, slot }, row as unknown as Record<string, unknown>, { status, planned_date: null });
+    else cs.create('release_slot', { release_id: releaseId, slot, status, planned_date: null, note: null });
+  }
 }

@@ -2,17 +2,20 @@
 import { env } from 'cloudflare:workers';
 import Admin from '../../../layouts/Admin.astro';
 import FilePreview from '../../../components/FilePreview.astro';
+import PlacePicker from '../../../components/PlacePicker.astro';
 import { ChangeSet } from '../../../lib/changes';
 import {
-  ARCHIVE_STATUS_LABELS, FILE_KIND_LABELS, FILE_STATES, FILE_STATE_LABELS, NAME_ENCODING_LABELS, RIGHTS, RIGHTS_LABELS,
-  ROLE_LABELS, SLOTS, SLOT_LABELS, isOneOf,
+  ARCHIVE_STATUS_LABELS, FILE_KIND_LABELS, FILE_STATE_LABELS, NAME_ENCODING_LABELS, RIGHTS, RIGHTS_LABELS,
+  ROLE_LABELS, SLOT_LABELS, isOneOf,
 } from '../../../lib/constants';
-import { db, parseFormat, parseSuggestion, releaseOptions, suggestionPatch, type FileRow } from '../../../lib/db';
+import { db, parseFormat, parseSuggestion, releaseOptions, type FileRow } from '../../../lib/db';
+import { applyInboxAction } from '../../../lib/inbox';
+import { INSIDE_ARCHIVE, Places, moveFiles, sealArchives } from '../../../lib/locations';
+import { taggedSource } from '../../../lib/tags';
 import { KEEP_REASON_TEXT, deleteFiles, keepReason, keptMessage, originalGone } from '../../../lib/deletion';
 import { codecName, formatBytes, formatDuration, formatTime, percent, withParams } from '../../../lib/format';
 import { N_, errorText, summary, summaryText, translateHtml, UserError } from '../../../lib/i18n';
 import { MIN_AUDIO_SECONDS, derivedFor, redo, type DerivedRow } from '../../../lib/processing';
-import { markCollected } from '../../../lib/releases';
 import { wakeAfter } from '../../../lib/schedule';
 
 const { id } = Astro.params;
@@ -59,35 +62,40 @@ if (Astro.request.method === 'POST') {
     return Astro.redirect(withParams(Astro.url, { msg, err: null }), 303);
   }
   try {
-    let patch: Record<string, unknown>;
-    let change: string;
-    if (section === 'accept') {
-      const p = suggestionPatch(suggestion);
-      if (!p) throw new UserError('这个文件没有可用的建议');
-      patch = p;
-      change = summary('文件 {name}：按建议确认', { name: label });
+    const actor = Astro.locals.admin!.email;
+    let msg: string;
+    let undo: string | null = null;
+    if (section === 'accept' || section === 'ignore' || section === 'reset') {
+      const r = await applyInboxAction(actor, [file.id], { action: section }, t);
+      if (!r.changed) throw section === 'accept' ? new UserError('这个文件没有可用的建议') : new UserError('没有改动');
+      msg = summaryText(r.summary, t);
+      undo = r.batchId;
+    } else if (section === 'move') {
+      const target = String(form.get('target') ?? '');
+      const name = String(form.get('new_folder') ?? '').trim();
+      const r = name
+        ? await applyInboxAction(actor, [file.id], { action: 'move', target, keep: null, newFolder: name }, t)
+        : await moveFiles(actor, [file.id], target, t);
+      msg = summaryText(r.summary, t);
+      undo = r.batchId;
+    } else if (section === 'seal' || section === 'unseal') {
+      const r = await sealArchives(actor, [file.id], section === 'seal');
+      if (r.refused.length) throw new UserError('包内已有文件归档，先把它们退回待整理');
+      msg = section === 'seal' ? t('已整体收藏，{n} 个包内文件不再单独整理', { n: r.hidden }) : t('已展开，{n} 个包内文件回到整理台', { n: r.hidden });
+      undo = r.batchId;
     } else {
       const text = (name: string) => {
         const v = String(form.get(name) ?? '').trim();
         return v === '' ? null : v;
       };
-      const release = text('release_id');
-      const slot = text('slot');
       const rights = text('rights');
-      const state = text('state');
-      if (slot && !isOneOf(SLOTS, slot)) throw new UserError('未知的版本栏位');
-      if (slot && !release) throw new UserError('选择版本栏位前要先选作品');
       if (!isOneOf(RIGHTS, rights)) throw new UserError('未知的权属');
-      if (!isOneOf(FILE_STATES, state)) throw new UserError('未知的状态');
-      patch = { release_id: release, slot, rights, state, role: text('role'), note: text('note'), download_name: text('download_name') };
-      change = summary('文件 {name}：手动修改', { name: label });
+      const cs = new ChangeSet(database, actor, summary('文件 {name}：手动修改', { name: label }));
+      await cs.update('file', { id: file.id }, { rights, role: text('role'), note: text('note'), download_name: text('download_name') });
+      msg = (await cs.commit()) ? t('已保存') : t('没有改动');
+      undo = cs.batchId;
     }
-    if (patch.release_id !== file.release_id) patch.track_id = null; // tracks belong to one release
-    const cs = new ChangeSet(database, Astro.locals.admin!.email, change);
-    await cs.update('file', { id: file.id }, patch);
-    await markCollected(cs, [[patch.release_id as string | null, patch.slot as string | null]]);
-    const n = await cs.commit();
-    return Astro.redirect(withParams(Astro.url, { msg: n ? t('已保存') : t('没有改动'), err: null }), 303);
+    return Astro.redirect(withParams(Astro.url, { msg, err: null, undo }), 303);
   } catch (e) {
     return Astro.redirect(withParams(Astro.url, { err: errorText(e, t), msg: null }), 303);
   }
@@ -177,6 +185,23 @@ const [options, copies, sameAudio, parent, history, older, newer, track, covers,
     : Promise.resolve({ results: [] as Recording[] }),
 ]);
 const labels = new Map(options.map((o) => [o.id, o.label]));
+const places = await Places.load();
+const placeKey = places.keyOf(file);
+const tagged = await taggedSource(file);
+const isArchive = !!fmt.archive || file.kind === 'archive' || file.kind === 'disc_image';
+const memberQuery = (Astro.url.searchParams.get('mq') ?? '').trim();
+const members = isArchive
+  ? (await database
+      .prepare(
+        `SELECT id, dir, name, size, mtime, kind, state FROM files WHERE ${INSIDE_ARCHIVE}
+         ${memberQuery ? "AND instr(lower(member_path), lower(?2)) > 0" : ''} ORDER BY member_path LIMIT 500`,
+      )
+      .bind(file.id, ...(memberQuery ? [memberQuery] : []))
+      .all<Pick<FileRow, 'id' | 'dir' | 'name' | 'size' | 'mtime' | 'kind' | 'state'>>()).results
+  : [];
+const sealedBy = file.sealed_in
+  ? await database.prepare('SELECT id, name FROM files WHERE id = ?').bind(file.sealed_in).first<{ id: string; name: string }>()
+  : null;
 const mediaBase = env.MEDIA_DEV_BASE;
 const keep = keepReason(file);
 const derived = sha ? derivedMap.get(sha) : undefined;
@@ -286,7 +311,7 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
               {fmt.archive.toUpperCase()} · {t('{n} 个文件', { n: fmt.files ?? 0 })}
               {fmt.encoding && ` · ${t('文件名编码 {encoding}', { encoding: t(NAME_ENCODING_LABELS[fmt.encoding] ?? fmt.encoding) })}`}
               {' '}<span class:list={['chip', fmt.status === 'ok' ? 'classified' : 'missing']}>{t(ARCHIVE_STATUS_LABELS[fmt.status ?? ''] ?? fmt.status ?? '')}</span>
-              {' '}<a href={`/admin/inbox?state=all&dir=${encodeURIComponent(treePath)}`}>{t('在整理台查看包内文件')}</a>
+              {' '}{file.sealed ? <a href="#members">{t('包内清单')}</a> : <a href={`/admin/inbox?state=all&tree=source&dir=${encodeURIComponent(treePath)}`}>{t('在整理台查看包内文件')}</a>}
               {fmt.error && <div class="muted">{fmt.error}</div>}
             </span>
           </>
@@ -393,6 +418,44 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
     )
   }
 
+  <div class="panel place-panel">
+    <div class="form-grid">
+      <label>{t('归档位置')}</label>
+      <span>
+        {placeKey ? (
+          places.chain(placeKey).map((k, i) => <>{i > 0 && ' / '}<a href={k.startsWith('ed:') ? `/admin/editions/${k.slice(3)}` : k.startsWith('rel:') ? `/admin/releases/${k.slice(4)}` : `/admin/inbox?loc=${encodeURIComponent(k)}&state=all`}>{places.name(k, t)}</a></>)
+        ) : sealedBy ? (
+          <span>{t('在整体收藏的压缩包里：')}<a href={`/admin/files/${sealedBy.id}`}>{sealedBy.name}</a></span>
+        ) : (
+          <span class={`chip ${file.state}`}>{t(file.state === 'inbox' ? '未归档' : FILE_STATE_LABELS[file.state])}</span>
+        )}
+        {' '}<span class="chip">{t(FILE_STATE_LABELS[file.state])}</span>
+      </span>
+      <label>{t('原始位置')}</label>
+      <span class="mono">{file.dir || '/'}</span>
+    </div>
+    {!file.sealed_in && (
+      <div class="loc-actions">
+        <form method="post" class="inline" id="move-form">
+          <input type="hidden" name="section" value="move" />
+          <input type="hidden" name="target" value="" />
+          <input type="hidden" name="new_folder" value="" />
+          <button type="button" class="primary" id="file-move">{t('移动到…')}</button>
+        </form>
+        {placeKey && <form method="post" class="inline"><input type="hidden" name="section" value="reset" /><button type="submit">{t('退回待整理')}</button></form>}
+        {file.state !== 'ignored' && <form method="post" class="inline"><input type="hidden" name="section" value="ignore" /><button type="submit">{t('忽略')}</button></form>}
+        {isArchive && (
+          <form method="post" class="inline">
+            <input type="hidden" name="section" value={file.sealed ? 'unseal' : 'seal'} />
+            <button type="submit" title={t('包内文件不再单独整理，只在下面列出清单；可随时展开')}>{file.sealed ? t('展开（包内文件回到整理台）') : t('整体收藏（不单独整理包内文件）')}</button>
+          </form>
+        )}
+        {tagged && <a class="button" href={`/admin/download/${file.id}?tagged=1`}>{t('下载整理版')}</a>}
+        {file.blob_key && <a class="button" href={`/admin/download/${file.id}`}>{t('下载原件')}</a>}
+      </div>
+    )}
+  </div>
+
   {
     suggestion && (
       <form method="post" class="panel">
@@ -400,11 +463,15 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
         <b>{t('脚本建议')}</b>{t('（规则「{rule}」，把握度 {confidence}）：', { rule: t(suggestion.rule), confidence: percent(suggestion.confidence) })}
         {suggestion.state === 'ignored' && ` ${t('忽略')}`}
         {suggestion.release_id && ` ${labels.get(suggestion.release_id) ?? suggestion.release_id}`}
-        {suggestion.slot && ` · ${t(SLOT_LABELS[suggestion.slot])}`}
+        {!suggestion.release_id && suggestion.era_id && ` ${places.eras.get(suggestion.era_id)?.name ?? suggestion.era_id}`}
+        {suggestion.slot && ` · ${t(SLOT_LABELS[suggestion.slot])}${suggestion.edition ? ` · ${suggestion.edition}` : ''}`}
+        {suggestion.folder && ` / ${suggestion.folder.split('/').join(' / ')}`}
+        {suggestion.seal && ` · ${t('整体收藏')}`}
+        {suggestion.readme && ` · ${t('设为文件夹的说明文件')}`}
         {suggestion.rights && ` · ${t(RIGHTS_LABELS[suggestion.rights])}`}
         {suggestion.role && ` · ${t(ROLE_LABELS[suggestion.role] ?? suggestion.role)}`}
         {suggestion.note && <div class="muted">{suggestion.note}</div>}
-        {suggestionPatch(suggestion) && <p><button type="submit">{t('按建议确认')}</button></p>}
+        {!file.sealed_in && <p><button type="submit">{t('按建议确认')}</button></p>}
       </form>
     )
   }
@@ -412,33 +479,46 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
   <form method="post" class="panel">
     <input type="hidden" name="section" value="edit" />
     <div class="form-grid">
-      <label for="release_id">{t('作品')}</label>
-      <select id="release_id" name="release_id">
-        <option value="">{t('（不属于任何作品）')}</option>
-        {options.map((o) => <option value={o.id} selected={file.release_id === o.id}>{o.label}</option>)}
-      </select>
-      <label for="slot">{t('版本栏位')}</label>
-      <select id="slot" name="slot">
-        <option value="">{t('不分栏（相关资料）')}</option>
-        {SLOTS.map((s) => <option value={s} selected={file.slot === s}>{t(SLOT_LABELS[s])}</option>)}
-      </select>
       <label for="rights">{t('权属')}</label>
       <select id="rights" name="rights">
         {RIGHTS.map((r) => <option value={r} selected={file.rights === r}>{t(RIGHTS_LABELS[r])}</option>)}
       </select>
-      <label for="state">{t('状态')}</label>
-      <select id="state" name="state">
-        {FILE_STATES.map((s) => <option value={s} selected={file.state === s}>{t(FILE_STATE_LABELS[s])}</option>)}
-      </select>
       <label for="role">{t('用途')}</label>
       <input id="role" type="text" name="role" value={file.role ?? ''} placeholder="master、cover、booklet、web_archive …" />
       <label for="download_name">{t('下载文件名')}</label>
-      <input id="download_name" type="text" name="download_name" value={file.download_name ?? ''} placeholder={t('留空则按作品与栏位自动生成')} />
+      <input id="download_name" type="text" name="download_name" value={file.download_name ?? ''} placeholder={t('留空则用原文件名')} />
       <label for="note">{t('备注')}</label>
       <textarea id="note" name="note">{file.note ?? ''}</textarea>
     </div>
     <p><button class="primary" type="submit">{t('保存')}</button></p>
   </form>
+
+  {
+    isArchive && (
+      <div class="panel" id="members">
+        <b>{t('包内清单（{n} 个文件）', { n: fmt.files ?? members.length })}</b>{' '}
+        <span class="muted">{file.sealed ? t('整体收藏：包内文件不单独整理，只在这里列出。') : t('包内文件也在整理台里逐个整理（打开「原始位置」里的这个包）。')}</span>
+        <form method="get" class="inline-form">
+          <input type="search" name="mq" value={memberQuery} placeholder={t('搜索包内文件名')} />
+          <button type="submit">{t('搜索')}</button>
+        </form>
+        <table class="grid">
+          <tbody>
+            {members.map((m) => (
+              <tr>
+                <td class="name"><a href={`/admin/files/${m.id}`}>{m.name}</a><div class="muted mono">{m.dir.slice(treePath.length + 1)}</div></td>
+                <td><span class="chip">{t(FILE_KIND_LABELS[m.kind] ?? m.kind)}</span></td>
+                <td class="num">{formatBytes(m.size)}</td>
+                <td class="mono muted">{m.mtime?.slice(0, 10) ?? ''}</td>
+              </tr>
+            ))}
+            {members.length === 0 && <tr><td class="muted">{memberQuery ? t('没有符合的文件。') : t('没有包内文件的记录（未解开或加密）。')}</td></tr>}
+          </tbody>
+        </table>
+        {members.length >= 500 && <p class="muted">{t('只显示前 500 个，请用搜索缩小范围。')}</p>}
+      </div>
+    )
+  }
 
   {
     copies.results.length > 0 && (
@@ -539,11 +619,22 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
     {history.results.map((h) => <li><span class="mono">{formatTime(h.at)}</span> {summaryText(h.summary, t)} <span class="muted">{h.actor}</span></li>)}
   </ul>
   {history.results.length > 0 && <a href={`/admin/history?entity=file&id=${file.id}`}>{t('在修改记录中查看')}</a>}
+  <PlacePicker places={places} />
 </Admin>
 
 <script>
   import { call, hashFile, storeFile } from '../../../scripts/uploader';
+  import { openPicker } from '../../../scripts/place-picker';
   import { t } from '../../../scripts/i18n';
+
+  document.querySelector('#file-move')?.addEventListener('click', async () => {
+    const r = await openPicker();
+    if (!r) return;
+    const form = document.querySelector<HTMLFormElement>('#move-form')!;
+    form.querySelector<HTMLInputElement>('input[name="target"]')!.value = r.target;
+    form.querySelector<HTMLInputElement>('input[name="new_folder"]')!.value = r.newFolder;
+    form.submit();
+  });
 
   const box = document.querySelector<HTMLElement>('#replace');
   const input = box?.querySelector<HTMLInputElement>('input[type="file"]');

@@ -1,0 +1,34 @@
+---
+import Admin from '../../layouts/Admin.astro';
+import { runChecks } from '../../lib/checks';
+
+const { t } = Astro.locals;
+const checks = await runChecks(t);
+const total = checks.reduce((n, c) => n + c.items.length + c.more, 0);
+---
+
+<Admin title={t('检查清单')}>
+  <p class="muted">{t('自动找出常见的整理问题。每一项都链接到改正的地方；改好后刷新本页即消失。共 {n} 项。', { n: total })}</p>
+  <div class="checks">
+    {
+      checks.map((c) => (
+        <details class="panel check" open={c.items.length > 0 && c.items.length <= 20}>
+          <summary>
+            <b>{t(c.title)}</b> <span class:list={['chip', c.items.length ? 'partial' : 'collected']}>{c.items.length + c.more}</span>
+            <span class="muted"> {t(c.hint)}</span>
+          </summary>
+          {c.items.length > 0 ? (
+            <ul>
+              {c.items.map((i) => (
+                <li><a href={i.href}>{i.label}</a>{i.detail && <span class="muted"> · {i.detail}</span>}</li>
+              ))}
+              {c.more > 0 && <li class="muted">{t('还有 {n} 项未列出', { n: c.more })}</li>}
+            </ul>
+          ) : (
+            <p class="muted">{t('没有问题。')}</p>
+          )}
+        </details>
+      ))
+    }
+  </div>
+</Admin>

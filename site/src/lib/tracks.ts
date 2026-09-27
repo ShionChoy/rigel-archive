@@ -6,11 +6,9 @@ import { ChangeSet } from './changes';
 import { summary, UserError } from './i18n';
 import { SLOT_LABELS, isOneOf, SLOTS } from './constants';
 import { db, parseFormat, type ReleaseRow, type TrackRow } from './db';
+import { newId } from './ids';
 
-export function newId(prefix: string): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  return `${prefix}_${[...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}`;
-}
+export { newId };
 
 /** Title comparison key: width, case, punctuation and bracketed version notes do not matter. */
 export function titleKey(title: string): string {
@@ -127,7 +125,15 @@ export async function saveTracks(actor: string, release: ReleaseRow, current: Tr
       duration_ms: r.duration_ms, note: r.note, ...(songId !== undefined ? { song_id: songId } : {}),
     };
     if (r.id) cs.updateKnown('track', { id: r.id }, byId.get(r.id) as unknown as Record<string, unknown>, values);
-    else cs.create('track', { id: newId('t'), credits: null, song_id: null, ...values });
+    else cs.create('track', { id: newId('t'), credits: null, song_id: null, external_ids: '{}', ...values });
+  }
+  // The editions' rows for a removed track go with it (recorded, so undo brings them back).
+  if (gone.length) {
+    const { results: rows } = await db()
+      .prepare('SELECT id FROM edition_tracks WHERE track_id IN (SELECT value FROM json_each(?))')
+      .bind(JSON.stringify(gone.map((t) => t.id)))
+      .all<{ id: string }>();
+    for (const r of rows) await cs.delete('edition_track', { id: r.id });
   }
   for (const t of gone) await cs.delete('track', { id: t.id });
   return cs.commit();
@@ -171,10 +177,13 @@ export function trackNumber(file: { dir: string; name: string; format: string | 
 
 /** A readable track title from tags or the file name ("01 Riddika.flac" → "Riddika"). */
 export function titleFromFile(file: { name: string; format: string | null }): string {
-  const tag = parseFormat(file.format).tags?.title?.trim();
+  // Some shops put the number into the title tag too («1. Lengsel»).
+  const tag = parseFormat(file.format).tags?.title?.trim().replace(/^\d{1,3}\s*[.．)）]\s+/, '');
   if (tag) return tag;
   const stem = file.name.replace(/\.[^.]+$/, '');
-  return stem.replace(/^(?:\d[-.])?\d{1,3}\s*[-._)\]]*\s*/, '').trim() || stem;
+  // «Rigel Theatre - Phantom Swing.wav»: the circle's name in front is not part of the title.
+  const title = stem.replace(/^Rig[eë]l Theatre\s+-\s+/i, '');
+  return title.replace(/^(?:\d[-.])?\d{1,3}\s*[-._)\]]*\s*/, '').trim() || title;
 }
 
 /** Build the track list from the audio files of one slot (only while the release has no tracks). */

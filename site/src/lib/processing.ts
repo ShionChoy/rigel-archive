@@ -33,8 +33,9 @@ function settled(task: Task): string {
     OR (t.state = 'failed' AND t.updated_at > ${ago(RETRY_AFTER_MINUTES)})))`;
 }
 
-// Stored, readable, not ignored (or suggested to be ignored) and, for uploads, already checked.
-const USABLE = `f.blob_key IS NOT NULL AND f.sha256 IS NOT NULL AND f.state != 'ignored'
+// Stored, readable, not ignored (or suggested to be ignored), not inside an archive kept whole and, for
+// uploads, already checked.
+const USABLE = `f.blob_key IS NOT NULL AND f.sha256 IS NOT NULL AND f.state != 'ignored' AND f.sealed_in IS NULL
   AND NOT (f.state = 'inbox' AND coalesce(json_extract(f.suggest, '$.state'), '') = 'ignored')
   AND json_extract(f.format, '$.probe_error') IS NULL AND json_extract(f.format, '$.upload_error') IS NULL
   AND (f.origin != 'upload' OR f.checked_at IS NOT NULL)`;

@@ -1,11 +1,19 @@
-# Path rules that suggest where each NAS file belongs. First match wins; order matters.
-# Paths are relative to the 合辑 root with '/' separators. Suggestions are confirmed by hand in /admin.
+# Path rules that suggest where each 合辑 file belongs. First match wins; order matters.
+# Paths are relative to the 合辑 root with '/' separators; an archive member's path is the archive's path
+# followed by its path inside it. Suggestions are confirmed by hand in the 整理台 (「按建议确认」), which
+# puts the file at the suggested place and makes the edition or folders it names when they are missing.
 #
 #   match:      regular expression searched in the path
 #   ext:        list of extensions (lower case, no dot)
 #   release:    id | { catalog: <group> } | { title: <group> | $name, era: <era> }
 #               ($name = file name without extension; title matching folds case, accents and punctuation)
-#   slot, rights, role, state, confidence, note
+#   slot:       which of the release's 7 slots; the file goes into an edition of that slot
+#   edition:    name of that edition (default: the slot's unnamed edition) | { name: …, catalog: <group> }
+#   folder:     a folder path ('a/b') under the edition, the release, the era (era: <id>) or at the top
+#   keep:       true = the folders below the end of the match come along (a/b/c.txt → folder …/a/b)
+#   seal:       true = keep the archive whole (its contents are not organized one by one)
+#   readme:     true = the file is its folder's description
+#   rights, role, state, confidence, note
 
 # ------------------------------------------------------------------ junk
 - name: 系统生成的文件
@@ -20,174 +28,253 @@
   confidence: 0.95
   note: 下载残片或播放列表，不上站
 
-# ------------------------------------------------------------------ 04 Rigel Theatre / 01 RTCD抓轨
-- name: Erdelåten 母带
-  match: '^04 Rigel Theatre/01 RTCD抓轨/Erdelaten_楽曲マスタリングデータ'
-  release: rtcd-013
-  slot: digital
-  role: master
-  rights: own
-  confidence: 0.95
-
-- name: Helados 母带
-  match: '^04 Rigel Theatre/01 RTCD抓轨/Helados Flores y Estrellas 母带级/'
-  release: helados-flores-y-estrellas
-  slot: digital
-  role: master
-  rights: own
-  confidence: 0.95
-
-- name: Lyra and the Beltain Ritual 母带
-  match: '^04 Rigel Theatre/01 RTCD抓轨/\[RTCD-C005\][^/]*/[^/]*_Master_'
-  release: rtcd-c005
-  slot: digital
-  role: master
-  rights: own
+# ------------------------------------------------------------------ 01 DEZAEMON
+- name: DEZAEMON 合辑说明
+  match: '^01 DEZAEMON/说明\.txt$'
+  era: dezaemon
+  folder: 游戏与模拟器
+  readme: true
   confidence: 0.9
-  note: 放在抓轨目录里，实为母带
+  note: 合辑整理者写的说明：存档格式与模拟器玩法
 
-- name: RTCD 抓轨-扫图
-  match: '^04 Rigel Theatre/01 RTCD抓轨/\[(?P<cat>RTCD-C?\d{3})A?\][^/]*/(?:[^/]+/)*[^/]+\.(?:jpe?g|png|bmp|gif|tiff?)$'
-  release: { catalog: cat }
-  slot: scans
-  rights: own
+- name: 游戏本体、模拟器与 BIOS
+  match: '^01 DEZAEMON/.*(?:模拟器|bios文件|\(Japan\)|MemcardRex|Save Game Manager)'
+  era: dezaemon
+  folder: 游戏与模拟器
+  seal: true
+  rights: third_party
   confidence: 0.85
+  note: 游戏本体、模拟器、BIOS 只列条目
 
-- name: RTCD 抓轨
-  match: '^04 Rigel Theatre/01 RTCD抓轨/\[(?P<cat>RTCD-C?\d{3})A?\]'
-  release: { catalog: cat }
-  slot: cd_rip
-  rights: own
-  confidence: 0.9
-
-# ------------------------------------------------------------------ 04 Rigel Theatre / other sources
-- name: Bandcamp 打包
-  match: '^04 Rigel Theatre/02 Bandcamp/FLAC/(?P<t>[^/]+)'
-  release: { title: t, era: rigel-theatre }
-  slot: digital
-  rights: own
-  confidence: 0.8
-
-- name: Bandcamp
-  match: '^04 Rigel Theatre/02 Bandcamp/(?P<t>[^/]+)/'
-  release: { title: t, era: rigel-theatre }
-  slot: digital
-  rights: own
-  confidence: 0.85
-
-- name: 官网 DL 卡
-  match: '^04 Rigel Theatre/03 官网下载内容/DL卡/(?P<t>[^/]+?)(?:\.[A-Za-z0-9]+)?(?:/|$)'
-  release: { title: t, era: rigel-theatre }
-  slot: bonus
-  rights: own
-  confidence: 0.85
-
-- name: 官网特典页 SOLROS WOTA
-  match: '^04 Rigel Theatre/03 官网下载内容/专辑特别页面/SOLROS WOTA Special Content/'
-  release: rtcd-009
-  slot: bonus
-  rights: own
-  confidence: 0.8
-
-- name: 官网特典页 Francbelle
-  match: '^04 Rigel Theatre/03 官网下载内容/专辑特别页面/Francbelle_RTSR0001'
-  release: francbelle
-  slot: bonus
-  rights: own
-  confidence: 0.85
-
-- name: 官网特典页 SOLROS
-  match: '^04 Rigel Theatre/03 官网下载内容/专辑特别页面/SOLROS Special Content/'
-  release: rtcd-001
-  slot: bonus
-  rights: own
-  confidence: 0.5
-  note: 推测对应 RTCD-001，待确认
-
-- name: 官网特典页 Älvorna
-  match: '^04 Rigel Theatre/03 官网下载内容/专辑特别页面/Alvorna Special Content/'
-  release: rtcd-005
-  slot: bonus
-  rights: own
-  confidence: 0.4
-  note: 推测对应 RTCD-005，也可能是 RTCD-007，待确认
-
-- name: DLsite RJ211925
-  match: '^04 Rigel Theatre/04 DLsite/RJ211925'
-  release: rtcd-001
-  slot: digital
-  rights: own
-  confidence: 0.9
-
-- name: DLsite RJ211928
-  match: '^04 Rigel Theatre/04 DLsite/RJ211928'
-  release: rtcd-004
-  slot: digital
-  rights: own
-  confidence: 0.9
-
-- name: 合作专辑里的本社音源
-  match: '^04 Rigel Theatre/05 合作专辑与委托曲/数字版/Rig[^/]*Theatre[^/]*\.flac$'
-  release: { title: $name, era: rigel-theatre }
-  slot: digital
-  rights: own
-  confidence: 0.4
-  note: 合作版本（feat. ミーウェル），请确认归属
-
-- name: 合作专辑与委托曲
-  match: '^04 Rigel Theatre/05 合作专辑与委托曲/'
+- name: GENOCIDE DAY（非井上作曲）
+  match: '^01 DEZAEMON/02 GENOCIDE DAY/'
+  era: dezaemon
+  folder: GENOCIDE DAY（非井上作曲）
+  keep: true
   rights: third_party
   confidence: 0.8
-  note: 他社合辑与委托作品，只列条目
+  note: 非井上⊿作曲，只列条目
 
-- name: SoundCloud
-  match: '^04 Rigel Theatre/06 Soundcloud/(?P<t>[^/]+)/'
-  release: { title: t, era: rigel-theatre }
+- name: MID NIGHT BIRDS BGM
+  match: '^01 DEZAEMON/01 MID NIGHT BIRDS/BGM/'
+  release: dz-mid-night-birds
   slot: digital
+  edition: 模拟器录制
   rights: own
-  confidence: 0.8
-
-- name: 音游解包
-  match: '^04 Rigel Theatre/07 音乐游戏解包/'
-  rights: third_party
   confidence: 0.9
-  note: 音游解包，只列条目
 
-- name: PV
-  match: '^04 Rigel Theatre/08 PV/'
-  release: { title: $name, era: rigel-theatre }
-  slot: pv
+- name: MID NIGHT BIRDS 存档说明
+  match: '^01 DEZAEMON/01 MID NIGHT BIRDS/Game/说明\.txt$'
+  release: dz-mid-night-birds
+  folder: 游戏存档
+  readme: true
   rights: own
-  confidence: 0.8
+  confidence: 0.7
 
-- name: 官网网页存档
-  match: '^04 Rigel Theatre/09 网页存档/'
+- name: MID NIGHT BIRDS 游戏存档
+  match: '^01 DEZAEMON/01 MID NIGHT BIRDS/Game/'
+  release: dz-mid-night-birds
+  folder: 游戏存档
+  keep: true
+  rights: own
+  confidence: 0.7
+
+- name: MID NIGHT BIRDS 其他
+  match: '^01 DEZAEMON/01 MID NIGHT BIRDS/'
+  release: dz-mid-night-birds
+  rights: own
+  confidence: 0.6
+
+- name: Lost Vision BGM
+  match: '^01 DEZAEMON/03 Lost Vision/\[模拟器录制\]'
+  release: dz-lost-vision
+  slot: digital
+  edition: 模拟器录制
+  rights: own
+  confidence: 0.9
+
+- name: Lost Vision 官方网页
+  match: '^01 DEZAEMON/03 Lost Vision/官方网页/'
+  release: dz-lost-vision
+  folder: 官方网页
+  keep: true
   rights: own
   role: web_archive
-  confidence: 0.9
+  confidence: 0.85
 
-- name: pixiv 插画
-  match: '^04 Rigel Theatre/10 pixiv/'
+- name: Lost Vision 游戏存档
+  match: '^01 DEZAEMON/03 Lost Vision/游戏存档和使用方法/'
+  release: dz-lost-vision
+  folder: 游戏存档与使用方法
+  keep: true
   rights: own
-  role: illustration
-  confidence: 0.6
-  note: 插画，需标注画师
+  confidence: 0.7
 
-- name: 流媒体
-  match: '^04 Rigel Theatre/11 流媒体/'
-  release: { title: $name, era: rigel-theatre }
-  slot: streaming
+- name: Lost Vision 其他
+  match: '^01 DEZAEMON/03 Lost Vision/'
+  release: dz-lost-vision
+  rights: own
+  confidence: 0.6
+
+- name: DEZAEMON 其他
+  match: '^01 DEZAEMON/'
+  era: dezaemon
+  folder: 其他
+  keep: true
+  rights: own
+  confidence: 0.4
+
+# ------------------------------------------------------------------ 02 Delta Records
+- name: Delta Records 说明
+  match: '^02 Delta Records/[^/]+\.md$'
+  era: delta-records
+  folder: 关于 Delta Records
+  readme: true
+  confidence: 0.6
+
+- name: CanMusic 整站抓取
+  match: '^02 Delta Records/07 其他/Canbmsic\.zip$'
+  era: delta-records
+  folder: 收藏：CanMusic 相关
+  seal: true
+  rights: third_party
+  confidence: 0.8
+  note: 疑似整站抓取，大部分是他人作品，只列条目
+
+- name: CanMusic 工具包
+  match: '^02 Delta Records/07 其他/canmusic vos/(?:VOS Creator for CanMusic|VOS to MID|vos2mid v1\.1)\.rar$'
+  era: delta-records
+  folder: 收藏：CanMusic 相关
+  seal: true
+  rights: third_party
+  confidence: 0.8
+  note: CanMusic 的制作工具
+
+- name: VOS Creator 工具
+  match: '^02 Delta Records/07 其他/canmusic vos/(?=VOS Creator for CanMusic/)'
+  era: delta-records
+  folder: 收藏：CanMusic 相关
+  keep: true
+  rights: third_party
+  confidence: 0.8
+  note: CanMusic 的制作工具
+
+- name: CanMusic 投稿曲
+  match: '^02 Delta Records/07 其他/(?=canbmusic midi & bms/|canmusic vos/)'
+  era: delta-records
+  folder: 收藏：CanMusic 相关
+  keep: true
+  rights: own
+  confidence: 0.5
+  note: CanMusic 上的投稿曲数据，请确认
+
+- name: 怒涛丸
+  match: '^02 Delta Records/07 其他/怒涛丸/'
+  era: delta-records
+  folder: 其他/怒涛丸
+  seal: true
+  rights: own
+  confidence: 0.8
+  note: 历史档案，整体收藏
+
+- name: Freezing Flower 的 BMS 与 CanMusic 包
+  match: '^02 Delta Records/07 其他/(?=freezing flower/(?:bms|canmusic|VOS/一些工具)/[^/]+\.(?:rar|zip)$)'
+  era: delta-records
+  folder: 其他
+  keep: true
+  seal: true
+  rights: own
+  confidence: 0.7
+
+- name: Delta Records 其他
+  match: '^02 Delta Records/07 其他/'
+  era: delta-records
+  folder: 其他
+  keep: true
+  rights: own
+  confidence: 0.4
+
+- name: Delta Records Old
+  match: '^02 Delta Records/01 Delta Records Old/'
+  release: dr-old
+  slot: digital
+  keep: true
   rights: own
   confidence: 0.85
 
-- name: Rigel Theatre 其他
-  match: '^04 Rigel Theatre/'
+- name: Delta Records 2nd
+  match: '^02 Delta Records/02 Delta Records 2nd/'
+  release: dr-2nd
+  slot: digital
+  keep: true
+  rights: own
+  confidence: 0.8
+
+- name: Lala & Merry 另一版本
+  match: '^02 Delta Records/03 Lala & Merry/Lala & Merry \(another version\)/'
+  release: dr-lala-merry
+  slot: digital
+  edition: another version
+  keep: true
+  rights: own
+  confidence: 0.8
+
+- name: Lala & Merry 故事页
+  match: '^02 Delta Records/03 Lala & Merry/story&html/'
+  release: dr-lala-merry
+  folder: 故事网页
+  keep: true
+  rights: own
+  role: web_archive
+  confidence: 0.8
+
+- name: Lala & Merry
+  match: '^02 Delta Records/03 Lala & Merry/'
+  release: dr-lala-merry
+  slot: digital
+  keep: true
+  rights: own
+  confidence: 0.8
+
+- name: Delta Records BMS
+  match: '^02 Delta Records/04 BMS/'
+  era: delta-records
+  folder: BMS
+  keep: true
+  seal: true
+  rights: own
+  role: bms
+  confidence: 0.8
+
+- name: Delta Records 图片
+  match: '^02 Delta Records/05 图片/'
+  era: delta-records
+  folder: 图片
+  keep: true
+  rights: own
+  confidence: 0.6
+
+- name: FreedForksTimes
+  match: '^02 Delta Records/06 FreedForksTimes/'
+  era: delta-records
+  folder: FreedForksTimes
+  keep: true
+  rights: own
+  confidence: 0.6
+
+- name: Delta Records 其他目录
+  match: '^02 Delta Records/'
+  era: delta-records
+  folder: 其他
+  keep: true
   rights: own
   confidence: 0.3
 
 # ------------------------------------------------------------------ 03 Grand Thaw
 - name: Grand Thaw 目录里的他社合辑
-  match: '^03 Grand Thaw/(?:Circle B\.z\.B|メロ(?:ディー)?重視)'
+  match: '^03 Grand Thaw/(?=Circle B\.z\.B|メロ(?:ディー)?重視)'
+  folder: 第三方资料/他社合辑
+  keep: true
   rights: third_party
   confidence: 0.9
   note: 他社合辑，只列条目
@@ -196,6 +283,7 @@
   match: '^03 Grand Thaw/01\.ÅRSTID/CD\+DVD抓轨版/'
   release: gt-arstid
   slot: cd_rip
+  keep: true
   rights: own
   confidence: 0.9
 
@@ -203,28 +291,43 @@
   match: '^03 Grand Thaw/01\.ÅRSTID/DL版/'
   release: gt-arstid
   slot: digital
+  edition: DL 版
+  keep: true
   rights: own
   confidence: 0.85
 
-- name: Fyra Världen
-  match: '^03 Grand Thaw/02\.Fyra Varlden/'
+- name: Fyra Världen「CD 版」目录
+  match: '^03 Grand Thaw/02\.Fyra Varlden/CD版[^/]*/'
+  release: gt-fyra-varlden
+  folder: CD 版目录（内为下载版）
+  keep: true
+  rights: own
+  confidence: 0.6
+  note: 目录名写 CD 版，实为下载版，多半与 DL 版重复
+
+- name: Fyra Världen DL
+  match: '^03 Grand Thaw/02\.Fyra Varlden/DL版/(?:Fyra_varlden/)?'
   release: gt-fyra-varlden
   slot: digital
+  edition: DL 版
+  keep: true
   rights: own
   confidence: 0.85
 
 - name: SOLROS（Grand Thaw）CD Plus 数据
-  match: '^03 Grand Thaw/03\.Grand Thaw - SOLROS抓轨\+CDPlus Full Data/CD Plus Data/'
+  match: '^03 Grand Thaw/03\.Grand Thaw - SOLROS抓轨\+CDPlus Full Data/CD Plus Data/(?:SOLROS/)?'
   release: gt-solros
   slot: bonus
+  edition: CD Plus 数据
+  keep: true
   rights: own
   confidence: 0.8
-  note: CD Plus 数据区
 
 - name: SOLROS（Grand Thaw）抓轨
   match: '^03 Grand Thaw/03\.Grand Thaw - SOLROS抓轨\+CDPlus Full Data/'
   release: gt-solros
   slot: cd_rip
+  keep: true
   rights: own
   confidence: 0.9
 
@@ -232,6 +335,7 @@
   match: '^03 Grand Thaw/03\.SOLROS分轨版-来自神曲论坛/'
   release: gt-solros
   slot: cd_rip
+  edition: 论坛分轨
   rights: own
   confidence: 0.6
   note: 论坛流出的分轨，与抓轨比对后决定保留哪份
@@ -246,19 +350,27 @@
 - name: SOLROS（Grand Thaw）重复目录
   match: '^03 Grand Thaw/03\.SOLROS/'
   release: gt-solros
-  slot: bonus
+  folder: 重复目录（待合并）
+  keep: true
   rights: own
-  confidence: 0.6
+  confidence: 0.5
   note: 与「抓轨+CDPlus」目录重复，待合并
 
 - name: Grand Thaw BMS
   match: '^03 Grand Thaw/04 BMS/'
+  era: grand-thaw
+  folder: BMS
+  keep: true
+  seal: true
   rights: own
   role: bms
   confidence: 0.8
 
 - name: Grand Thaw 站点与博客
-  match: '^03 Grand Thaw/0[56] '
+  match: '^03 Grand Thaw/(?=0[56] )'
+  era: grand-thaw
+  folder: 官网与博客存档
+  keep: true
   rights: own
   role: web_archive
   confidence: 0.8
@@ -272,119 +384,281 @@
 
 - name: Grand Thaw 其他
   match: '^03 Grand Thaw/'
+  era: grand-thaw
+  folder: 其他
+  keep: true
   rights: own
   confidence: 0.3
 
-# ------------------------------------------------------------------ 02 Delta Records
-- name: CanMusic 整站抓取
-  match: '^02 Delta Records/07 其他/Canbmsic\.zip$'
-  rights: third_party
-  confidence: 0.8
-  note: 疑似整站抓取，大部分是他人作品，只列条目
-
-- name: VOS Creator 工具
-  match: '^02 Delta Records/07 其他/canmusic vos/VOS Creator for CanMusic/'
-  rights: third_party
-  confidence: 0.8
-  note: CanMusic 的制作工具
-
-- name: Delta Records Old
-  match: '^02 Delta Records/01 Delta Records Old/'
-  release: dr-old
+# ------------------------------------------------------------------ 04 Rigel Theatre / 01 RTCD抓轨
+- name: Erdelåten 母带
+  match: '^04 Rigel Theatre/01 RTCD抓轨/Erdelaten_楽曲マスタリングデータ[^/]*/'
+  release: rtcd-013
   slot: digital
+  edition: 母带
+  keep: true
+  role: master
+  rights: own
+  confidence: 0.95
+
+- name: Helados 母带
+  match: '^04 Rigel Theatre/01 RTCD抓轨/Helados Flores y Estrellas 母带级/'
+  release: helados-flores-y-estrellas
+  slot: digital
+  edition: 母带
+  keep: true
+  role: master
+  rights: own
+  confidence: 0.95
+
+- name: Lyra and the Beltain Ritual 母带
+  match: '^04 Rigel Theatre/01 RTCD抓轨/\[RTCD-C005\][^/]*/[^/]*_Master_'
+  release: rtcd-c005
+  slot: digital
+  edition: 母带
+  role: master
+  rights: own
+  confidence: 0.9
+  note: 放在抓轨目录里，实为母带
+
+- name: RTCD 再版抓轨-扫图
+  match: '^04 Rigel Theatre/01 RTCD抓轨/\[(?P<cn>(?P<cat>RTCD-C?\d{3})A)\][^/]*/(?:[^/]+/)*[^/]+\.(?:jpe?g|png|bmp|gif|tiff?)$'
+  release: { catalog: cat }
+  slot: scans
+  edition: { name: 第 2 版, catalog: cn }
   rights: own
   confidence: 0.85
 
-- name: Delta Records 2nd
-  match: '^02 Delta Records/02 Delta Records 2nd/'
-  release: dr-2nd
+- name: RTCD 抓轨-扫图
+  match: '^04 Rigel Theatre/01 RTCD抓轨/\[(?P<cn>(?P<cat>RTCD-C?\d{3}))\][^/]*/(?:[^/]+/)*[^/]+\.(?:jpe?g|png|bmp|gif|tiff?)$'
+  release: { catalog: cat }
+  slot: scans
+  edition: { name: 初版, catalog: cn }
+  rights: own
+  confidence: 0.85
+
+- name: RTCD 再版抓轨
+  match: '^04 Rigel Theatre/01 RTCD抓轨/\[(?P<cn>(?P<cat>RTCD-C?\d{3})A)\][^/]*/'
+  release: { catalog: cat }
+  slot: cd_rip
+  edition: { name: 第 2 版, catalog: cn }
+  keep: true
+  rights: own
+  confidence: 0.9
+  note: 编号带 A 的是再版
+
+- name: RTCD 抓轨
+  match: '^04 Rigel Theatre/01 RTCD抓轨/\[(?P<cn>(?P<cat>RTCD-C?\d{3}))\][^/]*/'
+  release: { catalog: cat }
+  slot: cd_rip
+  edition: { name: 初版, catalog: cn }
+  keep: true
+  rights: own
+  confidence: 0.9
+
+# ------------------------------------------------------------------ 04 Rigel Theatre / other sources
+- name: Bandcamp 旧版
+  match: '^04 Rigel Theatre/02 Bandcamp/(?P<t>[^/]+)/\[OLDER Release\]'
+  release: { title: t, era: rigel-theatre }
   slot: digital
+  edition: Bandcamp 旧版
   rights: own
   confidence: 0.8
 
-- name: Lala & Merry
-  match: '^02 Delta Records/03 Lala & Merry/'
-  release: dr-lala-merry
+- name: Bandcamp 打包
+  match: '^04 Rigel Theatre/02 Bandcamp/FLAC/(?P<t>[^/]+?)(?:\.zip)?(?:/|$)'
+  release: { title: t, era: rigel-theatre }
   slot: digital
+  edition: Bandcamp
+  keep: true
   rights: own
   confidence: 0.8
 
-- name: Delta Records BMS
-  match: '^02 Delta Records/04 BMS/'
+- name: Bandcamp
+  match: '^04 Rigel Theatre/02 Bandcamp/(?P<t>[^/]+)/'
+  release: { title: t, era: rigel-theatre }
+  slot: digital
+  edition: Bandcamp
+  keep: true
   rights: own
-  role: bms
+  confidence: 0.85
+
+- name: 官网 DL 卡
+  match: '^04 Rigel Theatre/03 官网下载内容/DL卡/(?P<t>[^/]+?)(?:\.zip$|/)'
+  release: { title: t, era: rigel-theatre }
+  slot: bonus
+  edition: DL 卡
+  keep: true
+  rights: own
+  confidence: 0.85
+
+- name: 官网特典页 SOLROS WOTA
+  match: '^04 Rigel Theatre/03 官网下载内容/专辑特别页面/SOLROS WOTA Special Content/'
+  release: rtcd-009
+  slot: bonus
+  edition: 特典页
+  keep: true
+  rights: own
   confidence: 0.8
 
-- name: Delta Records 其他
-  match: '^02 Delta Records/'
+- name: 官网特典页 Francbelle
+  match: '^04 Rigel Theatre/03 官网下载内容/专辑特别页面/Francbelle_RTSR0001(?:\.rar$|/)'
+  release: francbelle
+  slot: bonus
+  edition: 特典页
+  keep: true
+  rights: own
+  confidence: 0.85
+
+- name: 官网特典页 SOLROS
+  match: '^04 Rigel Theatre/03 官网下载内容/专辑特别页面/SOLROS Special Content/'
+  release: rtcd-001
+  slot: bonus
+  edition: 特典页
+  keep: true
+  rights: own
+  confidence: 0.5
+  note: 推测对应 RTCD-001，待确认
+
+- name: 官网特典页 Älvorna
+  match: '^04 Rigel Theatre/03 官网下载内容/专辑特别页面/Alvorna Special Content/'
+  release: rtcd-005
+  slot: bonus
+  edition: 特典页
+  keep: true
   rights: own
   confidence: 0.4
+  note: 推测对应 RTCD-005，也可能是 RTCD-007，待确认
 
-# ------------------------------------------------------------------ 01 DEZAEMON
-- name: GENOCIDE DAY（非井上作曲）
-  match: '^01 DEZAEMON/02 GENOCIDE DAY/'
+- name: DLsite RJ211925
+  match: '^04 Rigel Theatre/04 DLsite/RJ211925(?:\.zip$|(?:\.zip)?/(?:RJ211925/)?)'
+  release: rtcd-001
+  slot: digital
+  edition: DLsite
+  keep: true
+  rights: own
+  confidence: 0.9
+
+- name: DLsite RJ211928
+  match: '^04 Rigel Theatre/04 DLsite/RJ211928(?:\.zip$|(?:\.zip)?/(?:RJ211928/)?)'
+  release: rtcd-004
+  slot: digital
+  edition: DLsite
+  keep: true
+  rights: own
+  confidence: 0.9
+
+- name: 合作专辑里的本社音源
+  match: '^04 Rigel Theatre/05 合作专辑与委托曲/数字版/Rig[^/]*Theatre[^/]*\.flac$'
+  release: { title: $name, era: rigel-theatre }
+  slot: digital
+  edition: 合作版
+  rights: own
+  confidence: 0.4
+  note: 合作版本（feat. ミーウェル），请确认归属
+
+- name: 游戏本体（整体收藏）
+  match: '^04 Rigel Theatre/05 合作专辑与委托曲/(?=杂/.*\.(?:zip|rar|7z)$)'
+  folder: 第三方资料/合作专辑与委托曲
+  keep: true
+  seal: true
   rights: third_party
   confidence: 0.8
-  note: 非井上⊿作曲，只列条目
+  note: 游戏本体与安装包，只列条目
 
-- name: 游戏本体、模拟器与 BIOS
-  match: '^01 DEZAEMON/.*(?:模拟器|bios文件|\(Japan\)|MemcardRex|Save Game Manager)'
+- name: 合作专辑与委托曲
+  match: '^04 Rigel Theatre/05 合作专辑与委托曲/'
+  folder: 第三方资料/合作专辑与委托曲
+  keep: true
   rights: third_party
-  confidence: 0.85
-  note: 游戏本体、模拟器、BIOS 只列条目
+  confidence: 0.8
+  note: 他社合辑与委托作品，只列条目
 
-- name: MID NIGHT BIRDS BGM
-  match: '^01 DEZAEMON/01 MID NIGHT BIRDS/BGM/'
-  release: dz-mid-night-birds
-  slot: digital
-  rights: own
-  confidence: 0.9
-
-- name: MID NIGHT BIRDS 存档与说明
-  match: '^01 DEZAEMON/01 MID NIGHT BIRDS/'
-  release: dz-mid-night-birds
-  rights: own
+- name: SoundCloud 说明
+  match: '^04 Rigel Theatre/06 Soundcloud/说明\.txt$'
+  era: rigel-theatre
+  folder: SoundCloud
+  readme: true
   confidence: 0.6
 
-- name: Lost Vision BGM
-  match: '^01 DEZAEMON/03 Lost Vision/\[模拟器录制\]'
-  release: dz-lost-vision
+- name: SoundCloud
+  match: '^04 Rigel Theatre/06 Soundcloud/(?P<t>[^/]+)/'
+  release: { title: t, era: rigel-theatre }
   slot: digital
+  edition: SoundCloud
+  keep: true
   rights: own
-  confidence: 0.9
+  confidence: 0.8
 
-- name: Lost Vision 官方网页
-  match: '^01 DEZAEMON/03 Lost Vision/官方网页/'
-  release: dz-lost-vision
+- name: 音游解包
+  match: '^04 Rigel Theatre/07 音乐游戏解包/'
+  folder: 第三方资料/音游解包
+  keep: true
+  rights: third_party
+  confidence: 0.9
+  note: 音游解包，只列条目
+
+- name: PV
+  match: '^04 Rigel Theatre/08 PV/'
+  release: { title: $name, era: rigel-theatre }
+  slot: pv
+  rights: own
+  confidence: 0.8
+
+- name: 官网网页存档
+  match: '^04 Rigel Theatre/09 网页存档/'
+  era: rigel-theatre
+  folder: 官网存档
+  keep: true
   rights: own
   role: web_archive
+  confidence: 0.9
+
+- name: pixiv 插画
+  match: '^04 Rigel Theatre/10 pixiv/(?:Rigël Theatre - pixiv/)?'
+  era: rigel-theatre
+  folder: pixiv 插画
+  keep: true
+  rights: own
+  role: illustration
+  confidence: 0.6
+  note: 插画，需标注画师
+
+- name: 流媒体
+  match: '^04 Rigel Theatre/11 流媒体/(?P<t>[^/]+?)(?:\.7z)?(?:/|$)'
+  release: { title: t, era: rigel-theatre }
+  slot: streaming
+  edition: Amazon
+  rights: own
   confidence: 0.85
 
-- name: Lost Vision 其他
-  match: '^01 DEZAEMON/03 Lost Vision/'
-  release: dz-lost-vision
+- name: Rigel Theatre 其他
+  match: '^04 Rigel Theatre/'
+  era: rigel-theatre
+  folder: 其他
+  keep: true
   rights: own
-  confidence: 0.6
-
-- name: DEZAEMON 其他
-  match: '^01 DEZAEMON/'
-  rights: own
-  confidence: 0.4
+  confidence: 0.3
 
 # ------------------------------------------------------------------ 05 其他
 - name: 有村京悟个人专辑
-  match: '^05 其他/.*NemusArcane'
+  match: '^05 其他/[^/]*NemusArcane[^/]*\.(?:zip|7z)$'
+  folder: 第三方资料/有村京悟个人作品
+  seal: true
   rights: third_party
   confidence: 0.8
   note: 有村京悟个人作品，只列条目
 
 - name: 他人演出录像
   match: '^05 其他/La Lyra 2021 Live'
+  folder: 第三方资料/他人演出录像
   rights: third_party
   confidence: 0.8
 
 - name: 非官方乐谱
   match: '^05 其他/谱（非官方）/'
+  folder: 乐谱（非官方）
+  keep: true
   rights: own
   role: score
   confidence: 0.5
@@ -392,10 +666,13 @@
 
 - name: 用途不明的音源包
   match: '^05 其他/(?:Antwort|Reunion_of_Salvation)'
+  folder: 待确认
   confidence: 0.3
   note: 请主创确认是否为未公开音源
 
 - name: 其他
   match: '^05 其他/'
+  folder: 待确认
+  keep: true
   rights: own
   confidence: 0.3

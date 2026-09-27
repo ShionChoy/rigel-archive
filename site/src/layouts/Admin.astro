@@ -12,6 +12,13 @@ const { admin, t, lang } = Astro.locals;
 const path = Astro.url.pathname;
 const msg = Astro.url.searchParams.get('msg');
 const err = Astro.url.searchParams.get('err');
+// An action's message offers to undo it right there (the batch id comes with the redirect).
+const undo = Astro.url.searchParams.get('undo');
+const here = (() => {
+  const u = new URL(Astro.url);
+  for (const k of ['msg', 'err', 'undo']) u.searchParams.delete(k);
+  return u.pathname + u.search;
+})();
 
 const nav = [
   { href: '/admin/inbox', label: t('整理台') },
@@ -19,6 +26,8 @@ const nav = [
   { href: '/admin/releases', label: t('作品') },
   { href: '/admin/songs', label: t('单曲') },
   { href: '/admin/missing', label: t('缺档看板') },
+  { href: '/admin/checks', label: t('检查清单') },
+  { href: '/admin/duplicates', label: t('重复内容') },
   { href: '/admin/history', label: t('修改记录') },
   { href: '/admin/storage', label: t('存储与处理') },
   { href: '/admin/team', label: t('管理组') },
@@ -60,7 +69,20 @@ const nav = [
       </nav>
       <main class:list={['main', { wide }]}>
         <h1>{title}</h1>
-        {msg && <p class="flash ok">{msg}</p>}
+        {
+          msg && (
+            <div class="flash ok">
+              {msg}
+              {undo && (
+                <form method="post" action="/admin/history" class="inline undo">
+                  <input type="hidden" name="batch" value={undo} />
+                  <input type="hidden" name="back" value={here} />
+                  <button type="submit">{t('撤销')}</button>
+                </form>
+              )}
+            </div>
+          )
+        }
         {err && <p class="flash err">{err}</p>}
         <slot />
       </main>

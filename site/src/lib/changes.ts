@@ -13,12 +13,12 @@ interface EntitySpec {
   touch?: boolean; // table has updated_at
 }
 
-/** Every column of files (migrations 0001, 0003, 0004); a test in tools/ra compares this with the schema. */
+/** Every column of files (migrations 0001, 0003, 0004, 0006); a test in tools/ra compares this with the schema. */
 export const FILE_COLUMNS = [
   'id', 'origin', 'source_path', 'dir', 'member_of', 'member_path', 'name', 'ext', 'size', 'mtime', 'sha256',
   'blob_key', 'kind', 'format', 'pcm_md5', 'rights', 'state', 'release_id', 'slot', 'track_id', 'role', 'dup_of',
   'suggest', 'download_name', 'note', 'uploaded_by', 'created_at', 'updated_at', 'checked_at', 'source_seen',
-  'replaces',
+  'replaces', 'folder_id', 'edition_id', 'sealed', 'sealed_in',
 ] as const;
 
 export const ENTITIES = {
@@ -27,7 +27,7 @@ export const ENTITIES = {
     key: ['id'],
     fields: [
       'catalog_no', 'era_id', 'kind', 'series', 'title', 'title_reading', 'release_date', 'event',
-      'track_count', 'price', 'aliases', 'links', 'description', 'note', 'cover_file_id', 'state',
+      'track_count', 'price', 'aliases', 'links', 'description', 'note', 'cover_file_id', 'state', 'artist',
     ],
     touch: true,
   },
@@ -39,7 +39,10 @@ export const ENTITIES = {
   file: {
     table: 'files',
     key: ['id'],
-    fields: ['release_id', 'slot', 'track_id', 'role', 'rights', 'state', 'dup_of', 'download_name', 'note'],
+    fields: [
+      'release_id', 'slot', 'track_id', 'role', 'rights', 'state', 'dup_of', 'download_name', 'note', 'folder_id',
+      'edition_id', 'sealed', 'sealed_in',
+    ],
     columns: FILE_COLUMNS,
     touch: true,
   },
@@ -51,7 +54,26 @@ export const ENTITIES = {
   track: {
     table: 'tracks',
     key: ['id'],
-    fields: ['release_id', 'disc', 'position', 'title', 'song_id', 'version_label', 'duration_ms', 'credits', 'note'],
+    fields: ['release_id', 'disc', 'position', 'title', 'song_id', 'version_label', 'duration_ms', 'credits', 'note', 'external_ids'],
+  },
+  edition: {
+    table: 'editions',
+    key: ['id'],
+    fields: [
+      'release_id', 'slot', 'name', 'catalog_no', 'release_date', 'source', 'status', 'based_on', 'is_default',
+      'track_count', 'album_title', 'cover_file_id', 'external_ids', 'note', 'sort',
+    ],
+    touch: true,
+  },
+  edition_track: {
+    table: 'edition_tracks',
+    key: ['id'],
+    fields: ['edition_id', 'disc', 'position', 'track_id', 'title', 'duration_ms', 'external_ids'],
+  },
+  folder: {
+    table: 'folders',
+    key: ['id'],
+    fields: ['parent_id', 'era_id', 'release_id', 'edition_id', 'name', 'description', 'readme_file_id', 'sort'],
   },
   song: {
     table: 'songs',
@@ -77,10 +99,23 @@ export const ENTITY_LABELS: Record<EntityName, string> = {
   track: N_('曲目'),
   song: N_('单曲'),
   admin: N_('管理组成员'),
+  edition: N_('版本'),
+  edition_track: N_('版本曲目'),
+  folder: N_('文件夹'),
 };
+
+/** A files column read from a JSON row; NOT NULL columns without a value get their default (rows
+ * recorded before the column existed, rows made without it). */
+const FILE_DEFAULTS: Record<string, string> = { sealed: '0', rights: "'unknown'", state: "'inbox'" };
+const fromJson = (source: string) => (c: string) =>
+  c in FILE_DEFAULTS ? `coalesce(json_extract(${source}, '$.${c}'), ${FILE_DEFAULTS[c]})` : `json_extract(${source}, '$.${c}')`;
 
 // Keeps each statement well under D1's 100 bound-parameter limit.
 const CHUNK = 60;
+// Ids per JSON parameter (D1 allows up to 2 MB per value; 2,000 ids are about 40 KB).
+const ID_CHUNK = 2000;
+// Rows (patches, new rows) per JSON parameter: a few hundred KB.
+const ROW_CHUNK = 1000;
 const NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')";
 
 function spec(entity: EntityName): EntitySpec {
@@ -136,15 +171,28 @@ export class ChangeSet {
   private rowChanges = 0;
 
   /** Pass batchId to add to an earlier batch (an upload session registers its files one by one). */
+  private retitled = false;
+  private queued = new Map<EntityName, Row[]>();
+
   constructor(
     private db: D1Database,
     private actor: string,
-    readonly summary: string,
+    public summary: string,
     readonly batchId: string = crypto.randomUUID(),
   ) {}
 
+  /** Change the summary of the whole batch (e.g. once a count is known); applied when committing. */
+  setSummary(text: string) {
+    this.summary = text;
+    this.retitled = true;
+  }
+
   get size(): number {
-    return this.statements.length;
+    return this.statements.length + this.queued.size;
+  }
+
+  get actorName(): string {
+    return this.actor;
   }
 
   private revision(entity: EntityName, id: string, action: 'create' | 'update' | 'delete', before: Row | null, after: Row | null) {
@@ -224,9 +272,19 @@ export class ChangeSet {
   /**
    * Apply the same patch to many files with two set-based statements per chunk: the revision rows are
    * copied from the current values first, then the rows are updated. Files already matching the patch
-   * are skipped by both statements.
+   * are skipped by both statements. The ids travel as one JSON parameter per chunk.
    */
   updateFiles(ids: string[], patch: Row) {
+    for (let i = 0; i < ids.length; i += ID_CHUNK) {
+      this.updateFilesWhere('id IN (SELECT value FROM json_each(?))', [JSON.stringify(ids.slice(i, i + ID_CHUNK))], patch);
+    }
+  }
+
+  /**
+   * The same, for the files matching an SQL condition on `files` (e.g. every member of an archive,
+   * found with a recursive query), so the ids never leave the database.
+   */
+  updateFilesWhere(where: string, binds: unknown[], patch: Row) {
     const fields = Object.keys(patch);
     checkFields('file', fields);
     if (fields.length === 0) return;
@@ -234,24 +292,21 @@ export class ChangeSet {
     const unchanged = fields.map((f) => `${f} IS ?`).join(' AND ');
     const beforeJson = `json_object(${fields.map((f) => `'${f}', ${f}`).join(', ')})`;
     const afterJson = `json_object(${fields.map((f) => `'${f}', ?`).join(', ')})`;
-    for (let i = 0; i < ids.length; i += CHUNK) {
-      const chunk = ids.slice(i, i + CHUNK);
-      const where = `id IN (${chunk.map(() => '?').join(', ')}) AND NOT (${unchanged})`;
-      this.statements.push(
-        this.db
-          .prepare(
-            `INSERT INTO revisions (actor, batch_id, summary, entity, entity_id, action, before, after)
-             SELECT ?, ?, ?, 'file', id, 'update', ${beforeJson}, ${afterJson} FROM files WHERE ${where}`,
-          )
-          .bind(this.actor, this.batchId, this.summary, ...values, ...chunk, ...values),
-      );
-      this.countedUpdates.push(this.statements.length);
-      this.statements.push(
-        this.db
-          .prepare(`UPDATE files SET ${fields.map((f) => `${f} = ?`).join(', ')}, updated_at = ${NOW} WHERE ${where}`)
-          .bind(...values, ...chunk, ...values),
-      );
-    }
+    const condition = `(${where}) AND NOT (${unchanged})`;
+    this.statements.push(
+      this.db
+        .prepare(
+          `INSERT INTO revisions (actor, batch_id, summary, entity, entity_id, action, before, after)
+           SELECT ?, ?, ?, 'file', id, 'update', ${beforeJson}, ${afterJson} FROM files WHERE ${condition}`,
+        )
+        .bind(this.actor, this.batchId, this.summary, ...values, ...binds, ...values),
+    );
+    this.countedUpdates.push(this.statements.length);
+    this.statements.push(
+      this.db
+        .prepare(`UPDATE files SET ${fields.map((f) => `${f} = ?`).join(', ')}, updated_at = ${NOW} WHERE ${condition}`)
+        .bind(...values, ...binds, ...values),
+    );
   }
 
   /**
@@ -297,7 +352,7 @@ export class ChangeSet {
         this.db
           .prepare(
             `INSERT INTO files (${cols.join(', ')})
-             SELECT ${cols.map((c) => `json_extract(j.value, '$.${c}')`).join(', ')} FROM json_each(?) j ORDER BY j.key`,
+             SELECT ${cols.map(fromJson('j.value')).join(', ')} FROM json_each(?) j ORDER BY j.key`,
           )
           .bind(chunk),
       );
@@ -313,13 +368,98 @@ export class ChangeSet {
     this.rowChanges += clean.length;
   }
 
-  push(statement: D1PreparedStatement) {
-    this.statements.push(statement);
+  /**
+   * Create a row with the other rows of its table made in this batch, in one set-based statement pair
+   * run before everything else at commit (folders and editions made while filing thousands of files).
+   */
+  queueCreate(entity: EntityName, row: Row) {
+    const list = this.queued.get(entity) ?? [];
+    list.push(row);
+    this.queued.set(entity, list);
+    this.rowChanges += 1;
+  }
+
+  private queuedStatements(): D1PreparedStatement[] {
+    const out: D1PreparedStatement[] = [];
+    for (const [entity, rows] of this.queued) {
+      const s = spec(entity);
+      const cols = rowColumns(entity);
+      for (let i = 0; i < rows.length; i += ROW_CHUNK) {
+        const chunk = JSON.stringify(rows.slice(i, i + ROW_CHUNK).map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null]))));
+        out.push(
+          this.db
+            .prepare(`INSERT INTO ${s.table} (${cols.join(', ')}) SELECT ${cols.map((c) => `json_extract(j.value, '$.${c}')`).join(', ')} FROM json_each(?) j ORDER BY j.key`)
+            .bind(chunk),
+          this.db
+            .prepare(
+              `INSERT INTO revisions (actor, batch_id, summary, entity, entity_id, action, before, after)
+               SELECT ?, ?, ?, ?, ${s.key.map((k) => `json_extract(j.value, '$.${k}')`).join(" || '/' || ")}, 'create', NULL, j.value
+               FROM json_each(?) j ORDER BY j.key`,
+            )
+            .bind(this.actor, this.batchId, this.summary, entity, chunk),
+        );
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Give many files each their own patch, with two set-based statements per 1,000 files and set of
+   * fields: the patches travel as one JSON parameter. Files already matching their patch are skipped.
+   */
+  patchFiles(entries: Iterable<[string, Row]>) {
+    const bySignature = new Map<string, { fields: string[]; rows: Row[] }>();
+    for (const [id, patch] of entries) {
+      const fields = Object.keys(patch).sort();
+      if (fields.length === 0) continue;
+      checkFields('file', fields);
+      const key = fields.join(',');
+      const group = bySignature.get(key) ?? { fields, rows: [] };
+      group.rows.push({ ...patch, id });
+      bySignature.set(key, group);
+    }
+    for (const { fields, rows } of bySignature.values()) {
+      const value = (f: string) => `json_extract(j.value, '$.${f}')`;
+      const unchanged = fields.map((f) => `f.${f} IS ${value(f)}`).join(' AND ');
+      const unchangedHere = fields.map((f) => `files.${f} IS ${value(f)}`).join(' AND ');
+      const beforeJson = `json_object(${fields.map((f) => `'${f}', f.${f}`).join(', ')})`;
+      const afterJson = `json_object(${fields.map((f) => `'${f}', ${value(f)}`).join(', ')})`;
+      for (let i = 0; i < rows.length; i += ROW_CHUNK) {
+        const chunk = JSON.stringify(rows.slice(i, i + ROW_CHUNK));
+        this.statements.push(
+          this.db
+            .prepare(
+              `INSERT INTO revisions (actor, batch_id, summary, entity, entity_id, action, before, after)
+               SELECT ?, ?, ?, 'file', f.id, 'update', ${beforeJson}, ${afterJson}
+               FROM json_each(?) j JOIN files f ON f.id = json_extract(j.value, '$.id') WHERE NOT (${unchanged})`,
+            )
+            .bind(this.actor, this.batchId, this.summary, chunk),
+        );
+        this.countedUpdates.push(this.statements.length);
+        this.statements.push(
+          this.db
+            .prepare(
+              `UPDATE files SET ${fields.map((f) => `${f} = ${value(f)}`).join(', ')}, updated_at = ${NOW}
+               FROM json_each(?) j WHERE files.id = json_extract(j.value, '$.id') AND NOT (${unchangedHere})`,
+            )
+            .bind(chunk),
+        );
+      }
+    }
+  }
+
+  push(...statements: D1PreparedStatement[]) {
+    this.statements.push(...statements);
   }
 
   /** Runs everything in one D1 batch. Returns the number of rows changed. */
   async commit(): Promise<number> {
+    const created = this.queuedStatements();
+    this.statements = [...created, ...this.statements];
+    this.countedUpdates = this.countedUpdates.map((i) => i + created.length);
+    this.queued.clear();
     if (this.statements.length === 0) return 0;
+    if (this.retitled) this.statements.push(this.db.prepare('UPDATE revisions SET summary = ? WHERE batch_id = ?').bind(this.summary, this.batchId));
     const results = await this.db.batch(this.statements);
     const bulk = this.countedUpdates.reduce((n, i) => n + (results[i]?.meta.changes ?? 0), 0);
     return this.rowChanges + bulk;
@@ -342,22 +482,43 @@ export type UndoResult = { ok: true; count: number; batchId: string } | { ok: fa
 /**
  * Undo one batch. Refuses when a later edit has changed any of the same fields.
  * `media` lets the undo of a file deletion check that the stored content has not been cleaned up yet.
+ *
+ * File changes are undone with a fixed number of set-based statements however many files they touched;
+ * the other rows of the batch (a folder or edition made for a move, a track list) one by one, up to 300.
  */
 export async function undoBatch(db: D1Database, actor: string, batchId: string, media?: R2Bucket): Promise<UndoResult> {
+  const info = await db
+    .prepare(
+      `SELECT count(*) AS n, sum(entity = 'file') AS files, max(reverted_by_batch) AS reverted,
+              (SELECT summary FROM revisions WHERE batch_id = ?1 ORDER BY id LIMIT 1) AS summary
+       FROM revisions WHERE batch_id = ?1`,
+    )
+    .bind(batchId)
+    .first<{ n: number; files: number | null; reverted: string | null; summary: string | null }>();
+  if (!info || info.n === 0) return { ok: false, reason: new UserError('找不到这次修改') };
+  if (info.reverted) return { ok: false, reason: new UserError('这次修改已经撤销过') };
+  // Rows of single-key tables made in this batch (folders, editions … made while filing) are deleted
+  // set-based; everything else one by one.
+  const bulk = (Object.keys(ENTITIES) as EntityName[]).filter((e) => e !== 'file' && spec(e).key.length === 1);
+  const bulkList = bulk.map((e) => `'${e}'`).join(', ');
   const { results: revs } = await db
-    .prepare('SELECT id, summary, entity, entity_id, action, before, after, reverted_by_batch FROM revisions WHERE batch_id = ? ORDER BY id DESC LIMIT 301')
+    .prepare(
+      `SELECT id, summary, entity, entity_id, action, before, after, reverted_by_batch FROM revisions
+       WHERE batch_id = ? AND entity != 'file' AND NOT (action = 'create' AND entity IN (${bulkList})) ORDER BY id DESC LIMIT 301`,
+    )
     .bind(batchId)
     .all<RevisionRow>();
-  if (revs.length === 0) return { ok: false, reason: new UserError('找不到这次修改') };
-  if (revs.some((r) => r.reverted_by_batch)) return { ok: false, reason: new UserError('这次修改已经撤销过') };
-  const onlyFiles = await db
-    .prepare("SELECT NOT EXISTS (SELECT 1 FROM revisions WHERE batch_id = ? AND entity != 'file') AS yes")
-    .bind(batchId)
-    .first<{ yes: number }>();
-  if (onlyFiles?.yes) return undoFileBatch(db, actor, batchId, revs[0].summary, media);
   if (revs.length > 300) return { ok: false, reason: new UserError('这次修改太大（超过 {n} 处），不能自动撤销', { n: 300 }) };
 
-  const cs = new ChangeSet(db, actor, undoSummary(revs[0].summary));
+  const cs = new ChangeSet(db, actor, undoSummary(info.summary ?? ''));
+  // Rows made in this batch may be deleted before or after the files pointing at them are restored.
+  cs.push(db.prepare('PRAGMA defer_foreign_keys = on'));
+  if (info.files) {
+    const refused = await undoFiles(db, cs, batchId, media);
+    if (refused) return { ok: false, reason: refused };
+  }
+  const refused = await undoCreated(db, cs, batchId, bulk);
+  if (refused) return { ok: false, reason: refused };
   for (const rev of revs) {
     if (!isEntity(rev.entity)) return { ok: false, reason: new UserError('未知的记录类型 {entity}', { entity: rev.entity }) };
     const entity = rev.entity;
@@ -383,8 +544,9 @@ export async function undoBatch(db: D1Database, actor: string, batchId: string, 
     }
   }
   markUndone(cs, db, batchId);
-  const count = await cs.commit();
-  return { ok: true, count, batchId: cs.batchId };
+  await cs.commit();
+  const n = await db.prepare('SELECT count(*) AS n FROM revisions WHERE batch_id = ?').bind(cs.batchId).first<{ n: number }>();
+  return { ok: true, count: n?.n ?? 0, batchId: cs.batchId };
 }
 
 function markUndone(cs: ChangeSet, db: D1Database, batchId: string) {
@@ -398,14 +560,51 @@ const FILE_FIELD = `CASE j.key ${ENTITIES.file.fields.map((f) => `WHEN '${f}' TH
 const FILE_EDITABLE = ENTITIES.file.fields.map((f) => `'${f}'`).join(', ');
 
 /**
- * Undo a batch of file changes with a fixed number of set-based statements, however many files it
- * touched (an upload session, a bulk accept over a whole archive, a deletion with its members).
+ * Add the statements that delete the rows of single-key tables this batch made. Refuses when files or
+ * folders added later still use a folder or edition made in the batch.
  */
-async function undoFileBatch(db: D1Database, actor: string, batchId: string, summary: string, media?: R2Bucket): Promise<UndoResult> {
+async function undoCreated(db: D1Database, cs: ChangeSet, batchId: string, entities: EntityName[]): Promise<UserError | null> {
+  const made = (entity: string) => `(SELECT entity_id FROM revisions WHERE batch_id = ?1 AND entity = '${entity}' AND action = 'create')`;
+  const later = await db
+    .prepare(
+      `SELECT (SELECT count(*) FROM files WHERE (folder_id IN ${made('folder')} OR edition_id IN ${made('edition')})
+                 AND id NOT IN (SELECT entity_id FROM revisions WHERE batch_id = ?1 AND entity = 'file')) AS files,
+              (SELECT count(*) FROM folders WHERE (parent_id IN ${made('folder')} OR edition_id IN ${made('edition')})
+                 AND id NOT IN ${made('folder')}) AS folders,
+              (SELECT count(*) FROM (SELECT entity_id FROM revisions WHERE batch_id = ?1 AND action = 'create' AND entity IN (${entities.map((e) => `'${e}'`).join(', ')}))) AS n`,
+    )
+    .bind(batchId)
+    .first<{ files: number; folders: number; n: number }>();
+  if (later?.files || later?.folders) return new UserError('这次新建的文件夹或版本里后来又放了东西，不能自动撤销');
+  if (!later?.n) return null;
+  for (const entity of entities) {
+    const s = spec(entity);
+    const key = s.key[0];
+    const cols = rowColumns(entity);
+    cs.push(
+      db
+        .prepare(
+          `INSERT INTO revisions (actor, batch_id, summary, entity, entity_id, action, before, after)
+           SELECT ?1, ?2, ?3, '${entity}', t.${key}, 'delete', json_object(${cols.map((c) => `'${c}', t.${c}`).join(', ')}), NULL
+           FROM ${s.table} t WHERE t.${key} IN (SELECT entity_id FROM revisions WHERE batch_id = ?4 AND entity = '${entity}' AND action = 'create')`,
+        )
+        .bind(cs.actorName, cs.batchId, cs.summary, batchId),
+      db.prepare(`DELETE FROM ${s.table} WHERE ${key} IN (SELECT entity_id FROM revisions WHERE batch_id = ? AND entity = '${entity}' AND action = 'create')`).bind(batchId),
+    );
+  }
+  return null;
+}
+
+/**
+ * Add the statements that undo the file changes of a batch to `cs` (an upload session, a bulk accept
+ * over a whole archive, a deletion with its members, a move): a fixed number of set-based statements
+ * however many files it touched. Returns why it cannot be undone, if so.
+ */
+async function undoFiles(db: D1Database, cs: ChangeSet, batchId: string, media?: R2Bucket): Promise<UserError | null> {
   const conflict = await db
     .prepare(
       `SELECT r.entity_id, r.action FROM revisions r LEFT JOIN files f ON f.id = r.entity_id
-       WHERE r.batch_id = ?1 AND (
+       WHERE r.batch_id = ?1 AND r.entity = 'file' AND (
          (r.action = 'update' AND (f.id IS NULL OR EXISTS (
             SELECT 1 FROM json_each(r.after) j WHERE ${FILE_FIELD} IS NOT j.value)))
          OR (r.action = 'create' AND (f.id IS NULL OR EXISTS (
@@ -417,23 +616,22 @@ async function undoFileBatch(db: D1Database, actor: string, batchId: string, sum
     .first<{ entity_id: string; action: string }>();
   if (conflict) {
     const text = conflict.action === 'delete' ? N_('文件 {id} 已被重新创建，不能自动撤销') : N_('文件 {id} 之后又被修改或删除过，不能自动撤销');
-    return { ok: false, reason: new UserError(text, { id: conflict.entity_id }) };
+    return new UserError(text, { id: conflict.entity_id });
   }
 
   if (media) {
     const { results } = await db
       .prepare(
         `SELECT DISTINCT json_extract(before, '$.blob_key') AS key FROM revisions
-         WHERE batch_id = ? AND action = 'delete' AND json_extract(before, '$.blob_key') IS NOT NULL`,
+         WHERE batch_id = ? AND entity = 'file' AND action = 'delete' AND json_extract(before, '$.blob_key') IS NOT NULL`,
       )
       .bind(batchId)
       .all<{ key: string }>();
     for (const { key } of results) {
-      if (!(await media.head(key))) return { ok: false, reason: new UserError('存储里的文件 {key} 已被清理，不能恢复', { key }) };
+      if (!(await media.head(key))) return new UserError('存储里的文件 {key} 已被清理，不能恢复', { key });
     }
   }
 
-  const cs = new ChangeSet(db, actor, undoSummary(summary));
   const row = `json_object(${FILE_COLUMNS.map((c) => `'${c}', f.${c}`).join(', ')})`;
   // The inverse revisions, in the original order so a later undo of this undo restores parents first.
   cs.push(
@@ -444,36 +642,51 @@ async function undoFileBatch(db: D1Database, actor: string, batchId: string, sum
                 CASE r.action WHEN 'create' THEN 'delete' WHEN 'delete' THEN 'create' ELSE 'update' END,
                 CASE r.action WHEN 'create' THEN (SELECT ${row} FROM files f WHERE f.id = r.entity_id) WHEN 'delete' THEN NULL ELSE r.after END,
                 CASE r.action WHEN 'create' THEN NULL ELSE r.before END
-         FROM revisions r WHERE r.batch_id = ?4 ORDER BY r.id`,
+         FROM revisions r WHERE r.batch_id = ?4 AND r.entity = 'file' ORDER BY r.id`,
       )
-      .bind(actor, cs.batchId, undoSummary(summary), batchId),
+      .bind(cs.actorName, cs.batchId, cs.summary, batchId),
   );
   // Deleted rows come back from their recorded copies, archives before their members.
   cs.push(
     db
       .prepare(
         `INSERT INTO files (${FILE_COLUMNS.join(', ')})
-         SELECT ${FILE_COLUMNS.map((c) => `json_extract(before, '$.${c}')`).join(', ')}
-         FROM revisions WHERE batch_id = ? AND action = 'delete' ORDER BY id`,
+         SELECT ${FILE_COLUMNS.map(fromJson('before')).join(', ')}
+         FROM revisions WHERE batch_id = ? AND entity = 'file' AND action = 'delete' ORDER BY id`,
       )
       .bind(batchId),
   );
-  // One joined update per field (the earliest recorded value wins if a batch touched a file twice).
-  for (const field of ENTITIES.file.fields) {
-    cs.push(
-      db
-        .prepare(
-          `UPDATE files SET ${field} = json_extract(r.before, '$.${field}'), updated_at = ${NOW}
-           FROM (SELECT entity_id, before, row_number() OVER (PARTITION BY entity_id ORDER BY id) AS rn
-                 FROM revisions WHERE batch_id = ? AND action = 'update' AND json_type(before, '$.${field}') IS NOT NULL) AS r
-           WHERE r.rn = 1 AND files.id = r.entity_id`,
-        )
-        .bind(batchId),
-    );
-  }
-  cs.push(db.prepare("DELETE FROM files WHERE id IN (SELECT entity_id FROM revisions WHERE batch_id = ? AND action = 'create')").bind(batchId));
-  markUndone(cs, db, batchId);
-  await cs.commit();
-  const n = await db.prepare('SELECT count(*) AS n FROM revisions WHERE batch_id = ?').bind(cs.batchId).first<{ n: number }>();
-  return { ok: true, count: n?.n ?? 0, batchId: cs.batchId };
+  // Every field back to its value before the batch, in one statement so that constraints spanning two
+  // fields (a slot needs a release) hold. When a batch touched a file twice, the earliest recorded value
+  // of each field wins.
+  const restore = ENTITIES.file.fields
+    .map((f) => `${f} = CASE WHEN json_type(m.before, '$.${f}') IS NOT NULL THEN json_extract(m.before, '$.${f}') ELSE files.${f} END`)
+    .join(', ');
+  cs.push(
+    db
+      .prepare(
+        `WITH fields AS (
+           SELECT r.entity_id, j.key, j.value, row_number() OVER (PARTITION BY r.entity_id, j.key ORDER BY r.id) AS rn
+           FROM revisions r, json_each(r.before) j
+           WHERE r.batch_id = ? AND r.entity = 'file' AND r.action = 'update'),
+         merged AS (SELECT entity_id, json_group_object(key, value) AS before FROM fields WHERE rn = 1 GROUP BY entity_id)
+         UPDATE files SET ${restore}, updated_at = ${NOW} FROM merged m WHERE files.id = m.entity_id`,
+      )
+      .bind(batchId),
+  );
+  cs.push(db.prepare("DELETE FROM files WHERE id IN (SELECT entity_id FROM revisions WHERE batch_id = ? AND entity = 'file' AND action = 'create')").bind(batchId));
+  return null;
+}
+
+/**
+ * The batch this admin wrote since `since` (an ISO time taken when the request began), for the 「撤销」
+ * button next to a page's message; null when the request changed nothing.
+ */
+export async function batchSince(db: D1Database, actor: string, since: string): Promise<string | null> {
+  const row = await db
+    .prepare('SELECT batch_id FROM revisions WHERE actor = ? AND at >= ? ORDER BY id DESC LIMIT 1')
+    // A little slack: the database's clock is not the Worker's.
+    .bind(actor, new Date(Date.parse(since) - 3000).toISOString())
+    .first<{ batch_id: string }>();
+  return row?.batch_id ?? null;
 }

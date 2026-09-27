@@ -32,4 +32,6 @@ export default defineConfig({
   // Admin auth comes from Cloudflare Access, not Astro sessions, so no KV binding is needed.
   session: false,
   security: { checkOrigin: true },
+  // The toolbar covers the 整理台's own toolbar at the bottom of the page.
+  devToolbar: { enabled: false },
 });
