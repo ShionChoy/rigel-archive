@@ -121,9 +121,16 @@ export function initEditor(data: EditorData) {
 
   // ------------------------------------------------------------------ 查找元数据: comparing with an online release
   interface OnlineTrack { disc: number; position: number; title: string; duration_ms: number | null; tags: Tags }
-  interface Online { source: 'musicbrainz' | 'bandcamp'; id: string; url: string; label: string; cover: string | null; album: Tags; tracks: OnlineTrack[] }
-  /** The release being compared: which online track each row is, what was turned down, whether its cover is wanted. */
-  let compare: { online: Online; mapping: Map<string, number | null>; rejected: Set<string>; cover: boolean } | null = null;
+  interface OnlineCover { url: string; large: string; thumb: string; source: string }
+  interface Online { source: 'musicbrainz' | 'bandcamp'; id: string; url: string; label: string; cover: OnlineCover | null; album: Tags; tracks: OnlineTrack[] }
+  interface CoverInfo { width: number; height: number; mime: string; size: number | null }
+  /**
+   * The release being compared: which online track each row is, what was turned down, whether its cover is
+   * wanted, and its cover's size (undefined while it is being read).
+   */
+  let compare: {
+    online: Online; mapping: Map<string, number | null>; rejected: Set<string>; cover: boolean; coverInfo?: CoverInfo | { err: string };
+  } | null = null;
   let editionIds: Record<string, string> | null = null; // the source's id, kept with the edition when its data was taken
   const durationOf = (r: Row): number | null => (r.duration ? r.duration / 1000 : mainFile(r)?.duration ?? null);
   const onlineOf = (row: Row): OnlineTrack | null => {
@@ -349,6 +356,41 @@ export function initEditor(data: EditorData) {
   }
 
   // ------------------------------------------------------------------ 封面
+  const picSpec = (p: { width: number | null; height: number | null; mime: string; size: number | null }) =>
+    [p.width && p.height ? `${p.width} × ${p.height}` : '', p.mime.replace('image/', '').toUpperCase(), p.size ? size(p.size) : ''].filter(Boolean).join(' · ');
+
+  /** The cover most tracks end up with (of the tracks being compared, when comparing). */
+  function mainCover(): EdPicture | null {
+    const compared = compare ? rows.filter((r) => compare!.mapping.get(r.id) != null) : [];
+    const counts = new Map<string, number>();
+    for (const r of compared.length ? compared : rows) {
+      const k = coverKey(r);
+      if (k) counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+    const best = [...counts].sort((a, b) => b[1] - a[1])[0]?.[0];
+    return best ? pictures().get(best) ?? null : null;
+  }
+
+  /** Which cover is larger: the online one being compared, or the one the tracks have now. */
+  function coverVerdict(info: CoverInfo, local: EdPicture | null): { text: string; better: 'online' | 'local' | 'same' | 'unknown' } {
+    if (!local) return { text: t('本地还没有封面'), better: 'online' };
+    if (!local.width || !local.height || !info.width) return { text: t('尺寸未知，无法比较'), better: 'unknown' };
+    const a = Math.max(info.width, info.height);
+    const b = Math.max(local.width, local.height);
+    if (a > b) return { text: t('在线的更大：长边 {a} px，本地 {b} px', { a, b }), better: 'online' };
+    if (a < b) return { text: t('本地的更大：长边 {b} px，在线 {a} px，一般不必采用在线封面', { a, b }), better: 'local' };
+    return { text: t('尺寸相同（长边 {a} px）：可以打开两张图对比画质和文件大小', { a }), better: 'same' };
+  }
+
+  /** The online cover's size and how it compares, as HTML (the compare bar and the 封面 panel show it). */
+  function onlineCoverText(): { spec: string; verdict: string } {
+    const info = compare?.coverInfo;
+    if (!info) return { spec: esc(t('正在读取尺寸…')), verdict: '' };
+    if ('err' in info) return { spec: `<span class="err-line">${esc(info.err)}</span>`, verdict: '' };
+    const v = coverVerdict(info, mainCover());
+    return { spec: `<b>${esc(picSpec(info))}</b>`, verdict: `<span class="cv-verdict ${v.better}">${esc(v.text)}</span>` };
+  }
+
   function renderCover() {
     if (rows.length === 0) {
       coverBox.innerHTML = `<h2>${esc(t('封面'))}</h2><p class="muted">${esc(t('曲目表建立后，这里显示各曲目的封面（默认用曲目自带的）。'))}</p>`;
@@ -370,16 +412,25 @@ export function initEditor(data: EditorData) {
       if (!key || !p) return `<div class="cv-none">${esc(t('没有封面（{n} 首）', { n: g.n }))}</div>`;
       const who = g.chosen ? `${esc(p.label)} · ${esc(t('手动指定'))}${g.mode === 'add' ? ` · ${esc(t('追加'))}` : ''}` : esc(t('曲目自带'));
       const count = entries.length === 1 ? t('{n} 首相同', { n: g.n }) : t('用于 {n} 首', { n: g.n });
-      const spec = [p.width && p.height ? `${p.width} × ${p.height}` : '', p.mime.replace('image/', '').toUpperCase(), p.size ? size(p.size) : ''].filter(Boolean).join(' · ');
+      const spec = picSpec(p);
       return `<figure class="cv ${i === 0 ? 'first' : ''}">
         <a href="${esc(p.full)}" target="_blank" rel="noopener"><img src="${esc(p.src)}" alt="" /></a>
         <figcaption><b>${who}</b> · ${esc(count)}<br /><span class="muted">${esc(spec)}</span></figcaption>
       </figure>`;
     });
     const anyChosen = list.some((r) => r.cover);
+    // While comparing: the online release's cover next to the tracks' own, with both sizes.
+    const oc = compare?.online.cover;
+    if (oc) {
+      const text = onlineCoverText();
+      cards.push(`<figure class="cv online">
+        <a href="${esc(oc.url)}" target="_blank" rel="noopener" title="${esc(t('打开在线原图'))}"><img src="${esc(oc.thumb)}" alt="" /></a>
+        <figcaption><b>${esc(t('在线 · {source} 原图', { source: oc.source }))}</b><br /><span class="muted">${text.spec}</span>${text.verdict ? `<br />${text.verdict}` : ''}</figcaption>
+      </figure>`);
+    }
     coverBox.innerHTML = `
       <h2>${esc(t('封面'))} ${selected.size ? `<small class="muted">${esc(t('所选 {n} 首', { n: selected.size }))}</small>` : ''}</h2>
-      <div class="cv-list ${entries.length > 1 ? 'several' : ''}">${cards.join('')}</div>
+      <div class="cv-list ${cards.length > 1 ? 'several' : ''}">${cards.join('')}</div>
       <p class="muted small">${esc(entries.length > 1 ? t('曲目的封面不同，这里并排显示，不强制统一。') : anyChosen ? t('下载时嵌入手动指定的封面。') : t('没有手动指定：默认用曲目自带的封面。'))}</p>
       <p><button type="button" data-act="cover">${esc(t('更换封面…'))}</button>
       ${anyChosen ? `<button type="button" data-act="cover-restore">${esc(t('恢复为曲目自带'))}</button>` : ''}</p>`;
@@ -884,7 +935,6 @@ export function initEditor(data: EditorData) {
   compareBar.className = 'ed-compare';
   compareBar.hidden = true;
   (document.querySelector('.ed-top') as unknown as { before: (n: unknown) => void } | null)?.before(compareBar);
-  const onlineThumb = (online: Online) => (online.cover ? online.cover.replace(/front-1200$/, 'front-250').replace(/_10\.jpg$/, '_7.jpg') : '');
 
   function renderCompare() {
     if (!compare) {
@@ -899,7 +949,7 @@ export function initEditor(data: EditorData) {
     const n = proposalCount();
     compareBar.innerHTML = `
       <div class="cmp-head">
-        ${online.cover ? `<img class="cmp-thumb" src="${esc(onlineThumb(online))}" alt="" onerror="this.style.display='none'" />` : ''}
+        ${online.cover ? `<a href="${esc(online.cover.url)}" target="_blank" rel="noopener" title="${esc(t('打开在线原图'))}"><img class="cmp-thumb" src="${esc(online.cover.thumb)}" alt="" onerror="this.style.display='none'" /></a>` : ''}
         <div class="cmp-what">
           <b>${esc(t('正在对比：{label}', { label: online.label }))}</b> <a href="${esc(online.url)}" target="_blank" rel="noopener">↗</a><br />
           <span class="muted small">${esc(n ? t('{n} 处不同：旧值划掉、新值标绿，逐项 ✓ 采用或 ✕ 不采用。对比本身不改动任何东西，采用后和手动修改一样，保存后才生效。', { n }) : t('没有不同之处（或都已处理）。'))}</span>
@@ -910,8 +960,17 @@ export function initEditor(data: EditorData) {
           <button type="button" data-cmp="stop">${esc(t('取消对比'))}</button>
         </div>
       </div>
-      ${online.cover ? `<label class="inline-check small"><input type="checkbox" data-cmp-cover ${compare.cover ? 'checked' : ''} /> ${esc(t('同时采用在线封面（存进本版附件，替换全部曲目的正面封面）'))}</label>
-        <button type="button" class="linkish small" data-cmp="cover">${esc(t('现在就采用封面'))}</button>` : ''}
+      ${online.cover ? (() => {
+        const local = mainCover();
+        const text = onlineCoverText();
+        return `<div class="cmp-cover small">
+          <span>${esc(t('在线封面（{source} 原图）', { source: online.cover.source }))}：${text.spec}</span>
+          <span class="muted">${esc(t('本地当前'))}：${local ? esc(picSpec(local)) : esc(t('没有封面'))}</span>
+          ${text.verdict}
+        </div>
+        <label class="inline-check small"><input type="checkbox" data-cmp-cover ${compare.cover ? 'checked' : ''} /> ${esc(t('同时采用在线封面（存进本版附件，替换全部曲目的正面封面）'))}</label>
+        <button type="button" class="linkish small" data-cmp="cover">${esc(t('现在就采用封面'))}</button>`;
+      })() : ''}
       ${extraOnline.length ? `<div class="cmp-extra"><b>${esc(t('在线版多出的曲目（{n}）', { n: extraOnline.length }))}</b> ${extraOnline.map(([x, i]) =>
         `<span class="chip">${x.disc > 1 ? `${x.disc}-` : ''}${x.position} ${esc(x.title)} <button type="button" class="linkish" data-cmp-add="${i}">${esc(t('新建一行'))}</button></span>`).join(' ')}</div>` : ''}
       ${extraLocal.length ? `<div class="cmp-extra"><b>${esc(t('本地多出的曲目（{n}，没有对应的在线曲目）', { n: extraLocal.length }))}</b> ${extraLocal.map((r) => `<span class="chip">${esc(join(values(r, 'title')) || r.entry)}</span>`).join(' ')}
@@ -924,7 +983,8 @@ export function initEditor(data: EditorData) {
     busy = t('正在取回在线封面…');
     renderBar();
     const res = await fetch(`/admin/editions/${data.edition.id}/lookup`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-admin-request': '1' }, body: JSON.stringify({ op: 'cover', url: compare.online.cover }),
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-admin-request': '1' },
+      body: JSON.stringify({ op: 'cover', url: compare.online.cover.url, fallback: compare.online.cover.large }),
     });
     const j = (await res.json().catch(() => ({ ok: false }))) as { ok: boolean; id?: string; err?: string };
     busy = '';
@@ -935,7 +995,9 @@ export function initEditor(data: EditorData) {
     }
     const fresh = (await (await fetch(`/admin/editions/${data.edition.id}/data`)).json()) as { data: EditorData };
     data.pictures = fresh.data.pictures;
-    for (const r of rows) if (compare.mapping.get(r.id) != null) r.cover = { file: j.id, mode: 'replace' };
+    // The tracks being compared; all of them when none has an online counterpart.
+    const compared = rows.filter((r) => compare!.mapping.get(r.id) != null);
+    for (const r of compared.length ? compared : rows) r.cover = { file: j.id, mode: 'replace' };
     compare.cover = false;
     remember();
     return true;
@@ -969,7 +1031,10 @@ export function initEditor(data: EditorData) {
   });
   compareBar.addEventListener('change', (e) => {
     const box = (e.target as HTMLElement).closest('[data-cmp-cover]') as HTMLInputElement | null;
-    if (box && compare) compare.cover = box.checked;
+    if (box && compare) {
+      compare.cover = box.checked;
+      renderCompare(); // 「全部应用」 has something to do now (or not)
+    }
   });
 
   const panel = $('#lookup');
@@ -1012,6 +1077,14 @@ export function initEditor(data: EditorData) {
       list.innerHTML = `<p class="err-line">${esc(err instanceof Error ? err.message : String(err))}</p>`;
     }
   }
+  /** Read the online cover's size (the original's first bytes, on the server) and show it. */
+  async function loadCoverInfo(c: NonNullable<typeof compare>) {
+    const cover = c.online.cover!;
+    const res = await fetch(`/admin/editions/${data.edition.id}/lookup?op=cover-info&url=${encodeURIComponent(cover.url)}`).catch(() => null);
+    const j = (await res?.json().catch(() => null)) as { ok: boolean; info?: CoverInfo; err?: string } | null;
+    c.coverInfo = j?.ok && j.info ? j.info : { err: j?.err ?? t('读不出在线封面的尺寸') };
+    if (compare === c) render();
+  }
   async function startCompare(ref: string) {
     if (!panel) return;
     const list = $('.lk-list', panel);
@@ -1024,6 +1097,7 @@ export function initEditor(data: EditorData) {
       panel.hidden = true;
       render();
       compareBar.scrollIntoView({ block: 'nearest' });
+      if (j.release.cover) loadCoverInfo(compare);
     } catch (err) {
       if (list) list.innerHTML = `<p class="err-line">${esc(err instanceof Error ? err.message : String(err))}</p>`;
     }

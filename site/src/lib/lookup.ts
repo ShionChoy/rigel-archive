@@ -12,7 +12,7 @@ import { newId } from './ids';
 import { Places } from './locations';
 import { MBID, MB_UA, bandcampAlbum, mbCandidates, mbGet, scoreCandidate, type MbCandidate } from './metadata';
 import type { Tags } from './tagging/model';
-import { imageSize } from './tagging/bytes';
+import { concat, imageSize } from './tagging/bytes';
 
 export interface OnlineTrack {
   disc: number;
@@ -22,15 +22,37 @@ export interface OnlineTrack {
   tags: Tags;
 }
 
+/**
+ * An online release's front cover: the original as it was uploaded (what 「采用」 stores), a large copy
+ * (1200 px, re-encoded by the site; used when the original is too big to take) and a thumbnail.
+ */
+export interface OnlineCover {
+  url: string;
+  large: string;
+  thumb: string;
+  source: 'Cover Art Archive' | 'Bandcamp';
+}
+
 export interface OnlineRelease {
   source: 'musicbrainz' | 'bandcamp';
   id: string;
   url: string;
   label: string; // «Title · 2016-10-30 · CD · RTCD-001A»
-  cover: string | null; // image URL (large)
+  cover: OnlineCover | null;
   album: Tags; // the same for every track
   tracks: OnlineTrack[];
 }
+
+const caaCover = (release: string): OnlineCover => {
+  const base = `https://coverartarchive.org/release/${release}/front`;
+  return { url: base, large: `${base}-1200`, thumb: `${base}-250`, source: 'Cover Art Archive' };
+};
+
+/** Bandcamp's image sizes: _0 the original (JPEG or PNG), _10 1200 px, _2 350 px. */
+const bandcampCover = (image: string | null): OnlineCover | null => {
+  const base = image?.replace(/_\d+\.jpg$/, '');
+  return base ? { url: `${base}_0.jpg`, large: `${base}_10.jpg`, thumb: `${base}_2.jpg`, source: 'Bandcamp' } : null;
+};
 
 export interface Candidate {
   source: 'musicbrainz' | 'bandcamp';
@@ -162,7 +184,7 @@ export async function mbFull(id: string): Promise<OnlineRelease> {
   return {
     source: 'musicbrainz', id: r.id, url: `https://musicbrainz.org/release/${r.id}`,
     label: [r.title, r.date, album.media?.join(' + '), catalog, r.disambiguation].filter(Boolean).join(' · '),
-    cover: r['cover-art-archive']?.front ? `https://coverartarchive.org/release/${r.id}/front-1200` : null,
+    cover: r['cover-art-archive']?.front ? caaCover(r.id) : null,
     album, tracks,
   };
 }
@@ -176,7 +198,7 @@ export async function bandcampFull(url: string): Promise<OnlineRelease> {
   put(album, 'website', meta.url);
   put(album, 'media', 'Digital Media');
   return {
-    source: 'bandcamp', id: meta.id, url: meta.url, label: [meta.title, meta.date, 'Bandcamp'].filter(Boolean).join(' · '), cover: meta.cover, album,
+    source: 'bandcamp', id: meta.id, url: meta.url, label: [meta.title, meta.date, 'Bandcamp'].filter(Boolean).join(' · '), cover: bandcampCover(meta.cover), album,
     tracks: meta.tracks.map((t) => {
       const tags: Tags = {};
       put(tags, 'title', t.title);
@@ -240,7 +262,7 @@ export async function candidates(edition: EditionRow, release: ReleaseRow, query
       const b = await bandcampFull(bc);
       out.push({
         source: 'bandcamp', id: b.id, title: b.album.album?.[0] ?? '', artist: b.album.albumartist?.[0] ?? null, date: b.album.date?.[0] ?? null,
-        format: 'Bandcamp', tracks: b.tracks.length, catalogs: [], country: null, disambiguation: null, thumb: b.cover,
+        format: 'Bandcamp', tracks: b.tracks.length, catalogs: [], country: null, disambiguation: null, thumb: b.cover?.thumb ?? null,
         score: scoreCandidate({ trackCount: b.tracks.length, durations: b.tracks.map((t) => t.duration_ms), catalogs: [], title: b.album.album?.[0] ?? '' }, mine),
         url: b.url,
       });
@@ -265,13 +287,66 @@ function mbCandidateOf(raw: unknown): MbCandidate & { artist?: string | null } {
 
 // ------------------------------------------------------------------------------------------ online covers
 
-/** Fetch an online cover and file it in the edition's 附件 (like an upload). Returns the picture file's id. */
-export async function storeOnlineCover(actor: string, edition: EditionRow, release: ReleaseRow, url: string): Promise<string> {
-  if (!/^https:\/\/(coverartarchive\.org|[a-z0-9-]+\.bcbits\.com|archive\.org|[a-z0-9.-]+\.archive\.org)\//i.test(url)) throw new UserError('只能取回封面库或 Bandcamp 的图片');
-  const response = await fetch(url, { headers: { 'user-agent': MB_UA } });
+const COVER_HOSTS = /^https:\/\/(coverartarchive\.org|[a-z0-9-]+\.bcbits\.com|archive\.org|[a-z0-9.-]+\.archive\.org)\//i;
+const TAKE_MAX = 30 * 1024 * 1024;
+
+export interface CoverInfo {
+  width: number;
+  height: number;
+  mime: string;
+  size: number | null; // bytes of the whole image
+}
+
+/** The first `limit` bytes of a response (the rest is not downloaded). */
+async function readUpTo(response: Response, limit: number): Promise<Uint8Array> {
+  const reader = response.body!.getReader();
+  const parts: Uint8Array[] = [];
+  let n = 0;
+  while (n < limit) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    n += value.length;
+  }
+  await reader.cancel().catch(() => undefined);
+  return concat(parts).subarray(0, limit);
+}
+
+/**
+ * An online image's size in pixels and bytes, read from its first bytes (a range request; the size in
+ * a JPEG can come after a large embedded thumbnail, so up to 2 MB are read when needed).
+ */
+export async function coverInfo(url: string): Promise<CoverInfo> {
+  if (!COVER_HOSTS.test(url)) throw new UserError('只能取回封面库或 Bandcamp 的图片');
+  for (const want of [256 * 1024, 2 * 1024 * 1024]) {
+    const response = await fetch(url, { headers: { 'user-agent': MB_UA, range: `bytes=0-${want - 1}` } });
+    if (!response.ok) throw new UserError('封面读取失败（HTTP {status}）', { status: response.status });
+    const total = response.status === 206
+      ? Number(/\/(\d+)\s*$/.exec(response.headers.get('content-range') ?? '')?.[1]) || null
+      : Number(response.headers.get('content-length')) || null;
+    const bytes = await readUpTo(response, want);
+    const image = imageSize(bytes);
+    if (!image) throw new UserError('在线封面不是 JPEG 或 PNG 图片');
+    if (image.width || (total !== null && total <= bytes.length)) return { width: image.width, height: image.height, mime: image.mime, size: total };
+  }
+  throw new UserError('读不出在线封面的尺寸');
+}
+
+/**
+ * Fetch an online cover and file it in the edition's 附件 (like an upload). Returns the picture file's id.
+ * An original over 30 MB is taken as its large copy (`fallback`) instead.
+ */
+export async function storeOnlineCover(actor: string, edition: EditionRow, release: ReleaseRow, url: string, fallback?: string | null): Promise<string> {
+  if (!COVER_HOSTS.test(url) || (fallback && !COVER_HOSTS.test(fallback))) throw new UserError('只能取回封面库或 Bandcamp 的图片');
+  let response = await fetch(url, { headers: { 'user-agent': MB_UA } });
   if (!response.ok) throw new UserError('封面下载失败（HTTP {status}）', { status: response.status });
+  if (fallback && Number(response.headers.get('content-length')) > TAKE_MAX) {
+    await response.body?.cancel();
+    response = await fetch(fallback, { headers: { 'user-agent': MB_UA } });
+    if (!response.ok) throw new UserError('封面下载失败（HTTP {status}）', { status: response.status });
+  }
   const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.length > 30 * 1024 * 1024) throw new UserError('封面太大');
+  if (bytes.length > TAKE_MAX) throw new UserError('封面太大');
   const size = imageSize(bytes);
   if (!size) throw new UserError('取回的不是 JPEG 或 PNG 图片');
   const ext = size.mime === 'image/png' ? 'png' : 'jpg';
@@ -317,7 +392,7 @@ export async function importOnline(actor: string, release: ReleaseRow & { era_na
     .all<{ id: string; disc: number; position: number; track_id: string; tags: string; entry_title: string }>();
   const { results: entries } = await database.prepare('SELECT id, title, position, external_ids FROM tracks WHERE release_id = ?').bind(release.id)
     .all<{ id: string; title: string; position: number; external_ids: string }>();
-  const coverId = withCover && online.cover ? await storeOnlineCover(actor, edition, release, online.cover) : null;
+  const coverId = withCover && online.cover ? await storeOnlineCover(actor, edition, release, online.cover.url, online.cover.large) : null;
   const source = online.source === 'musicbrainz' ? 'MusicBrainz' : 'Bandcamp';
   const cs = new ChangeSet(database, actor, summary('版本 {edition}：采用 {source} 的元数据', { edition: `${release.catalog_no ?? release.title} ${edition.name}`.trim(), source }));
   const key = (s: string) => s.normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
