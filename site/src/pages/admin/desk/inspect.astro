@@ -1,0 +1,52 @@
+---
+// The 整理台's inspector for what is selected, loaded into the page without navigating:
+// GET ?file=<id> | ?folder=<id>; POST {"files": [...], "folders": [...]} for several.
+import { env } from 'cloudflare:workers';
+import Inspector from '../../../components/desk/Inspector.astro';
+import { fileView, filesSummary, folderView } from '../../../lib/desk';
+import { loadQuickAccess } from '../../../lib/folders';
+import { Places } from '../../../lib/locations';
+import { derivedFor } from '../../../lib/processing';
+import { db } from '../../../lib/db';
+import { tagEditView } from '../../../lib/tagedit';
+
+export const partial = true;
+
+const { t } = Astro.locals;
+const actor = Astro.locals.admin!.email;
+const url = Astro.url;
+const places = await Places.load();
+let body: { files?: unknown; folders?: unknown } = {};
+if (Astro.request.method === 'POST') body = ((await Astro.request.json().catch(() => ({}))) ?? {}) as typeof body;
+const list = (v: unknown) => (Array.isArray(v) ? v.map(String).filter((s) => /^[\w-]{1,80}$/.test(s)) : []);
+const files = body.files !== undefined ? list(body.files) : url.searchParams.get('file') ? [url.searchParams.get('file')!] : [];
+const folders = body.folders !== undefined ? list(body.folders) : url.searchParams.get('folder') ? [url.searchParams.get('folder')!] : [];
+
+let mode: 'folder' | 'file' | 'files' | 'empty' = 'empty';
+let folder = null;
+let file = null;
+let derived = undefined;
+let summary = null;
+let tags = null;
+if (files.length === 1 && folders.length === 0) {
+  file = await fileView(files[0]);
+  if (file) {
+    mode = 'file';
+    [derived, tags] = await Promise.all([
+      file.sha256 ? derivedFor(db(), [file.sha256]).then((m) => m.get(file!.sha256!)) : Promise.resolve(undefined),
+      file.kind === 'audio' ? tagEditView(file.id).catch(() => null) : Promise.resolve(null),
+    ]);
+  }
+} else if (files.length === 0 && folders.length === 1) {
+  folder = await folderView(places, folders[0], t, (await loadQuickAccess(actor)).includes(folders[0]));
+  if (folder) mode = 'folder';
+} else if (files.length > 0 || folders.length > 0) {
+  summary = await filesSummary(files);
+  mode = 'files';
+}
+---
+
+{mode === 'file' && file && <Inspector mode="file" places={places} file={file} derived={derived} base={env.MEDIA_DEV_BASE ?? ''} tags={tags} />}
+{mode === 'folder' && folder && <Inspector mode="folder" places={places} view={folder} selected={url.searchParams.get('selected') === '1' || Astro.request.method === 'POST'} />}
+{mode === 'files' && summary && <Inspector mode="files" places={places} summary={summary} folders={folders.length} />}
+{mode === 'empty' && <Inspector mode="empty" />}

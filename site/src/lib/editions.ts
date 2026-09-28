@@ -9,6 +9,7 @@ import { db, parseFormat, type EditionRow, type EditionStatus, type EditionTrack
 import { N_, summary, UserError, type T } from './i18n';
 import { newId } from './ids';
 import { syncSlots } from './releases';
+import { Places, ensureEntityFolder } from './locations';
 import { loadTracks, parseDuration, titleFromFile, titleKey, trackNumber } from './tracks';
 
 export const EDITION_STATUSES = ['collected', 'partial', 'missing', 'planned', 'unknown'] as const;
@@ -111,9 +112,20 @@ export async function createEdition(actor: string, release: ReleaseRow, form: Fo
   const id = newId('e');
   const cs = new ChangeSet(db(), actor, summary('作品 {release}：新建版本 {edition}', { release: label(release), edition: String(patch.name || patch.slot) }));
   cs.create('edition', { id, release_id: release.id, is_default: 0, cover_file_id: null, sort: siblings.length, ...patch });
+  await addEditionFolder(cs, id, release.id, patch);
   await syncSlots(cs, release.id, [...siblings, patch as { slot: string; status: string }]);
   await cs.commit();
   return id;
+}
+
+/** The folder of an edition made in `cs` (in the 整理台 tree, under its release's folder). */
+export async function addEditionFolder(cs: ChangeSet, id: string, releaseId: string, row: Record<string, unknown>) {
+  const places = await Places.load();
+  places.addEdition({
+    id, release_id: releaseId, slot: row.slot as Slot, name: String(row.name ?? ''), catalog_no: (row.catalog_no as string) ?? null,
+    release_date: (row.release_date as string) ?? null, status: (row.status as EditionStatus) ?? 'collected', sort: Number(row.sort ?? 0), is_default: 0,
+  });
+  ensureEntityFolder(cs, places, `ed:${id}`, true);
 }
 
 export async function saveEdition(actor: string, release: ReleaseRow, edition: EditionRow, form: FormData): Promise<number> {
@@ -134,11 +146,15 @@ export async function saveEdition(actor: string, release: ReleaseRow, edition: E
 export async function deleteEdition(actor: string, release: ReleaseRow, edition: EditionRow): Promise<void> {
   const database = db();
   const used = await database
-    .prepare('SELECT (SELECT count(*) FROM files WHERE edition_id = ?1) AS files, (SELECT count(*) FROM folders WHERE edition_id = ?1) AS folders')
+    .prepare(
+      `SELECT (SELECT count(*) FROM files WHERE edition_id = ?1) AS files,
+              (SELECT count(*) FROM folders c JOIN folders f ON c.parent_id = f.id WHERE f.edition_id = ?1) AS folders`,
+    )
     .bind(edition.id)
     .first<{ files: number; folders: number }>();
   if (used?.files || used?.folders) throw new UserError('版本里还有文件或文件夹，先移走它们');
   const cs = new ChangeSet(database, actor, summary('作品 {release}：删除版本 {edition}', { release: label(release), edition: edition.name || edition.slot }));
+  cs.deleteWhere('folder', 't.edition_id = ?1', [edition.id]);
   const { results: rows } = await database.prepare('SELECT id FROM edition_tracks WHERE edition_id = ?').bind(edition.id).all<{ id: string }>();
   for (const r of rows) await cs.delete('edition_track', { id: r.id });
   const { results: children } = await database.prepare('SELECT id FROM editions WHERE based_on = ?').bind(edition.id).all<{ id: string }>();

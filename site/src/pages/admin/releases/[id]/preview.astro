@@ -104,39 +104,52 @@ const editionName = (e: EditionRow) => `${t(SLOT_LABELS[e.slot])}${e.name ? ` ·
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
     <title>{t('预览')} · {release.title}</title>
+    <script is:inline>
+      try {
+        const theme = localStorage.getItem('rigel.theme');
+        if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+      } catch {}
+    </script>
     <style>
-      :root { --ink: #1d2230; --muted: #6b7079; --line: #e3e3de; --accent: #3c5aa8; --bg: #f7f6f2; }
+      :root { --ink: #1d2230; --muted: #6b7079; --line: #e3e3de; --accent: #3c5aa8; --on-accent: #fff; --bg: #f7f6f2; --card: #fff; --bar: #2b3040; --bar-link: #cdd6ff; --blank: #ddd; --dash: #b9b9b0; --good: #2d6a3a; --now: #eef2ff;
+        --r-new: #e8eefa; --r-same: #e3f3ea; --r-remix: #f3f7e6; --r-part: #fbf0d9; --r-other: #fbe6e4; color-scheme: light; }
+      :root[data-theme='dark'] { --ink: #e3e5e9; --muted: #9ba1ac; --line: #30353e; --accent: #86aaf5; --on-accent: #0e1422; --bg: #121418; --card: #1b1e24; --bar: #0e1013; --bar-link: #a9bff7; --blank: #2a2e35; --dash: #4a505b; --good: #6fc995; --now: #233254;
+        --r-new: #233254; --r-same: #1b3628; --r-remix: #2b3320; --r-part: #3b3019; --r-other: #44231f; color-scheme: dark; }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme='light']) { --ink: #e3e5e9; --muted: #9ba1ac; --line: #30353e; --accent: #86aaf5; --on-accent: #0e1422; --bg: #121418; --card: #1b1e24; --bar: #0e1013; --bar-link: #a9bff7; --blank: #2a2e35; --dash: #4a505b; --good: #6fc995; --now: #233254;
+          --r-new: #233254; --r-same: #1b3628; --r-remix: #2b3320; --r-part: #3b3019; --r-other: #44231f; color-scheme: dark; }
+      }
       * { box-sizing: border-box; }
       body { margin: 0; font: 15px/1.6 system-ui, -apple-system, 'Noto Sans SC', 'Noto Sans JP', sans-serif; color: var(--ink); background: var(--bg); padding-bottom: 96px; }
-      .bar { background: #2b3040; color: #fff; padding: 8px 16px; font-size: 13px; }
-      .bar a { color: #cdd6ff; }
+      .bar { background: var(--bar); color: #fff; padding: 8px 16px; font-size: 13px; }
+      .bar a { color: var(--bar-link); }
       main { max-width: 1040px; margin: 0 auto; padding: 24px 16px; }
       header.album { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
-      .cover { width: 220px; aspect-ratio: 1; background: #ddd center/cover; border-radius: 6px; display: grid; place-items: center; color: var(--muted); }
+      .cover { width: 220px; aspect-ratio: 1; background: var(--blank) center/cover; border-radius: 6px; display: grid; place-items: center; color: var(--muted); }
       h1 { margin: 0 0 4px; font-size: 26px; }
       .sub { color: var(--muted); }
       section { margin-top: 28px; }
       h2 { font-size: 17px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
       table { width: 100%; border-collapse: collapse; }
       td, th { padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; text-align: left; }
-      .ph { display: inline-block; border: 1px dashed #b9b9b0; color: var(--muted); padding: 0 8px; border-radius: 4px; }
-      .ok { color: #2d6a3a; }
+      .ph { display: inline-block; border: 1px dashed var(--dash); color: var(--muted); padding: 0 8px; border-radius: 4px; }
+      .ok { color: var(--good); }
       .editions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
-      .editions a { border: 1px solid var(--line); border-radius: 14px; padding: 2px 10px; color: var(--ink); text-decoration: none; font-size: 13px; background: #fff; }
-      .editions a.on { background: var(--accent); color: #fff; border-color: var(--accent); }
-      button.play { border: 1px solid var(--line); background: #fff; border-radius: 50%; width: 30px; height: 30px; cursor: pointer; }
+      .editions a { border: 1px solid var(--line); border-radius: 14px; padding: 2px 10px; color: var(--ink); text-decoration: none; font-size: 13px; background: var(--card); }
+      .editions a.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+      button.play { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 50%; width: 30px; height: 30px; cursor: pointer; }
       button.play:disabled { opacity: 0.3; cursor: default; }
-      button.all { background: var(--accent); color: #fff; border: 0; border-radius: 4px; padding: 6px 14px; cursor: pointer; }
-      tr.now td { background: #eef2ff; }
+      button.all { background: var(--accent); color: var(--on-accent); border: 0; border-radius: 4px; padding: 6px 14px; cursor: pointer; }
+      tr.now td { background: var(--now); }
       .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
-      .grid img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; background: #ddd; }
-      footer.player { position: fixed; left: 0; right: 0; bottom: 0; background: #fff; border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 12px; align-items: center; }
+      .grid img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; background: var(--blank); }
+      footer.player { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 12px; align-items: center; }
       footer.player audio { flex: 1; }
       .muted { color: var(--muted); }
       .compare { overflow-x: auto; }
       .compare td, .compare th { font-size: 12px; white-space: nowrap; text-align: center; }
       .compare td:first-child, .compare th:first-child { text-align: left; white-space: normal; }
-      .r-new { background: #e8eefa; } .r-same, .r-master { background: #e3f3ea; } .r-remix { background: #f3f7e6; } .r-part { background: #fbf0d9; } .r-other { background: #fbe6e4; }
+      .r-new { background: var(--r-new); } .r-same, .r-master { background: var(--r-same); } .r-remix { background: var(--r-remix); } .r-part { background: var(--r-part); } .r-other { background: var(--r-other); }
       @media (max-width: 640px) { header.album { grid-template-columns: 1fr; } .cover { width: 100%; } }
     </style>
   </head>

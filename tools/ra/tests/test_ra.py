@@ -200,6 +200,42 @@ def test_quote():
         q("a\x00b")
 
 
+def test_seed_skips_releases_deleted_in_the_admin_and_gives_new_ones_folders(tmp_path):
+    """The seed SQL runs against the real schema: a release deleted in the admin stays deleted, a new
+    one gets its folder under its era's folder, slots only go to releases that exist."""
+    import sqlite3
+
+    from ra.catalog import load_catalog
+    from ra.cli import REPO
+    from ra.sql import release_statements
+
+    db = sqlite3.connect(":memory:")
+    db.execute("PRAGMA foreign_keys = ON")
+    for path in sorted((REPO / "site" / "migrations").glob("*.sql")):
+        db.executescript("BEGIN;\n" + path.read_text(encoding="utf-8") + "\nCOMMIT;")
+    releases = load_catalog(REPO / "data" / "seed" / "catalog.yaml")
+    gone = releases[0].id
+    db.execute(
+        "INSERT INTO revisions (actor, batch_id, summary, entity, entity_id, action) VALUES ('x', 'b', 's', 'release', ?, 'delete')",
+        (gone,),
+    )
+    for statement in release_statements(releases):
+        db.execute(statement)
+    ids = {r[0] for r in db.execute("SELECT id FROM releases")}
+    assert gone not in ids and len(ids) == len(releases) - 1
+    assert db.execute("SELECT count(*) FROM release_slots WHERE release_id = ?", (gone,)).fetchone()[0] == 0
+    orphans = db.execute(
+        """SELECT count(*) FROM releases r WHERE NOT EXISTS (
+             SELECT 1 FROM folders f JOIN folders p ON p.id = f.parent_id WHERE f.release_id = r.id AND p.era_id = r.era_id)"""
+    ).fetchone()[0]
+    assert orphans == 0
+    # Running it again changes nothing.
+    before = db.execute("SELECT count(*) FROM folders").fetchone()[0]
+    for statement in release_statements(releases):
+        db.execute(statement)
+    assert db.execute("SELECT count(*) FROM folders").fetchone()[0] == before
+
+
 def test_insert_batches_rows():
     statements = insert("t", ("a",), [(i,) for i in range(120)])
     assert len(statements) == 3

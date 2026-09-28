@@ -73,7 +73,12 @@ export const ENTITIES = {
   folder: {
     table: 'folders',
     key: ['id'],
-    fields: ['parent_id', 'era_id', 'release_id', 'edition_id', 'name', 'description', 'readme_file_id', 'sort'],
+    fields: ['parent_id', 'type', 'era_id', 'release_id', 'edition_id', 'name', 'description', 'readme_file_id', 'color', 'sort'],
+  },
+  era: {
+    table: 'eras',
+    key: ['id'],
+    fields: ['name', 'years', 'sort'],
   },
   song: {
     table: 'songs',
@@ -97,18 +102,21 @@ export const ENTITY_LABELS: Record<EntityName, string> = {
   file: N_('文件'),
   translation: N_('译名'),
   track: N_('曲目'),
-  song: N_('单曲'),
+  song: N_('乐曲'),
   admin: N_('管理组成员'),
   edition: N_('版本'),
   edition_track: N_('版本曲目'),
   folder: N_('文件夹'),
+  era: N_('名义'),
 };
 
 /** A files column read from a JSON row; NOT NULL columns without a value get their default (rows
  * recorded before the column existed, rows made without it). */
 const FILE_DEFAULTS: Record<string, string> = { sealed: '0', rights: "'unknown'", state: "'inbox'" };
-const fromJson = (source: string) => (c: string) =>
-  c in FILE_DEFAULTS ? `coalesce(json_extract(${source}, '$.${c}'), ${FILE_DEFAULTS[c]})` : `json_extract(${source}, '$.${c}')`;
+const fromJson = (source: string, defaults: Record<string, string> = FILE_DEFAULTS) => (c: string) =>
+  c in defaults ? `coalesce(json_extract(${source}, '$.${c}'), ${defaults[c]})` : `json_extract(${source}, '$.${c}')`;
+/** The same for the other tables whose rows are deleted and restored set-based (folders made before 0007). */
+const ROW_DEFAULTS: Partial<Record<EntityName, Record<string, string>>> = { folder: { type: "'plain'", name: "''", sort: '0' } };
 
 // Keeps each statement well under D1's 100 bound-parameter limit.
 const CHUNK = 60;
@@ -339,6 +347,30 @@ export class ChangeSet {
   }
 
   /**
+   * Delete the rows of a single-key table matching an SQL condition on it (alias `t`, parameters ?1 …),
+   * recording each whole row so the deletion can be undone. `order` (may use the same parameters) sets
+   * the order they are recorded in: children before parents.
+   */
+  deleteWhere(entity: EntityName, where: string, binds: unknown[], order = '') {
+    const s = spec(entity);
+    if (s.key.length !== 1 || entity === 'file') throw new Error(`deleteWhere: ${entity}`);
+    const key = s.key[0];
+    const k = binds.length;
+    const row = `json_object(${rowColumns(entity).map((c) => `'${c}', t.${c}`).join(', ')})`;
+    this.statements.push(
+      this.db
+        .prepare(
+          `INSERT INTO revisions (actor, batch_id, summary, entity, entity_id, action, before, after)
+           SELECT ?${k + 1}, ?${k + 2}, ?${k + 3}, ?${k + 4}, t.${key}, 'delete', ${row}, NULL
+           FROM ${s.table} AS t WHERE ${where} ${order ? `ORDER BY ${order}` : ''}`,
+        )
+        .bind(...binds, this.actor, this.batchId, this.summary, entity),
+    );
+    this.countedUpdates.push(this.statements.length);
+    this.statements.push(this.db.prepare(`DELETE FROM ${s.table} AS t WHERE ${where}`).bind(...binds));
+  }
+
+  /**
    * Create many files with two set-based statements per chunk, the rows travelling as one JSON
    * parameter (D1 allows 100 bound parameters, but each may hold up to 2 MB). Rows are inserted in
    * the given order, so archives must come before their members.
@@ -381,7 +413,10 @@ export class ChangeSet {
 
   private queuedStatements(): D1PreparedStatement[] {
     const out: D1PreparedStatement[] = [];
-    for (const [entity, rows] of this.queued) {
+    // Parents first: a folder names its era, release or edition, all of which may be made in this batch.
+    const order: EntityName[] = ['era', 'release', 'edition', 'folder'];
+    const rank = (e: EntityName) => (order.includes(e) ? order.indexOf(e) : order.length);
+    for (const [entity, rows] of [...this.queued].sort((a, b) => rank(a[0]) - rank(b[0]))) {
       const s = spec(entity);
       const cols = rowColumns(entity);
       for (let i = 0; i < rows.length; i += ROW_CHUNK) {
@@ -497,14 +532,14 @@ export async function undoBatch(db: D1Database, actor: string, batchId: string, 
     .first<{ n: number; files: number | null; reverted: string | null; summary: string | null }>();
   if (!info || info.n === 0) return { ok: false, reason: new UserError('找不到这次修改') };
   if (info.reverted) return { ok: false, reason: new UserError('这次修改已经撤销过') };
-  // Rows of single-key tables made in this batch (folders, editions … made while filing) are deleted
-  // set-based; everything else one by one.
-  const bulk = (Object.keys(ENTITIES) as EntityName[]).filter((e) => e !== 'file' && spec(e).key.length === 1);
+  // Rows of single-key tables made or deleted in this batch (folders, editions … made while filing, a
+  // folder deleted with everything below it) are undone set-based; updates and other tables one by one.
+  const bulk = BULK_ORDER;
   const bulkList = bulk.map((e) => `'${e}'`).join(', ');
   const { results: revs } = await db
     .prepare(
       `SELECT id, summary, entity, entity_id, action, before, after, reverted_by_batch FROM revisions
-       WHERE batch_id = ? AND entity != 'file' AND NOT (action = 'create' AND entity IN (${bulkList})) ORDER BY id DESC LIMIT 301`,
+       WHERE batch_id = ? AND entity != 'file' AND NOT (action IN ('create', 'delete') AND entity IN (${bulkList})) ORDER BY id DESC LIMIT 301`,
     )
     .bind(batchId)
     .all<RevisionRow>();
@@ -517,7 +552,7 @@ export async function undoBatch(db: D1Database, actor: string, batchId: string, 
     const refused = await undoFiles(db, cs, batchId, media);
     if (refused) return { ok: false, reason: refused };
   }
-  const refused = await undoCreated(db, cs, batchId, bulk);
+  const refused = (await undoCreated(db, cs, batchId, bulk)) ?? (await undoDeleted(db, cs, batchId, bulk));
   if (refused) return { ok: false, reason: refused };
   for (const rev of revs) {
     if (!isEntity(rev.entity)) return { ok: false, reason: new UserError('未知的记录类型 {entity}', { entity: rev.entity }) };
@@ -555,6 +590,64 @@ function markUndone(cs: ChangeSet, db: D1Database, batchId: string) {
   cs.push(db.prepare('UPDATE revisions SET reverted_by_batch = NULL WHERE reverted_by_batch = ?').bind(batchId));
 }
 
+/**
+ * Single-key tables whose made or deleted rows an undo handles set-based, children before parents (the
+ * order rows made in a batch are deleted in; a deletion is restored in the reverse order).
+ */
+const BULK_ORDER: EntityName[] = (() => {
+  const first: EntityName[] = ['edition_track', 'track', 'folder', 'edition', 'release', 'era', 'song'];
+  const rest = (Object.keys(ENTITIES) as EntityName[]).filter((e) => e !== 'file' && spec(e).key.length === 1 && !first.includes(e));
+  return [...first, ...rest];
+})();
+
+/**
+ * Add the statements that restore the rows of single-key tables this batch deleted, parents first.
+ * Refuses when one of them has been made again since.
+ */
+async function undoDeleted(db: D1Database, cs: ChangeSet, batchId: string, entities: EntityName[]): Promise<UserError | null> {
+  const { results } = await db
+    .prepare(
+      `SELECT entity, count(*) AS n FROM revisions
+       WHERE batch_id = ? AND action = 'delete' AND entity IN (${entities.map((e) => `'${e}'`).join(', ')}) GROUP BY entity`,
+    )
+    .bind(batchId)
+    .all<{ entity: EntityName; n: number }>();
+  if (results.length === 0) return null;
+  for (const { entity } of results) {
+    const s = spec(entity);
+    const again = await db
+      .prepare(
+        `SELECT r.entity_id FROM revisions r JOIN ${s.table} t ON t.${s.key[0]} = r.entity_id
+         WHERE r.batch_id = ? AND r.entity = ? AND r.action = 'delete' LIMIT 1`,
+      )
+      .bind(batchId, entity)
+      .first<{ entity_id: string }>();
+    if (again) return new UserError('{entity} {id} 已被重新创建', { entity: ENTITY_LABELS[entity], id: again.entity_id });
+  }
+  for (const entity of [...entities].reverse()) {
+    if (!results.some((r) => r.entity === entity)) continue;
+    const s = spec(entity);
+    const cols = rowColumns(entity);
+    cs.push(
+      db
+        .prepare(
+          `INSERT INTO ${s.table} (${cols.join(', ')})
+           SELECT ${cols.map(fromJson('before', ROW_DEFAULTS[entity] ?? {})).join(', ')}
+           FROM revisions WHERE batch_id = ? AND entity = ? AND action = 'delete' ORDER BY id DESC`,
+        )
+        .bind(batchId, entity),
+      db
+        .prepare(
+          `INSERT INTO revisions (actor, batch_id, summary, entity, entity_id, action, before, after)
+           SELECT ?1, ?2, ?3, entity, entity_id, 'create', NULL, before
+           FROM revisions WHERE batch_id = ?4 AND entity = ?5 AND action = 'delete' ORDER BY id DESC`,
+        )
+        .bind(cs.actorName, cs.batchId, cs.summary, batchId, entity),
+    );
+  }
+  return null;
+}
+
 /** The value of files.<field> for a field named in a json_each row `j` (editable fields only). */
 const FILE_FIELD = `CASE j.key ${ENTITIES.file.fields.map((f) => `WHEN '${f}' THEN f.${f}`).join(' ')} END`;
 const FILE_EDITABLE = ENTITIES.file.fields.map((f) => `'${f}'`).join(', ');
@@ -565,17 +658,23 @@ const FILE_EDITABLE = ENTITIES.file.fields.map((f) => `'${f}'`).join(', ');
  */
 async function undoCreated(db: D1Database, cs: ChangeSet, batchId: string, entities: EntityName[]): Promise<UserError | null> {
   const made = (entity: string) => `(SELECT entity_id FROM revisions WHERE batch_id = ?1 AND entity = '${entity}' AND action = 'create')`;
+  // Rows this batch changed are put back by the same undo; anything else that now points into a row it
+  // made (a file, folder, edition or release added later) would be lost with it, so the undo refuses.
+  const touched = (entity: string) => `(SELECT entity_id FROM revisions WHERE batch_id = ?1 AND entity = '${entity}')`;
   const later = await db
     .prepare(
-      `SELECT (SELECT count(*) FROM files WHERE (folder_id IN ${made('folder')} OR edition_id IN ${made('edition')})
-                 AND id NOT IN (SELECT entity_id FROM revisions WHERE batch_id = ?1 AND entity = 'file')) AS files,
-              (SELECT count(*) FROM folders WHERE (parent_id IN ${made('folder')} OR edition_id IN ${made('edition')})
-                 AND id NOT IN ${made('folder')}) AS folders,
+      `SELECT (SELECT count(*) FROM files WHERE (folder_id IN ${made('folder')} OR edition_id IN ${made('edition')} OR release_id IN ${made('release')})
+                 AND id NOT IN ${touched('file')}) AS files,
+              (SELECT count(*) FROM folders WHERE (parent_id IN ${made('folder')} OR edition_id IN ${made('edition')}
+                   OR release_id IN ${made('release')} OR era_id IN ${made('era')})
+                 AND id NOT IN ${touched('folder')}) AS folders,
+              (SELECT count(*) FROM editions WHERE release_id IN ${made('release')} AND id NOT IN ${touched('edition')}) AS editions,
+              (SELECT count(*) FROM releases WHERE era_id IN ${made('era')} AND id NOT IN ${touched('release')}) AS releases,
               (SELECT count(*) FROM (SELECT entity_id FROM revisions WHERE batch_id = ?1 AND action = 'create' AND entity IN (${entities.map((e) => `'${e}'`).join(', ')}))) AS n`,
     )
     .bind(batchId)
-    .first<{ files: number; folders: number; n: number }>();
-  if (later?.files || later?.folders) return new UserError('这次新建的文件夹或版本里后来又放了东西，不能自动撤销');
+    .first<{ files: number; folders: number; editions: number; releases: number; n: number }>();
+  if (later?.files || later?.folders || later?.editions || later?.releases) return new UserError('这次新建的文件夹、作品或版本里后来又放了东西，不能自动撤销');
   if (!later?.n) return null;
   for (const entity of entities) {
     const s = spec(entity);

@@ -1,0 +1,240 @@
+---
+// The 整理台's dialogs, opened by scripts/desk.ts: set a folder's type, same-name conflicts, confirmations,
+// several folders at once, a smart folder's conditions, renaming several files, a file's 整理版 tags and
+// cover, the keyboard shortcuts, a large preview and the first-visit guide.
+import { RELEASE_KINDS, RELEASE_KIND_LABELS, SLOTS, SLOT_LABELS } from '../../lib/constants';
+import { N_ } from '../../lib/i18n';
+
+const { t } = Astro.locals;
+const keys: [string, string][] = [
+  ['↑ ↓ / J K', N_('上一个 / 下一个（Shift 连选）')],
+  ['空格', N_('预览')],
+  ['Enter', N_('打开文件夹或文件页')],
+  ['Backspace', N_('回到上一级')],
+  ['Ctrl+A', N_('全选')],
+  ['Ctrl+Shift+N', N_('新建文件夹')],
+  ['F2', N_('重命名（选中多个文件时批量改名）')],
+  ['E', N_('编辑音频的标签与封面')],
+  ['M · Ctrl+Shift+J', N_('移动到…')],
+  ['Shift+D', N_('放到上次的位置')],
+  ['1 – 5', N_('放到最近用过的位置')],
+  ['Ctrl+X · Ctrl+V', N_('剪切 · 粘贴到当前文件夹')],
+  ['A', N_('按建议归档')],
+  ['I', N_('忽略')],
+  ['T', N_('设为第三方')],
+  ['D', N_('标为重复')],
+  ['Delete', N_('删除文件夹 / 删除或忽略文件')],
+  ['Ctrl+Z · U', N_('撤销上一步')],
+  ['Ctrl+J', N_('跳转到文件夹')],
+  ['Ctrl+[ · Ctrl+]', N_('文件夹上移 / 下移')],
+  ['*', N_('展开或收起全部文件夹')],
+  ['[ · ]', N_('收起或展开左栏 / 右栏')],
+  ['\\', N_('收起或展开导航侧栏')],
+  ['?', N_('显示这张表')],
+];
+---
+
+<dialog id="dlg-confirm" class="dlg">
+  <form method="dialog">
+    <p data-text></p>
+    <div class="dlg-buttons">
+      <button value="cancel">{t('取消')}</button>
+      <button value="ok" class="primary" data-ok>{t('确定')}</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-conflict" class="dlg">
+  <form method="dialog">
+    <h3>{t('目标位置已有同名文件夹')}</h3>
+    <p data-text></p>
+    <div class="dlg-buttons">
+      <button value="cancel">{t('取消')}</button>
+      <button value="both">{t('两个都保留')}</button>
+      <button value="merge" class="primary">{t('合并')}</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-type" class="dlg">
+  <form method="dialog">
+    <h3>{t('设为名义、作品或版本')}</h3>
+    <p class="muted" data-folder-name></p>
+    <fieldset class="type-choice">
+      <label><input type="radio" name="type" value="release" /> {t('作品')} <small data-why="release"></small></label>
+      <label><input type="radio" name="type" value="edition" /> {t('版本')} <small data-why="edition"></small></label>
+      <label><input type="radio" name="type" value="era" /> {t('名义')} <small data-why="era"></small></label>
+    </fieldset>
+    <div data-fields="release" class="form-grid" hidden>
+      <label>{t('编号')}</label><input type="text" name="catalog_no" maxlength="40" placeholder="RTCD-004" />
+      <label>{t('标题')}</label><input type="text" name="title" maxlength="300" />
+      <label>{t('形式')}</label>
+      <select name="kind">{RELEASE_KINDS.map((k) => <option value={k}>{t(RELEASE_KIND_LABELS[k])}</option>)}</select>
+      <span class="full muted small">{t('文件夹里的文件归入这个作品；之后可以在作品页补全资料。')}</span>
+    </div>
+    <div data-fields="edition" class="form-grid" hidden>
+      <label>{t('来源')}</label>
+      <select name="slot">{SLOTS.map((s) => <option value={s}>{t(SLOT_LABELS[s])}</option>)}</select>
+      <label>{t('名称')}</label><input type="text" name="name" maxlength="100" placeholder={t('如「初版」「Bandcamp 24bit」')} />
+      <span class="full muted small">{t('文件夹里的文件归入这个版本。')}</span>
+    </div>
+    <div data-fields="era" hidden>
+      <p class="muted small">{t('名义用文件夹名作名称，出现在公开站的分组里。')}</p>
+    </div>
+    <p class="err-line" data-err></p>
+    <div class="dlg-buttons">
+      <button value="cancel">{t('取消')}</button>
+      <button value="ok" class="primary" data-ok>{t('确定')}</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-batch" class="dlg">
+  <form method="dialog">
+    <h3>{t('批量新建文件夹')}</h3>
+    <p class="muted small" data-under></p>
+    <textarea name="text" rows="8" placeholder={t('每行一个文件夹名；「扫描/封面」表示在「扫描」里再建「封面」')}></textarea>
+    <div class="dlg-buttons">
+      <button value="cancel">{t('取消')}</button>
+      <button value="ok" class="primary">{t('新建')}</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-smart" class="dlg wide">
+  <form method="dialog">
+    <h3 data-title>{t('新建智能文件夹')}</h3>
+    <label class="stack">{t('名称')} <input type="text" name="name" maxlength="60" required /></label>
+    <p>
+      <select name="match">
+        <option value="all">{t('满足下面全部条件')}</option>
+        <option value="any">{t('满足下面任一条件')}</option>
+      </select>
+    </p>
+    <div class="rules" data-rules></div>
+    <p><button type="button" data-add-rule>{t('＋ 添加条件')}</button></p>
+    <p class="err-line" data-err></p>
+    <div class="dlg-buttons">
+      <button value="cancel">{t('取消')}</button>
+      <button value="ok" class="primary">{t('保存')}</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-rename" class="dlg wide">
+  <form method="dialog">
+    <h3 data-title>{t('批量重命名')}</h3>
+    <fieldset class="type-choice rename-modes">
+      <label><input type="radio" name="mode" value="replace" checked /> {t('替换文字')}</label>
+      <label><input type="radio" name="mode" value="template" /> {t('按模板')}</label>
+      <label><input type="radio" name="mode" value="restore" /> {t('恢复原文件名')}</label>
+    </fieldset>
+    <div data-fields="replace" class="form-grid">
+      <label for="rn-find">{t('查找')}</label><input id="rn-find" type="text" name="find" />
+      <label for="rn-replace">{t('替换为')}</label><input id="rn-replace" type="text" name="replace" />
+    </div>
+    <div data-fields="template" class="form-grid" hidden>
+      <label for="rn-template">{t('模板')}</label><input id="rn-template" type="text" name="template" value="{name}" />
+      <label for="rn-start">{t('起始编号')}</label>
+      <span><input id="rn-start" type="number" name="start" value="1" min="0" style="width:6em" /> <label>{t('位数')} <input type="number" name="digits" value="2" min="1" max="6" style="width:4em" /></label></span>
+      <span class="full muted small">{t('{name} 是现在的文件名（不含扩展名），{n} 是按列表顺序的编号。')}</span>
+    </div>
+    <div data-fields="restore" hidden><p class="muted small">{t('改回导入或上传时的文件名。')}</p></div>
+    <p class="muted small">{t('扩展名不变。原文件名一直保留（按来源浏览、下次导入都按原名）；这里改的是整理台显示和下载用的名字。')}</p>
+    <p class="small" data-count></p>
+    <div class="rename-preview" data-preview></div>
+    <p class="err-line" data-err></p>
+    <div class="dlg-buttons">
+      <button value="cancel">{t('取消')}</button>
+      <button value="ok" class="primary" data-ok>{t('重命名')}</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-tags" class="dlg wide">
+  <form method="dialog">
+    <h3>{t('标签与封面')}</h3>
+    <p class="muted small" data-where></p>
+    <div data-nowhere hidden>
+      <p>{t('这个文件还不在任何版本里。整理版标签来自版本的曲目表：先把文件移到某个版本，再来编辑。')}</p>
+      <button type="button" data-move>{t('移动到…')}</button>
+    </div>
+    <div class="tags-layout" data-body>
+      <div class="form-grid tags-fields">
+        <label for="tg-entry">{t('曲目条目')}</label><select id="tg-entry" name="entry"></select>
+        <label for="tg-title">{t('标题（此版）')}</label><input id="tg-title" type="text" name="title" maxlength="300" />
+        <label for="tg-artist">{t('艺术家')}</label><input id="tg-artist" type="text" name="artist" maxlength="300" />
+        <label for="tg-composer">{t('作曲')}</label><input id="tg-composer" type="text" name="composer" maxlength="300" />
+        <label for="tg-lyricist">{t('作词')}</label><input id="tg-lyricist" type="text" name="lyricist" maxlength="300" />
+        <label for="tg-arranger">{t('编曲')}</label><input id="tg-arranger" type="text" name="arranger" maxlength="300" />
+        <span class="full muted small">{t('标题留空则用曲目条目的标题。艺术家、作曲、作词、编曲属于曲目条目，所有版本共用。')}</span>
+        <label for="tg-album">{t('专辑名（整个版本）')}</label><input id="tg-album" type="text" name="album_title" maxlength="300" />
+        <label>{t('序号')}</label><span class="small" data-track></span>
+      </div>
+      <div class="tags-cover">
+        <b class="small">{t('封面（整个版本）')}</b>
+        <div class="cover-choices" data-covers role="radiogroup" aria-label={t('封面')}></div>
+        <p class="muted small">{t('下载整理版时嵌入。可选的是这个作品里 12 MB 以内的 JPEG / PNG 图片；也可以在整理台右键图片「设为封面」。')}</p>
+      </div>
+    </div>
+    <details class="embedded" data-embedded-box>
+      <summary>{t('文件自带的标签与封面（原件，不会改动）')}</summary>
+      <div class="embedded-body">
+        <img data-own-cover alt={t('文件自带的封面')} hidden />
+        <dl class="kv small" data-embedded></dl>
+      </div>
+      <button type="button" data-fill>{t('用文件自带的标签填入空着的格子')}</button>
+    </details>
+    <p class="err-line" data-err></p>
+    <div class="dlg-buttons">
+      <a class="button" data-edition-link>{t('版本页：全部曲目 ›')}</a>
+      <span class="grow"></span>
+      <button value="cancel">{t('取消')}</button>
+      <button value="ok" class="primary" data-ok>{t('保存')}</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-help" class="dlg">
+  <form method="dialog">
+    <h3>{t('快捷键')}</h3>
+    <table class="keys">
+      {keys.map(([k, what]) => <tr><td><kbd>{t(k)}</kbd></td><td>{t(what)}</td></tr>)}
+    </table>
+    <p class="muted small">{t('右键菜单里每一项旁边也标着快捷键。拖动文件或文件夹到左侧的文件夹上就是移动；拖到两个文件夹之间是调整顺序。')}</p>
+    <div class="dlg-buttons">
+      <button value="guide" data-guide>{t('重看上手引导')}</button>
+      <button value="ok" class="primary">{t('知道了')}</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-preview" class="dlg preview">
+  <form method="dialog" class="dlg-close"><button value="close" aria-label={t('关闭预览')}>×</button></form>
+  <div data-body></div>
+</dialog>
+
+<dialog id="dlg-guide" class="dlg guide">
+  <form method="dialog">
+    <div data-step="1">
+      <h3>{t('1 / 4 · 左栏：找位置')}</h3>
+      <p>{t('最上面是固定入口：「未归档」是还要整理的文件。下面是快速访问、智能文件夹和文件夹树。名义、作品、版本都是带图标的文件夹，操作和普通文件夹一样。')}</p>
+    </div>
+    <div data-step="2" hidden>
+      <h3>{t('2 / 4 · 中间：选文件')}</h3>
+      <p>{t('先列子文件夹，再列文件。单击选中，Ctrl / Shift 多选，也可以在空白处拖出方框选。把选中的拖到左侧文件夹上就是移动。')}</p>
+    </div>
+    <div data-step="3" hidden>
+      <h3>{t('3 / 4 · 右栏：看详情、改属性')}</h3>
+      <p>{t('选中一个文件时显示预览、位置、建议和权利；选中多个时可以一起改；什么都没选时显示当前文件夹。')}</p>
+    </div>
+    <div data-step="4" hidden>
+      <h3>{t('4 / 4 · 右键和撤销')}</h3>
+      <p>{t('所有操作都在右键菜单里（行末的「⋯」也一样）。做完后底部会出现「撤销」，Ctrl+Z 同样有效。按 ? 随时查看快捷键。')}</p>
+    </div>
+    <div class="dlg-buttons">
+      <button value="skip">{t('跳过')}</button>
+      <button type="button" class="primary" data-next>{t('下一步')}</button>
+    </div>
+  </form>
+</dialog>

@@ -1,108 +1,135 @@
 import { ChangeSet } from './changes';
-import { FILE_STATES, RIGHTS, RIGHTS_LABELS, isOneOf, type Slot } from './constants';
+import { RIGHTS, RIGHTS_LABELS, isOneOf, type Slot } from './constants';
 import type { DirNode } from '../components/DirTree.astro';
 import { db, parseSuggestion, type Suggestion } from './db';
-import { deleteFiles, originalGone, type DeletePlan } from './deletion';
+import { deleteFiles, planDelete, type DeletePlan } from './deletion';
 import { newId } from './ids';
 import {
-  Places, TOP, UNPLACED, VISIBLE, applyPatches, ensureFolder, locationWhere, markEditionsCollected, moveFiles,
-  placePatch, sealArchives,
+  Places, TOP, UNPLACED, UNPLACED_SQL, VISIBLE, applyPatches, ensureEntityFolder, ensureFolder, folderKey, locationWhere,
+  markEditionsCollected, moveFiles, placePatch, sealArchives,
 } from './locations';
 import { markCollected } from './releases';
+import { presetOf, ruleSetSql, type SmartFolder } from './smart';
 import { summary, UserError, type T } from './i18n';
 
-export interface InboxFilters {
-  state: string; // a file state or 'all'
-  loc: string; // a place in the archive tree (era:, rel:, ed:, fd:, unplaced) or ''
-  dir: string; // an original folder
+// ------------------------------------------------------------------------------------------ what the 整理台 shows
+
+/** The entries at the top of the sidebar. */
+export const FIXED_VIEWS = ['all', 'unplaced', 'suggested', 'ignored', 'trash'] as const;
+export type FixedView = (typeof FIXED_VIEWS)[number];
+export const SORTS = ['name', 'path', 'size', 'date', 'kind'] as const;
+export type Sort = (typeof SORTS)[number];
+
+export interface DeskQuery {
+  view: string; // a fixed view, p:<preset> or sf:<smart folder id>; '' when a folder is open
+  loc: string; // the open folder (fd:<id>), or ''
+  sub: boolean; // with the files of its subfolders
+  dir: string; // 按来源浏览: an original folder and everything below it
   q: string;
-  kind: string;
-  sug: '' | 'release' | 'place' | 'rights' | 'seal' | 'none';
-  rights: string;
-  origin: '' | 'nas' | 'upload' | 'gone';
-  acoustic: '' | 'any' | 'own'; // sounds like the same recording as another file (/ as one of the circle's own)
-  archives: '' | 'only' | 'sealed';
+  sort: Sort;
+  desc: boolean;
 }
 
-export function readFilters(params: URLSearchParams): InboxFilters {
-  const state = params.get('state') ?? 'inbox';
-  const sug = params.get('sug') ?? '';
-  const origin = params.get('origin') ?? '';
-  const acoustic = params.get('acoustic') ?? '';
-  const archives = params.get('archives') ?? '';
-  // Links from before the archive tree filter by release.
+/** The query of a 整理台 URL. Links from before the folder tree (state=, tree=source, release=, loc=rel:…) still work. */
+export function readDeskQuery(params: URLSearchParams, places: Places): DeskQuery {
   const release = params.get('release');
+  let loc = params.get('loc') ?? (release ? `rel:${release}` : '');
+  let view = params.get('view') ?? '';
+  if (loc === UNPLACED) {
+    view = 'unplaced';
+    loc = '';
+  }
+  const canonical = loc ? places.canonical(loc) : null;
+  loc = canonical && canonical !== TOP && canonical !== UNPLACED ? canonical : '';
+  if (loc) view = '';
+  else if (!isView(view)) {
+    const state = params.get('state');
+    view = state === 'ignored' ? 'ignored' : state === 'all' || state === 'classified' || state === 'published' ? 'all' : 'unplaced';
+  }
+  const sort = params.get('sort') ?? '';
   return {
-    state: state === 'all' || isOneOf(FILE_STATES, state) ? state : 'inbox',
-    loc: params.get('loc') ?? (release ? `rel:${release}` : ''),
+    view,
+    loc,
+    sub: params.get('sub') === '1',
     dir: params.get('dir') ?? '',
     q: (params.get('q') ?? '').trim(),
-    kind: params.get('kind') ?? '',
-    sug: isOneOf(['release', 'place', 'rights', 'seal', 'none'] as const, sug) ? sug : '',
-    rights: isOneOf(RIGHTS, params.get('rights')) ? (params.get('rights') as string) : '',
-    origin: origin === 'nas' || origin === 'upload' || origin === 'gone' ? origin : '',
-    acoustic: acoustic === 'any' || acoustic === 'own' ? acoustic : '',
-    archives: archives === 'only' || archives === 'sealed' ? archives : '',
+    sort: isOneOf(SORTS, sort) ? sort : loc ? 'name' : 'path',
+    desc: params.get('desc') === '1',
   };
 }
 
-const SUG = (field: string) => `json_extract(files.suggest, '$.${field}')`;
+function isView(view: string): boolean {
+  if ((FIXED_VIEWS as readonly string[]).includes(view)) return true;
+  if (view.startsWith('p:')) return !!presetOf(view.slice(2));
+  return /^sf:[\w-]{1,40}$/.test(view);
+}
 
-export function whereClause(f: InboxFilters, places: Places): { sql: string; binds: unknown[] } {
+const S = (field: string) => `json_extract(files.suggest, '$.${field}')`;
+/** SQL (on `files`): the rules suggest a place, or keeping it whole. */
+export const HAS_SUGGESTION = `(${S('release_id')} IS NOT NULL OR ${S('folder')} IS NOT NULL OR ${S('place')} IS NOT NULL OR ${S('seal')} = 1 OR ${S('state')} = 'ignored')`;
+
+/**
+ * The files a query lists. `smart` is the open smart folder, `ids` the files a preset found by code
+ * (the checks that compare texts).
+ */
+export function deskWhere(q: DeskQuery, places: Places, smart?: SmartFolder | null, ids?: string[] | null): { sql: string; binds: unknown[] } {
   const parts: string[] = [VISIBLE];
   const binds: unknown[] = [];
-  if (f.state !== 'all') {
-    parts.push('files.state = ?');
-    binds.push(f.state);
-  }
-  if (f.loc && places.exists(f.loc)) {
-    const w = locationWhere(places, f.loc);
+  const add = (w: { sql: string; binds: unknown[] }) => {
     parts.push(w.sql);
     binds.push(...w.binds);
-  }
-  if (f.dir) {
+  };
+  if (q.loc) add(locationWhere(places, q.loc, q.sub));
+  else if (q.view === 'unplaced') parts.push(UNPLACED_SQL);
+  else if (q.view === 'suggested') parts.push(`${UNPLACED_SQL} AND ${HAS_SUGGESTION}`);
+  else if (q.view === 'ignored') parts.push("files.state = 'ignored'");
+  else if (q.view.startsWith('p:')) {
+    const preset = presetOf(q.view.slice(2));
+    if (preset?.sql) parts.push(`(${preset.sql})`);
+    else if (preset?.ids) add({ sql: 'files.id IN (SELECT value FROM json_each(?))', binds: [JSON.stringify(ids ?? [])] });
+    else parts.push('0');
+  } else if (q.view.startsWith('sf:')) {
+    if (smart) add(ruleSetSql(smart.rules, places));
+    else parts.push('0');
+  } else if (q.view === 'trash') parts.push('0');
+  if (q.dir) {
     // The folder and everything below it: 'a/b' plus every 'a/b/…' ('0' is the character after '/').
     // A range instead of LIKE: D1 refuses LIKE patterns longer than 50 bytes, and this uses the index.
-    parts.push('(files.dir = ? OR (files.dir >= ? AND files.dir < ?))');
-    binds.push(f.dir, `${f.dir}/`, `${f.dir}0`);
+    add({ sql: '(files.dir = ? OR (files.dir >= ? AND files.dir < ?))', binds: [q.dir, `${q.dir}/`, `${q.dir}0`] });
   }
-  if (f.q) {
-    parts.push("instr(lower(files.dir || '/' || files.name), lower(?)) > 0");
-    binds.push(f.q);
-  }
-  if (f.kind) {
-    parts.push('files.kind = ?');
-    binds.push(f.kind);
-  }
-  if (f.rights) {
-    parts.push('files.rights = ?');
-    binds.push(f.rights);
-  }
-  if (f.origin === 'nas' || f.origin === 'upload') {
-    parts.push('files.origin = ?');
-    binds.push(f.origin);
-  }
-  if (f.origin === 'gone') parts.push(originalGone('files'));
-  if (f.acoustic) {
-    // Acoustic fingerprints: e.g. the circle's tracks inside third-party compilations and game OSTs.
-    const own = f.acoustic === 'own' ? "AND EXISTS (SELECT 1 FROM files o WHERE o.sha256 = CASE WHEN m.a = files.sha256 THEN m.b ELSE m.a END AND o.rights = 'own')" : '';
-    parts.push(`EXISTS (SELECT 1 FROM acoustic_matches m WHERE (m.a = files.sha256 OR m.b = files.sha256) ${own})`);
-  }
-  if (f.archives === 'only') parts.push("(files.kind IN ('archive', 'disc_image') OR json_extract(files.format, '$.archive') IS NOT NULL)");
-  if (f.archives === 'sealed') parts.push('files.sealed = 1');
-  const hasPlace = `(${SUG('release_id')} IS NOT NULL OR ${SUG('folder')} IS NOT NULL)`;
-  if (f.sug === 'release') parts.push(`${SUG('release_id')} IS NOT NULL`);
-  if (f.sug === 'place') parts.push(hasPlace);
-  if (f.sug === 'seal') parts.push(`${SUG('seal')} = 1`);
-  if (f.sug === 'rights') parts.push(`NOT ${hasPlace} AND (${SUG('rights')} IS NOT NULL OR ${SUG('state')} IS NOT NULL)`);
-  if (f.sug === 'none') parts.push(`files.suggest IS NULL`);
+  if (q.q) add({ sql: "instr(lower(files.dir || '/' || files.name || char(10) || coalesce(files.download_name, '')), lower(?)) > 0", binds: [q.q] });
   return { sql: `WHERE ${parts.join(' AND ')}`, binds };
 }
 
-export async function idsForFilter(f: InboxFilters, places: Places): Promise<string[]> {
-  const w = whereClause(f, places);
+/** ORDER BY for a query (the suggested view keeps the files of one suggested release together). */
+export function deskOrder(q: DeskQuery): string {
+  const dir = q.desc ? 'DESC' : 'ASC';
+  const bySuggestion = q.view === 'suggested' ? `${S('release_id')} IS NULL, ${S('release_id')}, ` : '';
+  switch (q.sort) {
+    case 'size': return `${bySuggestion}files.size ${dir}, files.name`;
+    case 'date': return `${bySuggestion}files.created_at ${dir}, files.name`;
+    case 'kind': return `${bySuggestion}files.kind ${dir}, files.name`;
+    case 'path': return `${bySuggestion}files.dir ${dir}, files.name ${dir}`;
+    default: return `${bySuggestion}coalesce(files.download_name, files.name) ${dir}, files.dir`;
+  }
+}
+
+export async function idsForQuery(q: DeskQuery, places: Places, smart?: SmartFolder | null, ids?: string[] | null): Promise<string[]> {
+  const w = deskWhere(q, places, smart, ids);
   const { results } = await db().prepare(`SELECT id FROM files ${w.sql}`).bind(...w.binds).all<{ id: string }>();
   return results.map((r) => r.id);
+}
+
+/** Counts for the sidebar's fixed entries. */
+export async function viewCounts(): Promise<Record<Exclude<FixedView, 'trash'>, number>> {
+  const row = await db()
+    .prepare(
+      `SELECT count(*) AS all_, sum(${UNPLACED_SQL}) AS unplaced, sum(${UNPLACED_SQL} AND ${HAS_SUGGESTION}) AS suggested,
+              sum(files.state = 'ignored') AS ignored
+       FROM files WHERE ${VISIBLE}`,
+    )
+    .first<{ all_: number; unplaced: number | null; suggested: number | null; ignored: number | null }>();
+  return { all: row?.all_ ?? 0, unplaced: row?.unplaced ?? 0, suggested: row?.suggested ?? 0, ignored: row?.ignored ?? 0 };
 }
 
 export interface SourceNode extends DirNode {
@@ -176,7 +203,10 @@ export type InboxAction =
   | { action: 'dup' }
   | { action: 'seal' }
   | { action: 'unseal' }
-  | { action: 'delete' };
+  | { action: 'delete' }
+  | { action: 'discard' } // Delete key: delete what can be deleted (uploads, 合辑 files whose original is gone), ignore the rest
+  | { action: 'note'; note: string }
+  | { action: 'rename'; names: [string, string][] }; // [file id, new name]; an empty name gives the original back
 
 export interface ActionResult {
   summary: string;
@@ -192,7 +222,7 @@ export interface ActionResult {
 
 const UNPLACE = { release_id: null, edition_id: null, folder_id: null, slot: null, track_id: null };
 
-/** The edition of a release's slot with this name, made in `cs` when missing. */
+/** The edition of a release's slot with this name (and its folder), made in `cs` when missing. */
 export function ensureEdition(cs: ChangeSet, places: Places, releaseId: string, slot: Slot, name: string, catalog: string | null): string {
   const found = [...places.editions.values()].find((e) => e.release_id === releaseId && e.slot === slot && e.name === name);
   if (found) return found.id;
@@ -200,25 +230,26 @@ export function ensureEdition(cs: ChangeSet, places: Places, releaseId: string, 
   const row = { id, release_id: releaseId, slot, name, catalog_no: catalog, release_date: null, status: 'collected' as const, sort: 0, is_default: 0 };
   cs.queueCreate('edition', { ...row, source: null, based_on: null, track_count: null, album_title: null, cover_file_id: null, external_ids: '{}', note: null });
   places.addEdition(row);
+  ensureEntityFolder(cs, places, `ed:${id}`);
   return id;
 }
 
 /** Where a suggestion puts a file (making the edition or folders it names), or null for nowhere. */
 export function suggestedPlace(cs: ChangeSet, places: Places, s: Suggestion): string | null {
   const folder = s.folder ? s.folder.split('/').filter(Boolean) : [];
-  if (s.place && places.exists(s.place) && s.place !== UNPLACED) {
-    if (folder.length) return `fd:${ensureFolder(cs, places, s.place, folder)}`;
-    return s.place.startsWith('era:') || s.place === TOP ? null : s.place;
+  if (s.place && s.place !== UNPLACED && (s.place === TOP || places.exists(s.place))) {
+    if (folder.length) return folderKey(ensureFolder(cs, places, s.place, folder));
+    return s.place === TOP ? null : folderKey(ensureEntityFolder(cs, places, s.place));
   }
   if (s.release_id && places.releases.has(s.release_id)) {
-    let key = `rel:${s.release_id}`;
-    if (s.slot) key = `ed:${ensureEdition(cs, places, s.release_id, s.slot, s.edition ?? '', s.edition_catalog ?? null)}`;
-    if (folder.length) key = `fd:${ensureFolder(cs, places, key, folder)}`;
+    let key = folderKey(ensureEntityFolder(cs, places, `rel:${s.release_id}`));
+    if (s.slot) key = folderKey(ensureEntityFolder(cs, places, `ed:${ensureEdition(cs, places, s.release_id, s.slot, s.edition ?? '', s.edition_catalog ?? null)}`));
+    if (folder.length) key = folderKey(ensureFolder(cs, places, key, folder));
     return key;
   }
   if (folder.length) {
     const under = s.era_id && places.eras.has(s.era_id) ? `era:${s.era_id}` : TOP;
-    return `fd:${ensureFolder(cs, places, under, folder)}`;
+    return folderKey(ensureFolder(cs, places, under, folder));
   }
   return null;
 }
@@ -235,8 +266,34 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
 
   if (a.action === 'delete') {
     const r = await deleteFiles(database, actor, ids);
-    return { summary: r.count ? r.summary : summary('没有删除文件'), changed: r.count, skipped: 0, lowConfidence: 0, kept: r, batchId: null };
+    return { summary: r.count ? r.summary : summary('没有删除文件'), changed: r.count, skipped: 0, lowConfidence: 0, kept: r, batchId: r.batchId };
   }
+  if (a.action === 'discard') {
+    // One batch: the files that can be deleted go to the 回收站, the 合辑 files whose original is still
+    // there are ignored (deleting them would bring them back with the next import).
+    const plan = await planDelete(database, ids);
+    const deleted = new Set(plan.levels.flat());
+    const rows = await loadRows<{ id: string; state: string; sealed_in: string | null }>('id, state, sealed_in', ids);
+    const ignore = rows.filter((r) => !deleted.has(r.id) && !r.sealed_in && r.state !== 'published' && r.state !== 'ignored').map((r) => r.id);
+    cs = new ChangeSet(database, actor, plan.count === 0
+      ? summary('忽略 {m} 个文件（合辑里的原件还在，只能忽略）', { m: ignore.length })
+      : ignore.length === 0
+        ? summary('删除 {n} 个文件（30 天内可在回收站恢复）', { n: plan.count })
+        : summary('删除 {n} 个文件、忽略 {m} 个（合辑里的原件还在的只能忽略）', { n: plan.count, m: ignore.length }));
+    if (ignore.length) cs.updateFiles(ignore, { ...UNPLACE, state: 'ignored' });
+    if (plan.count) cs.deleteFiles(plan.levels);
+    const changed = await cs.commit();
+    return { summary: cs.summary, changed, skipped: ids.length - ignore.length - plan.count + plan.members, lowConfidence: 0, batchId: changed ? cs.batchId : null };
+  }
+  if (a.action === 'note') {
+    if (ids.length !== 1) throw new UserError('备注一次只能改一个文件');
+    if (a.note.length > 2000) throw new UserError('内容过长');
+    cs = new ChangeSet(database, actor, summary('修改文件备注'));
+    await cs.update('file', { id: ids[0] }, { note: a.note.trim() || null });
+    const changed = await cs.commit();
+    return { summary: cs.summary, changed, skipped: 0, lowConfidence: 0, batchId: changed ? cs.batchId : null };
+  }
+  if (a.action === 'rename') return renameFiles(actor, a.names);
   if (a.action === 'move') {
     const r = await moveFiles(actor, ids, a.target, t, a.keep, a.newFolder);
     return { summary: r.summary, changed: r.changed, skipped: r.skipped, lowConfidence: 0, batchId: r.batchId };
@@ -366,6 +423,64 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
   return { summary: cs.summary, changed, skipped, lowConfidence, batchId: changed ? cs.batchId : null, placed: placedCount, sealed, refused };
 }
 
+/**
+ * A file's name as the 整理台 shows it and downloads give it. The original name stays (it is where the
+ * file came from, and what the next import matches): a rename sets the download name.
+ */
+export function checkFileName(raw: string, file: { name: string; ext: string }): string {
+  const name = raw.normalize('NFC').trim();
+  if (!name) return file.name;
+  if (name.length > 200) throw new UserError('文件名太长（最多 200 个字符）');
+  if (/[\\/:*?"<>|\u0000-\u001f]/.test(name) || name === '.' || name === '..') throw new UserError('文件名不能包含 \\ / : * ? " < > | 或控制字符：{name}', { name });
+  if (file.ext && !name.toLowerCase().endsWith(`.${file.ext.toLowerCase()}`)) throw new UserError('「{name}」：扩展名不能改（应以 .{ext} 结尾）', { name, ext: file.ext });
+  return name;
+}
+
+async function renameFiles(actor: string, names: [string, string][]): Promise<ActionResult> {
+  type R = { id: string; name: string; ext: string; download_name: string | null; folder_id: string | null; sealed_in: string | null };
+  const rows = await loadRows<R>('id, name, ext, download_name, folder_id, sealed_in', names.map(([id]) => id));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const shown = new Map<string, string>(); // file → its name after the rename
+  const patches = new Map<string, Record<string, unknown>>();
+  let skipped = 0;
+  for (const [id, raw] of names) {
+    const row = byId.get(id);
+    if (!row || row.sealed_in) {
+      skipped += 1;
+      continue;
+    }
+    const name = checkFileName(raw, row);
+    const next = name === row.name ? null : name;
+    shown.set(id, name);
+    if ((row.download_name ?? null) !== next) patches.set(id, { download_name: next });
+  }
+  // Two files of one folder may not end up with the same name (downloads and zips would clash).
+  const folders = [...new Set([...shown.keys()].map((id) => byId.get(id)!.folder_id).filter((f): f is string => !!f))];
+  if (folders.length) {
+    const { results } = await db()
+      .prepare('SELECT id, folder_id, coalesce(download_name, name) AS shown FROM files WHERE folder_id IN (SELECT value FROM json_each(?)) AND sealed_in IS NULL')
+      .bind(JSON.stringify(folders))
+      .all<{ id: string; folder_id: string; shown: string }>();
+    const taken = new Map<string, string[]>();
+    for (const r of results) {
+      const key = `${r.folder_id}/${(shown.get(r.id) ?? r.shown).toLowerCase()}`;
+      taken.set(key, [...(taken.get(key) ?? []), r.id]);
+    }
+    for (const [id, name] of shown) {
+      const folder = byId.get(id)!.folder_id;
+      if (folder && (taken.get(`${folder}/${name.toLowerCase()}`)?.length ?? 0) > 1) throw new UserError('同一个文件夹里已有叫「{name}」的文件', { name });
+    }
+  }
+  const [first] = [...patches.keys()];
+  if (!first) return { summary: summary('没有改动'), changed: 0, skipped, lowConfidence: 0, batchId: null };
+  const cs = new ChangeSet(db(), actor, patches.size === 1
+    ? summary('文件改名：{from} → {to}', { from: byId.get(first)!.download_name ?? byId.get(first)!.name, to: shown.get(first)! })
+    : summary('{n} 个文件改名', { n: patches.size }));
+  cs.patchFiles(patches);
+  const changed = await cs.commit();
+  return { summary: cs.summary, changed, skipped, lowConfidence: 0, batchId: changed ? cs.batchId : null };
+}
+
 async function loadRows<R>(columns: string, ids: string[]): Promise<R[]> {
   const out: R[] = [];
   for (let i = 0; i < ids.length; i += 2000) {
@@ -388,7 +503,20 @@ export function parseInboxAction(form: FormData): InboxAction {
     case 'seal':
     case 'unseal':
     case 'delete':
+    case 'discard':
       return { action };
+    case 'note':
+      return { action, note: String(form.get('note') ?? '') };
+    case 'rename': {
+      let names: unknown;
+      try {
+        names = JSON.parse(String(form.get('names') ?? '[]'));
+      } catch {
+        names = null;
+      }
+      if (!Array.isArray(names) || names.length === 0 || names.length > 5000) throw new UserError('没有要改名的文件');
+      return { action, names: names.map((pair) => [String(pair?.[0] ?? ''), String(pair?.[1] ?? '')] as [string, string]) };
+    }
     case 'move': {
       const target = String(form.get('target') ?? '');
       if (!target) throw new UserError('请选择要移到的位置');

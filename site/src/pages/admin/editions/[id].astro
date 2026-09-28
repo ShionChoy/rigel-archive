@@ -12,6 +12,7 @@ import { ChangeSet, batchSince } from '../../../lib/changes';
 import { N_, errorText, summary, UserError } from '../../../lib/i18n';
 import { Places } from '../../../lib/locations';
 import { albumArtist, editionContext, tagSet } from '../../../lib/tags';
+import { COVER_SQL } from '../../../lib/tagedit';
 import { formatMs, loadTracks, titleKey } from '../../../lib/tracks';
 
 const { id } = Astro.params;
@@ -58,8 +59,8 @@ if (Astro.request.method === 'POST') {
       case 'cover': {
         const fileId = String(form.get('cover_file_id') ?? '') || null;
         if (fileId) {
-          const ok = await database.prepare("SELECT 1 FROM files WHERE id = ? AND release_id = ? AND kind = 'image'").bind(fileId, release.id).first();
-          if (!ok) throw new UserError('封面要从这个作品的图片文件里选');
+          const ok = await database.prepare(`SELECT 1 FROM files WHERE id = ? AND release_id = ? AND ${COVER_SQL}`).bind(fileId, release.id).first();
+          if (!ok) throw new UserError('封面要从这个作品的 JPEG / PNG 图片里选（12 MB 以内）');
         }
         const cs = new ChangeSet(database, actor, summary(fileId ? N_('版本 {edition}：设置封面') : N_('版本 {edition}：取消封面'), { edition: `${release.catalog_no ?? release.title} ${edition.name}`.trim() }));
         cs.updateKnown('edition', { id: edition.id }, { cover_file_id: edition.cover_file_id }, { cover_file_id: fileId });
@@ -76,21 +77,22 @@ if (Astro.request.method === 'POST') {
   }
 }
 
-type F = Pick<FileRow, 'id' | 'name' | 'ext' | 'size' | 'kind' | 'state' | 'dir' | 'folder_id' | 'track_id' | 'format' | 'sha256' | 'blob_key' | 'edition_id' | 'mtime'> & { old: number; stream: number };
+type F = Pick<FileRow, 'id' | 'name' | 'download_name' | 'ext' | 'size' | 'kind' | 'state' | 'dir' | 'folder_id' | 'track_id' | 'format' | 'sha256' | 'blob_key' | 'edition_id' | 'mtime'> & { old: number; stream: number };
 const [siblings, rows, entries, filesResult, images, places, ctx] = await Promise.all([
   loadEditions(release.id),
   loadEditionTracks(edition.id),
   loadTracks(release.id),
   database
     .prepare(
-      `SELECT id, name, ext, size, kind, state, dir, folder_id, track_id, format, sha256, blob_key, edition_id, mtime,
+      `SELECT id, name, download_name, ext, size, kind, state, dir, folder_id, track_id, format, sha256, blob_key, edition_id, mtime,
               EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id) AS old,
               EXISTS (SELECT 1 FROM derived d WHERE d.sha256 = f.sha256 AND d.kind = 'stream') AS stream
-       FROM files f WHERE edition_id = ? AND sealed_in IS NULL ORDER BY folder_id IS NOT NULL, folder_id, dir, name`,
+       FROM files f WHERE edition_id = ? AND sealed_in IS NULL
+       ORDER BY folder_id != coalesce((SELECT id FROM folders WHERE edition_id = f.edition_id), ''), folder_id, dir, name`,
     )
     .bind(edition.id)
     .all<F>(),
-  database.prepare("SELECT id, name, edition_id FROM files WHERE release_id = ? AND kind = 'image' AND sealed_in IS NULL ORDER BY edition_id = ? DESC, name").bind(release.id, edition.id).all<{ id: string; name: string; edition_id: string | null }>(),
+  database.prepare(`SELECT id, coalesce(download_name, name) AS name, edition_id FROM files WHERE release_id = ? AND ${COVER_SQL} ORDER BY edition_id = ? DESC, name`).bind(release.id, edition.id).all<{ id: string; name: string; edition_id: string | null }>(),
   Places.load(),
   editionContext(edition.id),
 ]);
@@ -114,8 +116,8 @@ const folderName = (fid: string | null) => (fid ? places.path(`fd:${fid}`, t).sp
 
 <Admin title={editionTitle}>
   <p class="muted">
-    {places.chain(`ed:${edition.id}`).map((k, i) => <>{i > 0 && ' / '}<a href={k.startsWith('rel:') ? `/admin/releases/${release.id}` : `/admin/inbox?loc=${encodeURIComponent(k)}&state=all`}>{places.name(k, t)}</a></>)}
-    · <a href={`/admin/inbox?loc=ed:${edition.id}&state=all`}>{t('在整理台查看 {n} 个文件', { n: files.length })}</a>
+    {places.chain(`ed:${edition.id}`).map((k, i) => <>{i > 0 && ' / '}<a href={places.folderOf(k)?.release_id ? `/admin/releases/${release.id}` : `/admin/inbox?loc=${k}`}>{places.name(k, t)}</a></>)}
+    · <a href={`/admin/inbox?loc=ed:${edition.id}`}>{t('在整理台查看 {n} 个文件', { n: files.length })}</a>
     · <a href={`/admin/releases/${release.id}/preview?edition=${edition.id}`}>{t('预览公开页')}</a>
     · <a href={`/admin/history?release=${release.id}`}>{t('修改记录')}</a>
   </p>
@@ -131,7 +133,7 @@ const folderName = (fid: string | null) => (fid ? places.path(`fd:${fid}`, t).sp
         <label>CATALOGNUMBER</label><span>{edition.catalog_no || release.catalog_no || '—'}</span>
         {ids.musicbrainz_release && (<><label>MusicBrainz</label><span><a href={`https://musicbrainz.org/release/${ids.musicbrainz_release}`} target="_blank" rel="noopener">{ids.musicbrainz_release}</a></span></>)}
         {ids.bandcamp && (<><label>Bandcamp</label><span><a href={ids.bandcamp} target="_blank" rel="noopener">{ids.bandcamp}</a></span></>)}
-        <label>{t('封面')}</label><span>{sampleTags?.cover ? t('已设（下载时嵌入）') : t('未设')}</span>
+        <label>{t('封面')}</label><span>{sampleTags?.cover ? t('已设（下载时嵌入）') : t('未设（保留文件自带的封面）')}</span>
       </div>
     </div>
     <div class="edition-actions">
@@ -255,9 +257,9 @@ const folderName = (fid: string | null) => (fid ? places.path(`fd:${fid}`, t).sp
         {files.map((f) => (
           <tr>
             <td class="name">
-              <a href={`/admin/files/${f.id}`}>{f.name}</a>
+              <a href={`/admin/files/${f.id}`} title={f.download_name ? t('原文件名：{name}', { name: f.name }) : undefined}>{f.download_name || f.name}</a>
               {f.old ? <span class="chip ignored">{t('旧版本')}</span> : null}
-              {f.folder_id && <div class="muted">{folderName(f.folder_id)}</div>}
+              {folderName(f.folder_id) && <div class="muted">{folderName(f.folder_id)}</div>}
             </td>
             <td><span class="chip">{t(FILE_KIND_LABELS[f.kind] ?? f.kind)}</span></td>
             <td class="spec">{formatSpec(parseFormat(f.format))}</td>
@@ -299,7 +301,7 @@ const folderName = (fid: string | null) => (fid ? places.path(`fd:${fid}`, t).sp
             {images.results.map((f) => <option value={f.id} selected={edition.cover_file_id === f.id}>{f.edition_id === edition.id ? '' : '· '}{f.name}</option>)}
           </select>
           <button type="submit">{t('保存封面')}</button>
-          <span class="muted">{t('整理版下载时嵌入 JPEG / PNG 封面。')}</span>
+          <span class="muted">{t('整理版下载时嵌入 JPEG / PNG 封面；不选时用作品的封面，作品也没有时保留文件自带的封面。')}</span>
         </>
       )
     }

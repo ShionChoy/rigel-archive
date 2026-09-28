@@ -27,10 +27,13 @@ export const GET: APIRoute = async ({ params, locals }) => {
   const places = await Places.load();
   const label = `${ctx.release.title} [${t(SLOT_LABELS[ctx.edition.slot])}${ctx.edition.name ? ` ${ctx.edition.name}` : ''}]`;
   const root = `${safe(label)}/`;
+  // Folders below the edition's own folder become folders in the zip.
+  const home = places.editionFolder(ctx.edition.id);
   const folderPath = (id: string | null) => {
     if (!id) return '';
-    const chain = places.chain(`fd:${id}`).filter((k) => k.startsWith('fd:'));
-    return chain.map((k) => `${safe(places.name(k, t))}/`).join('');
+    const chain = places.chain(`fd:${id}`);
+    const below = home ? chain.slice(chain.indexOf(`fd:${home.id}`) + 1) : chain;
+    return below.map((k) => `${safe(places.name(k, t))}/`).join('');
   };
   const entries: ZipEntry[] = [];
   const names = new Set<string>();
@@ -56,7 +59,7 @@ export const GET: APIRoute = async ({ params, locals }) => {
       continue;
     }
     let name = `${folder}${safe(f.download_name ?? f.name)}`;
-    for (let i = 2; names.has(name); i += 1) name = `${folder}${i} ${safe(f.name)}`;
+    for (let i = 2; names.has(name); i += 1) name = `${folder}${i} ${safe(f.download_name ?? f.name)}`;
     names.add(name);
     const key = f.blob_key!;
     entries.push({

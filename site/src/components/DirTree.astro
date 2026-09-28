@@ -33,7 +33,7 @@ const count = (node: DirNode) => (node.left === undefined ? String(node.n) : nod
         {node.children.length > 0 ? (
           <details open={isOpen(node)}>
             <summary>
-              <a class:list={[mark(node), { current: current === node.path, done: node.left === 0 }]} href={href(node)} data-dir={node.path}>
+              <a class:list={[mark(node), { current: current === node.path, done: node.left === 0 }]} href={href(node)} data-dir={node.path} data-nav>
                 {node.name}
               </a>
               <span class="n">{count(node)}</span>
@@ -42,7 +42,7 @@ const count = (node: DirNode) => (node.left === undefined ? String(node.n) : nod
           </details>
         ) : (
           <>
-            <a class:list={[mark(node), { current: current === node.path, done: node.left === 0 }]} href={href(node)} data-dir={node.path}>
+            <a class:list={[mark(node), { current: current === node.path, done: node.left === 0 }]} href={href(node)} data-dir={node.path} data-nav>
               {node.name}
             </a>
             <span class="n">{count(node)}</span>

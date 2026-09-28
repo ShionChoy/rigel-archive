@@ -9,7 +9,7 @@ import {
   ROLE_LABELS, SLOT_LABELS, isOneOf,
 } from '../../../lib/constants';
 import { db, parseFormat, parseSuggestion, releaseOptions, type FileRow } from '../../../lib/db';
-import { applyInboxAction } from '../../../lib/inbox';
+import { applyInboxAction, checkFileName } from '../../../lib/inbox';
 import { INSIDE_ARCHIVE, Places, moveFiles, sealArchives } from '../../../lib/locations';
 import { taggedSource } from '../../../lib/tags';
 import { KEEP_REASON_TEXT, deleteFiles, keepReason, keptMessage, originalGone } from '../../../lib/deletion';
@@ -91,7 +91,8 @@ if (Astro.request.method === 'POST') {
       const rights = text('rights');
       if (!isOneOf(RIGHTS, rights)) throw new UserError('未知的权属');
       const cs = new ChangeSet(database, actor, summary('文件 {name}：手动修改', { name: label }));
-      await cs.update('file', { id: file.id }, { rights, role: text('role'), note: text('note'), download_name: text('download_name') });
+      const renamed = checkFileName(text('download_name') ?? '', file);
+      await cs.update('file', { id: file.id }, { rights, role: text('role'), note: text('note'), download_name: renamed === file.name ? null : renamed });
       msg = (await cs.commit()) ? t('已保存') : t('没有改动');
       undo = cs.batchId;
     }
@@ -324,7 +325,7 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
             <label>{t('曲目')}</label>
             <span>
               {track.disc > 1 ? `${track.disc}-` : ''}{track.position}. {track.title}
-              {track.song_id && <> · <a href={`/admin/songs/${track.song_id}`}>{t('单曲的全部版本')}</a></>}
+              {track.song_id && <> · <a href={`/admin/songs/${track.song_id}`}>{t('乐曲的全部版本')}</a></>}
             </span>
           </>
         )
@@ -423,7 +424,10 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
       <label>{t('归档位置')}</label>
       <span>
         {placeKey ? (
-          places.chain(placeKey).map((k, i) => <>{i > 0 && ' / '}<a href={k.startsWith('ed:') ? `/admin/editions/${k.slice(3)}` : k.startsWith('rel:') ? `/admin/releases/${k.slice(4)}` : `/admin/inbox?loc=${encodeURIComponent(k)}&state=all`}>{places.name(k, t)}</a></>)
+          <>
+            {places.chain(placeKey).map((k, i) => <>{i > 0 && ' / '}<a href={`/admin/inbox?loc=${k}`}>{places.name(k, t)}</a></>)}
+            {file.edition_id ? <> · <a href={`/admin/editions/${file.edition_id}`}>{t('版本页')}</a></> : file.release_id ? <> · <a href={`/admin/releases/${file.release_id}`}>{t('作品页')}</a></> : null}
+          </>
         ) : sealedBy ? (
           <span>{t('在整体收藏的压缩包里：')}<a href={`/admin/files/${sealedBy.id}`}>{sealedBy.name}</a></span>
         ) : (
@@ -485,7 +489,7 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
       </select>
       <label for="role">{t('用途')}</label>
       <input id="role" type="text" name="role" value={file.role ?? ''} placeholder="master、cover、booklet、web_archive …" />
-      <label for="download_name">{t('下载文件名')}</label>
+      <label for="download_name">{t('文件名（整理台显示与下载用）')}</label>
       <input id="download_name" type="text" name="download_name" value={file.download_name ?? ''} placeholder={t('留空则用原文件名')} />
       <label for="note">{t('备注')}</label>
       <textarea id="note" name="note">{file.note ?? ''}</textarea>

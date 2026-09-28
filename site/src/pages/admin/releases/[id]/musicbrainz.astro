@@ -7,7 +7,7 @@ import Admin from '../../../../layouts/Admin.astro';
 import { SLOTS, SLOT_LABELS, isOneOf, type Slot } from '../../../../lib/constants';
 import { ChangeSet, batchSince } from '../../../../lib/changes';
 import { db, type EditionRow, type ReleaseRow } from '../../../../lib/db';
-import { loadEditionTracks, loadEditions, parseIds } from '../../../../lib/editions';
+import { addEditionFolder, loadEditionTracks, loadEditions, parseIds } from '../../../../lib/editions';
 import { withParams } from '../../../../lib/format';
 import { errorText, summary, UserError } from '../../../../lib/i18n';
 import { newId } from '../../../../lib/ids';
@@ -47,6 +47,7 @@ if (Astro.request.method === 'POST') {
           based_on: null, is_default: 0, track_count: null, album_title: null, cover_file_id: null, external_ids: '{}', note: null, sort: editions.length,
         };
         cs.create('edition', row);
+        await addEditionFolder(cs, editionId, release.id, row);
         await syncSlots(cs, release.id, [...editions, row]);
         await cs.commit();
         edition = (await database.prepare('SELECT * FROM editions WHERE id = ?').bind(editionId).first<EditionRow>())!;

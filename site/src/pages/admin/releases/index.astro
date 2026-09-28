@@ -1,13 +1,15 @@
 ---
 import Admin from '../../../layouts/Admin.astro';
-import { ERAS, RELEASE_KIND_LABELS, SLOTS, SLOT_LABELS, SLOT_STATUS_LABELS, type Slot, type SlotStatus } from '../../../lib/constants';
+import { RELEASE_KIND_LABELS, SLOTS, SLOT_LABELS, SLOT_STATUS_LABELS, type Slot, type SlotStatus } from '../../../lib/constants';
 import { db, type ReleaseRow } from '../../../lib/db';
 import { withParams } from '../../../lib/format';
 import { N_ } from '../../../lib/i18n';
+import { loadEras } from '../../../lib/releases';
 
 const url = Astro.url;
 const { t } = Astro.locals;
 const era = url.searchParams.get('era') ?? '';
+const eras = await loadEras();
 
 type Row = Pick<ReleaseRow, 'id' | 'catalog_no' | 'era_id' | 'kind' | 'series' | 'title' | 'release_date' | 'state'> & {
   slots: string;
@@ -30,7 +32,7 @@ const short: Record<Slot, string> = { cd: 'CD', cd_rip: N_('抓'), digital: N_('
 <Admin title={t('作品')}>
   <div class="filters">
     <a class:list={['button', { primary: !era }]} href={withParams(url, { era: null })}>{t('全部')}</a>
-    {ERAS.map((e) => <a class:list={['button', { primary: era === e.id }]} href={withParams(url, { era: e.id })}>{e.name}</a>)}
+    {eras.map((e) => <a class:list={['button', { primary: era === e.id }]} href={withParams(url, { era: e.id })}>{e.name}</a>)}
     <a class="button primary" href="/admin/releases/new" style="margin-left:auto">{t('新建作品')}</a>
   </div>
 

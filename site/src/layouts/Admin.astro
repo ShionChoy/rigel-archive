@@ -20,17 +20,26 @@ const here = (() => {
   return u.pathname + u.search;
 })();
 
+// Icons (24×24, drawn with the text colour); the collapsed side bar shows only these.
+const ICONS = {
+  inbox: '<path d="M3.5 13.5h4.5l1.5 2.5h5l1.5-2.5h4.5"/><path d="M5.5 5h13l2 8.5V19h-17v-5.5z"/>',
+  upload: '<path d="M12 15.5V4"/><path d="M7.5 8.5 12 4l4.5 4.5"/><path d="M4.5 15v4.5h15V15"/>',
+  release: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2.5"/>',
+  song: '<path d="M9 17.5V5.5l10-2v12"/><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="16.5" cy="15.5" r="2.5"/>',
+  missing: '<rect x="4" y="4" width="6.5" height="6.5" rx="1"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1"/><path d="M14 14l5.5 5.5M19.5 14 14 19.5"/>',
+  history: '<path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4.5v4.5h4.5"/><path d="M12 7.5V12l3 2"/>',
+  storage: '<ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V6"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/>',
+  team: '<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19.5c0-3.4 2.7-5.6 6-5.6s6 2.2 6 5.6"/><path d="M15.5 5.5a3.2 3.2 0 0 1 0 6.2"/><path d="M17.5 14.2c2 .6 3.5 2.4 3.5 5.3"/>',
+};
 const nav = [
-  { href: '/admin/inbox', label: t('整理台') },
-  { href: '/admin/upload', label: t('上传') },
-  { href: '/admin/releases', label: t('作品') },
-  { href: '/admin/songs', label: t('单曲') },
-  { href: '/admin/missing', label: t('缺档看板') },
-  { href: '/admin/checks', label: t('检查清单') },
-  { href: '/admin/duplicates', label: t('重复内容') },
-  { href: '/admin/history', label: t('修改记录') },
-  { href: '/admin/storage', label: t('存储与处理') },
-  { href: '/admin/team', label: t('管理组') },
+  { href: '/admin/inbox', label: t('整理台'), icon: ICONS.inbox },
+  { href: '/admin/upload', label: t('上传'), icon: ICONS.upload },
+  { href: '/admin/releases', label: t('作品'), icon: ICONS.release },
+  { href: '/admin/songs', label: t('乐曲'), icon: ICONS.song },
+  { href: '/admin/missing', label: t('缺档看板'), icon: ICONS.missing },
+  { href: '/admin/history', label: t('修改记录'), icon: ICONS.history },
+  { href: '/admin/storage', label: t('存储与处理'), icon: ICONS.storage },
+  { href: '/admin/team', label: t('管理组'), icon: ICONS.team },
 ];
 ---
 
@@ -41,17 +50,43 @@ const nav = [
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
     <title>{title} · {t('管理后台')}</title>
+    <script is:inline>
+      // Choices kept in this browser, applied before the page is drawn: 夜间模式 (none = follow the system),
+      // the collapsed side bar, and the 整理台's hidden or resized side panes.
+      try {
+        const root = document.documentElement;
+        const theme = localStorage.getItem('rigel.theme');
+        if (theme === 'light' || theme === 'dark') root.dataset.theme = theme;
+        if (localStorage.getItem('rigel.nav') === 'mini') root.dataset.nav = 'mini';
+        if (localStorage.getItem('rigel.deskSide') === 'off') root.dataset.deskSide = 'off';
+        if (localStorage.getItem('rigel.deskInsp') === 'off') root.dataset.deskInsp = 'off';
+        for (const [key, prop] of [['rigel.deskSideW', '--desk-side-w'], ['rigel.deskInspW', '--desk-insp-w']]) {
+          const w = Number(localStorage.getItem(key));
+          if (w >= 120 && w <= 1200) root.style.setProperty(prop, w + 'px');
+        }
+      } catch {}
+    </script>
   </head>
   <body>
     <div class="shell">
       <nav class="side">
-        <a class="brand" href="/admin/inbox">Rigël Archive<small>{t('管理后台')}</small></a>
+        <div class="side-head">
+          <a class="brand" href="/admin/inbox" title="Rigël Archive">
+            <span class="brand-mark" aria-hidden="true">R</span>
+            <span class="brand-text">Rigël Archive<small>{t('管理后台')}</small></span>
+          </a>
+          <button type="button" class="nav-toggle" data-nav-toggle aria-expanded="true"
+            data-title-collapse={t('收起侧栏（\\）')} data-title-expand={t('展开侧栏（\\）')} title={t('收起侧栏（\\）')} aria-label={t('收起或展开侧栏')}>
+            <svg viewBox="0 0 24 24" class="nav-icon" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2" /><path d="M9.5 4.5v15" /><path d="M16 9.5 13.5 12l2.5 2.5" /></svg>
+          </button>
+        </div>
         <ul>
           {
             nav.map((item) => (
               <li>
-                <a href={item.href} aria-current={path.startsWith(item.href) ? 'page' : undefined}>
-                  {item.label}
+                <a href={item.href} aria-current={path.startsWith(item.href) ? 'page' : undefined} title={item.label}>
+                  <svg viewBox="0 0 24 24" class="nav-icon" aria-hidden="true" set:html={item.icon} />
+                  <span class="label">{item.label}</span>
                 </a>
               </li>
             ))
@@ -64,6 +99,11 @@ const nav = [
               <button type="submit" name="lang" value={l} aria-pressed={l === lang ? 'true' : 'false'}>{LANG_NAMES[l]}</button>
             ))}
           </form>
+          <div class="lang-switch theme-switch" role="group" aria-label={t('外观')}>
+            <button type="button" data-theme-choice="light" title={t('浅色')}>{t('浅色')}</button>
+            <button type="button" data-theme-choice="dark" title={t('夜间')}>{t('夜间')}</button>
+            <button type="button" data-theme-choice="auto" title={t('跟随系统的浅色或夜间模式')}>{t('自动')}</button>
+          </div>
           {admin?.name ?? admin?.email}<br /><small>{admin?.email}</small>
         </div>
       </nav>
@@ -87,5 +127,56 @@ const nav = [
         <slot />
       </main>
     </div>
+    <script>
+      // The theme buttons (the choice is kept in this browser).
+      const buttons = [...document.querySelectorAll<HTMLButtonElement>('[data-theme-choice]')];
+      const current = () => document.documentElement.dataset.theme ?? 'auto';
+      const mark = () => buttons.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.themeChoice === current())));
+      for (const b of buttons) {
+        b.addEventListener('click', () => {
+          const choice = b.dataset.themeChoice!;
+          if (choice === 'auto') delete document.documentElement.dataset.theme;
+          else document.documentElement.dataset.theme = choice;
+          try {
+            if (choice === 'auto') localStorage.removeItem('rigel.theme');
+            else localStorage.setItem('rigel.theme', choice);
+          } catch {
+            // private mode: the choice lasts for this page only
+          }
+          mark();
+        });
+      }
+      mark();
+
+      // The side bar collapses to its icons (\\ on the keyboard); the choice is kept in this browser.
+      const toggle = document.querySelector<HTMLButtonElement>('[data-nav-toggle]');
+      const root = document.documentElement;
+      const markNav = () => {
+        const mini = root.dataset.nav === 'mini';
+        toggle?.setAttribute('aria-expanded', String(!mini));
+        if (toggle) toggle.title = (mini ? toggle.dataset.titleExpand : toggle.dataset.titleCollapse) ?? '';
+      };
+      const flipNav = () => {
+        const mini = root.dataset.nav !== 'mini';
+        if (mini) root.dataset.nav = 'mini';
+        else delete root.dataset.nav;
+        try {
+          if (mini) localStorage.setItem('rigel.nav', 'mini');
+          else localStorage.removeItem('rigel.nav');
+        } catch {
+          // private mode: the choice lasts for this page only
+        }
+        markNav();
+      };
+      toggle?.addEventListener('click', flipNav);
+      document.addEventListener('keydown', (ev) => {
+        const target = ev.target as HTMLElement;
+        if (ev.key !== '\\' || ev.ctrlKey || ev.metaKey || ev.altKey || ev.defaultPrevented) return;
+        if (target.closest('input, textarea, select, [contenteditable]') || document.querySelector('dialog[open]')) return;
+        ev.preventDefault();
+        flipNav();
+      });
+      markNav();
+    </script>
   </body>
 </html>

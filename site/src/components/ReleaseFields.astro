@@ -1,13 +1,14 @@
 ---
-import { ERAS, RELEASE_KINDS, RELEASE_KIND_LABELS } from '../lib/constants';
+import { RELEASE_KINDS, RELEASE_KIND_LABELS } from '../lib/constants';
 import type { ReleaseRow } from '../lib/db';
-import { aliasesToText, linksToText } from '../lib/releases';
+import { aliasesToText, linksToText, loadEras } from '../lib/releases';
 
 interface Props {
   release?: Partial<ReleaseRow>;
 }
 const r = Astro.props.release ?? {};
 const { t } = Astro.locals;
+const eras = await loadEras();
 ---
 
 <div class="form-grid">
@@ -19,7 +20,7 @@ const { t } = Astro.locals;
   <input id="catalog_no" type="text" name="catalog_no" value={r.catalog_no ?? ''} placeholder="RTCD-014" />
   <label for="era_id">{t('名义')}</label>
   <select id="era_id" name="era_id">
-    {ERAS.map((e) => <option value={e.id} selected={(r.era_id ?? 'rigel-theatre') === e.id}>{e.name}</option>)}
+    {eras.map((e) => <option value={e.id} selected={(r.era_id ?? eras[0]?.id) === e.id}>{e.name}</option>)}
   </select>
   <label for="artist">{t('艺术家（整理版标签）')}</label>
   <input id="artist" type="text" name="artist" value={r.artist ?? ''} placeholder={t('留空则用名义名称，如 Rigël Theatre')} />

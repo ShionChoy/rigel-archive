@@ -1,12 +1,12 @@
-// Where files sit in the archive (归档位置): the tree of eras, releases, editions and the folders the
-// admins make; moving files; folders; archives kept whole (整体收藏).
+// Where files sit in the archive (归档位置): one tree of folders. Every era (名义), release (作品) and
+// edition (版本) is a folder of that type; the admins' own folders are «plain». A file sits in exactly one
+// folder (files.folder_id) and carries the release and edition that folder belongs to (release_id,
+// edition_id, slot), which the rest of the site reads. A plain folder belongs to the nearest release and
+// edition above it; nothing about that is stored on the folder, so moving a folder is one row.
 //
-// A file's place is three columns: folder_id (a folder, which brings its release and edition), else
-// edition_id (with release_id), else release_id alone (the release's related material). Unplaced files
-// (未归档) have none of them. The original path (dir) never changes: it is where the file came from.
-//
-// Places are addressed by keys: era:<id>, rel:<id>, ed:<id>, fd:<id>; «top» is the top level (folders
-// made there), «unplaced» the files without a place.
+// Places are addressed by keys: fd:<folder id>; era:<id>, rel:<id>, ed:<id> name the folder of that
+// entity (links and rule suggestions use them). «top» is the root of the tree, «unplaced» the files
+// without a place (未归档). The original path of a file (dir) never changes.
 
 import { ChangeSet } from './changes';
 import { SLOTS, SLOT_LABELS, type Slot } from './constants';
@@ -15,10 +15,40 @@ import { N_, summary, UserError, type T } from './i18n';
 import { newId } from './ids';
 import { markCollected } from './releases';
 
+export const FOLDER_TYPES = ['plain', 'era', 'release', 'edition'] as const;
+export type FolderType = (typeof FOLDER_TYPES)[number];
+export const FOLDER_TYPE_LABELS: Record<FolderType, string> = {
+  plain: N_('普通文件夹'),
+  era: N_('名义'),
+  release: N_('作品'),
+  edition: N_('版本'),
+};
+
+export const FOLDER_COLORS = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'pink'] as const;
+export type FolderColor = (typeof FOLDER_COLORS)[number];
+export const FOLDER_COLOR_LABELS: Record<FolderColor, string> = {
+  red: N_('红'), orange: N_('橙'), yellow: N_('黄'), green: N_('绿'), aqua: N_('青'), blue: N_('蓝'), purple: N_('紫'), pink: N_('粉'),
+};
+
 export interface EraInfo { id: string; name: string; sort: number }
-export interface ReleaseInfo { id: string; era_id: string; catalog_no: string | null; title: string; release_date: string | null }
+export interface ReleaseInfo {
+  id: string;
+  era_id: string;
+  catalog_no: string | null;
+  title: string;
+  release_date: string | null;
+  kind: string;
+  state: string;
+}
 export type EditionInfo = Pick<EditionRow, 'id' | 'release_id' | 'slot' | 'name' | 'catalog_no' | 'release_date' | 'status' | 'sort' | 'is_default'>;
-export type FolderInfo = Pick<FolderRow, 'id' | 'parent_id' | 'era_id' | 'release_id' | 'edition_id' | 'name' | 'description' | 'readme_file_id' | 'sort'>;
+export type FolderInfo = Pick<FolderRow, 'id' | 'parent_id' | 'type' | 'era_id' | 'release_id' | 'edition_id' | 'name' | 'description' | 'readme_file_id' | 'color' | 'sort'>;
+
+/** The era, release and edition a folder belongs to (its own entity included). */
+export interface Context {
+  era_id: string | null;
+  release_id: string | null;
+  edition_id: string | null;
+}
 
 /** What filing a file somewhere writes into it. */
 export interface Place {
@@ -34,13 +64,22 @@ export const UNPLACED = 'unplaced';
 /** SQL (on `files`): shown in the 整理台 at all, i.e. not inside an archive kept whole. */
 export const VISIBLE = 'files.sealed_in IS NULL';
 /** SQL (on `files`): has a place in the archive. */
-export const PLACED = '(files.release_id IS NOT NULL OR files.folder_id IS NOT NULL)';
+export const PLACED = '(files.folder_id IS NOT NULL OR files.release_id IS NOT NULL)';
 /** SQL (on `files`): still to be organized: no place, not ignored, not hidden in a kept-whole archive. */
 export const UNPLACED_SQL = `(${VISIBLE} AND files.release_id IS NULL AND files.folder_id IS NULL AND files.state != 'ignored')`;
 /** SQL (on `files`): an archive or disc image, which can be kept whole. */
 export const IS_ARCHIVE = "(files.kind IN ('archive', 'disc_image') OR json_extract(files.format, '$.archive') IS NOT NULL)";
 
-const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name, 'ja');
+const MAX_DEPTH = 64;
+const collator = new Intl.Collator('ja', { numeric: true });
+const slotIndex = (s: string) => SLOTS.indexOf(s as Slot);
+
+export function split(key: string): [string, string] {
+  const at = key.indexOf(':');
+  return at < 0 ? [key, ''] : [key.slice(0, at), key.slice(at + 1)];
+}
+
+export const folderKey = (id: string) => `fd:${id}`;
 
 /** Every era, release, edition and folder, loaded once per request. */
 export class Places {
@@ -48,68 +87,206 @@ export class Places {
   readonly releases = new Map<string, ReleaseInfo>();
   readonly editions = new Map<string, EditionInfo>();
   readonly folders = new Map<string, FolderInfo>();
+  private readonly kids = new Map<string | null, string[]>();
+  private readonly byEra = new Map<string, string>();
+  private readonly byRelease = new Map<string, string>();
+  private readonly byEdition = new Map<string, string>();
 
   static async load(database: D1Database = db()): Promise<Places> {
     const [eras, releases, editions, folders] = await database.batch([
       database.prepare('SELECT id, name, sort FROM eras ORDER BY sort'),
-      database.prepare('SELECT id, era_id, catalog_no, title, release_date FROM releases'),
+      database.prepare('SELECT id, era_id, catalog_no, title, release_date, kind, state FROM releases'),
       database.prepare('SELECT id, release_id, slot, name, catalog_no, release_date, status, sort, is_default FROM editions'),
-      database.prepare('SELECT id, parent_id, era_id, release_id, edition_id, name, description, readme_file_id, sort FROM folders'),
+      database.prepare('SELECT id, parent_id, type, era_id, release_id, edition_id, name, description, readme_file_id, color, sort FROM folders'),
     ]);
     const p = new Places();
     for (const r of eras.results as EraInfo[]) p.eras.set(r.id, r);
     for (const r of releases.results as ReleaseInfo[]) p.releases.set(r.id, r);
     for (const r of editions.results as EditionInfo[]) p.editions.set(r.id, r);
-    for (const r of folders.results as FolderInfo[]) p.folders.set(r.id, r);
+    for (const r of folders.results as FolderInfo[]) p.addFolder(r);
     return p;
+  }
+
+  // ------------------------------------------------------------------ keeping the index
+
+  /** Add a folder made (or changed) in this request, so later lookups see it. */
+  addFolder(f: FolderInfo) {
+    const old = this.folders.get(f.id);
+    if (old) this.unindex(old);
+    this.folders.set(f.id, f);
+    const list = this.kids.get(f.parent_id) ?? [];
+    list.push(f.id);
+    this.kids.set(f.parent_id, list);
+    if (f.era_id) this.byEra.set(f.era_id, f.id);
+    if (f.release_id) this.byRelease.set(f.release_id, f.id);
+    if (f.edition_id) this.byEdition.set(f.edition_id, f.id);
+  }
+
+  /** Change a folder in memory (parent, type, entity) for later steps of the same operation. */
+  updateFolder(id: string, patch: Partial<FolderInfo>) {
+    const f = this.folders.get(id);
+    if (f) this.addFolder({ ...f, ...patch });
+  }
+
+  removeFolder(id: string) {
+    const f = this.folders.get(id);
+    if (!f) return;
+    this.unindex(f);
+    this.folders.delete(id);
+  }
+
+  private unindex(f: FolderInfo) {
+    const list = this.kids.get(f.parent_id);
+    if (list) this.kids.set(f.parent_id, list.filter((k) => k !== f.id));
+    if (f.era_id && this.byEra.get(f.era_id) === f.id) this.byEra.delete(f.era_id);
+    if (f.release_id && this.byRelease.get(f.release_id) === f.id) this.byRelease.delete(f.release_id);
+    if (f.edition_id && this.byEdition.get(f.edition_id) === f.id) this.byEdition.delete(f.edition_id);
+  }
+
+  addEdition(e: EditionInfo) {
+    this.editions.set(e.id, e);
+  }
+
+  addRelease(r: ReleaseInfo) {
+    this.releases.set(r.id, r);
+  }
+
+  addEra(e: EraInfo) {
+    this.eras.set(e.id, e);
+  }
+
+  // ------------------------------------------------------------------ finding folders
+
+  eraFolder(id: string): FolderInfo | undefined {
+    return this.folders.get(this.byEra.get(id) ?? '');
+  }
+
+  releaseFolder(id: string): FolderInfo | undefined {
+    return this.folders.get(this.byRelease.get(id) ?? '');
+  }
+
+  editionFolder(id: string): FolderInfo | undefined {
+    return this.folders.get(this.byEdition.get(id) ?? '');
+  }
+
+  /** The folder a key names (fd:, or era: / rel: / ed: for the entity's folder). */
+  folderOf(key: string): FolderInfo | undefined {
+    const [kind, id] = split(key);
+    if (kind === 'fd') return this.folders.get(id);
+    if (kind === 'era') return this.eraFolder(id);
+    if (kind === 'rel') return this.releaseFolder(id);
+    if (kind === 'ed') return this.editionFolder(id);
+    return undefined;
+  }
+
+  /** The canonical key (fd:…) of a key, or TOP / UNPLACED, or null when it names nothing. */
+  canonical(key: string): string | null {
+    if (key === TOP || key === UNPLACED) return key;
+    const f = this.folderOf(key);
+    return f ? folderKey(f.id) : null;
+  }
+
+  exists(key: string): boolean {
+    return this.canonical(key) !== null;
   }
 
   /** The key of a file's place, or null when it has none. */
   keyOf(f: { release_id: string | null; edition_id?: string | null; folder_id?: string | null }): string | null {
-    if (f.folder_id && this.folders.has(f.folder_id)) return `fd:${f.folder_id}`;
-    if (f.edition_id && this.editions.has(f.edition_id)) return `ed:${f.edition_id}`;
-    if (f.release_id && this.releases.has(f.release_id)) return `rel:${f.release_id}`;
-    return null;
+    if (f.folder_id && this.folders.has(f.folder_id)) return folderKey(f.folder_id);
+    const typed = (f.edition_id && this.editionFolder(f.edition_id)) || (f.release_id && this.releaseFolder(f.release_id));
+    return typed ? folderKey(typed.id) : null;
   }
 
-  exists(key: string): boolean {
-    const [kind, id] = split(key);
-    if (key === TOP || key === UNPLACED) return true;
-    if (kind === 'era') return this.eras.has(id);
-    if (kind === 'rel') return this.releases.has(id);
-    if (kind === 'ed') return this.editions.has(id);
-    if (kind === 'fd') return this.folders.has(id);
-    return false;
+  // ------------------------------------------------------------------ the tree
+
+  /** Siblings in tree order: a manual order when set, else eras, releases by date, editions by slot, then folders by name. */
+  compare = (a: FolderInfo, b: FolderInfo): number => {
+    if (a.sort !== b.sort) return a.sort - b.sort;
+    const rank = (f: FolderInfo) => (f.type === 'plain' ? 1 : 0);
+    if (rank(a) !== rank(b)) return rank(a) - rank(b);
+    if (a.era_id && b.era_id) return (this.eras.get(a.era_id)?.sort ?? 0) - (this.eras.get(b.era_id)?.sort ?? 0);
+    if (a.release_id && b.release_id) {
+      const x = this.releases.get(a.release_id);
+      const y = this.releases.get(b.release_id);
+      if (x && y) {
+        return (x.release_date ?? '9999').localeCompare(y.release_date ?? '9999')
+          || collator.compare(x.catalog_no ?? '', y.catalog_no ?? '') || collator.compare(x.title, y.title);
+      }
+    }
+    if (a.edition_id && b.edition_id) {
+      const x = this.editions.get(a.edition_id);
+      const y = this.editions.get(b.edition_id);
+      if (x && y) {
+        return slotIndex(x.slot) - slotIndex(y.slot) || x.sort - y.sort
+          || (x.release_date ?? '9999').localeCompare(y.release_date ?? '9999') || collator.compare(x.name, y.name);
+      }
+    }
+    return collator.compare(a.name, b.name);
+  };
+
+  /** The folders directly under a folder (null = the top), in tree order. */
+  children(parentId: string | null): FolderInfo[] {
+    return (this.kids.get(parentId) ?? []).map((id) => this.folders.get(id)!).filter(Boolean).sort(this.compare);
   }
 
-  /** The node a place hangs under in the tree (null at the top). */
-  parentOf(key: string): string | null {
-    const [kind, id] = split(key);
-    if (kind === 'rel') {
-      const r = this.releases.get(id);
-      return r ? `era:${r.era_id}` : null;
+  /** The folders directly under a place key (TOP for the top level). */
+  childFolders(key: string): FolderInfo[] {
+    if (key === TOP) return this.children(null);
+    const f = this.folderOf(key);
+    return f ? this.children(f.id) : [];
+  }
+
+  /** The folder and every folder below it, parents before children. */
+  subtree(folderId: string): string[] {
+    const out = [folderId];
+    for (let i = 0; i < out.length; i += 1) out.push(...(this.kids.get(out[i]) ?? []));
+    return out;
+  }
+
+  /** The folder and its ancestors, nearest first. */
+  ancestors(folderId: string | null): FolderInfo[] {
+    const out: FolderInfo[] = [];
+    for (let f = folderId ? this.folders.get(folderId) : undefined; f && out.length < MAX_DEPTH; f = f.parent_id ? this.folders.get(f.parent_id) : undefined) {
+      out.push(f);
     }
-    if (kind === 'ed') {
-      const e = this.editions.get(id);
-      return e ? `rel:${e.release_id}` : null;
+    return out;
+  }
+
+  /** The era, release and edition a folder belongs to: its own entity or the nearest one above it. */
+  context(folderId: string | null): Context {
+    const ctx: Context = { era_id: null, release_id: null, edition_id: null };
+    for (const f of this.ancestors(folderId)) {
+      if (f.edition_id && !ctx.edition_id && !ctx.release_id) ctx.edition_id = f.edition_id;
+      if (f.release_id && !ctx.release_id) ctx.release_id = f.release_id;
+      if (f.era_id) {
+        ctx.era_id = f.era_id;
+        break;
+      }
     }
-    if (kind === 'fd') {
-      const f = this.folders.get(id);
-      if (!f) return null;
-      if (f.parent_id) return `fd:${f.parent_id}`;
-      if (f.edition_id) return `ed:${f.edition_id}`;
-      if (f.release_id) return `rel:${f.release_id}`;
-      if (f.era_id) return `era:${f.era_id}`;
-    }
-    return null;
+    // An edition's release is its parent release folder; keep them consistent if a folder was edited by hand.
+    if (ctx.edition_id && !ctx.release_id) ctx.release_id = this.editions.get(ctx.edition_id)?.release_id ?? null;
+    return ctx;
+  }
+
+  /** Any folder below this one (not itself) of these types. */
+  hasBelow(folderId: string, types: readonly FolderType[]): boolean {
+    return this.subtree(folderId).slice(1).some((id) => types.includes(this.folders.get(id)!.type));
   }
 
   /** The keys from the top down to this place. */
   chain(key: string): string[] {
-    const out: string[] = [];
-    for (let k: string | null = key; k && out.length < 50; k = this.parentOf(k)) out.unshift(k);
-    return out;
+    const f = this.folderOf(key);
+    return f ? this.ancestors(f.id).reverse().map((a) => folderKey(a.id)) : [];
   }
+
+  /** The key of the place a folder hangs under (TOP for the top level). */
+  parentOf(key: string): string | null {
+    const f = this.folderOf(key);
+    if (!f) return null;
+    return f.parent_id ? folderKey(f.parent_id) : TOP;
+  }
+
+  // ------------------------------------------------------------------ names
 
   releaseLabel(id: string): string {
     const r = this.releases.get(id);
@@ -122,199 +299,101 @@ export class Places {
     return e.name ? `${slot} · ${e.name}` : slot;
   }
 
-  /** The name of one node. */
-  name(key: string, t: T): string {
-    const [kind, id] = split(key);
-    if (key === TOP) return t('顶层');
-    if (key === UNPLACED) return t('未归档');
-    if (kind === 'era') return this.eras.get(id)?.name ?? id;
-    if (kind === 'rel') return this.releaseLabel(id);
-    if (kind === 'ed') {
-      const e = this.editions.get(id);
-      return e ? this.editionLabel(e, t) : id;
+  folderName(f: FolderInfo, t: T): string {
+    if (f.era_id) return this.eras.get(f.era_id)?.name ?? f.era_id;
+    if (f.release_id) return this.releaseLabel(f.release_id);
+    if (f.edition_id) {
+      const e = this.editions.get(f.edition_id);
+      return e ? this.editionLabel(e, t) : f.edition_id;
     }
-    if (kind === 'fd') return this.folders.get(id)?.name ?? id;
-    return key;
+    return f.name;
   }
 
-  /** «Rigël Theatre / RTCD-004 Lengsel … / CD 抓轨 · 再版» */
+  /** The name of one node. */
+  name(key: string, t: T): string {
+    if (key === TOP) return t('全部文件夹');
+    if (key === UNPLACED) return t('未归档');
+    const f = this.folderOf(key);
+    return f ? this.folderName(f, t) : key;
+  }
+
+  /** «Rigël Theatre / RTCD-004 Lengsel / CD 抓轨 · 再版» */
   path(key: string, t: T): string {
     return this.chain(key).map((k) => this.name(k, t)).join(' / ');
   }
 
-  /** What filing a file at this place writes. Eras and the top only hold folders. */
+  /** What filing a file in this folder writes. */
   place(key: string): Place {
-    const [kind, id] = split(key);
-    if (kind === 'rel' && this.releases.has(id)) return { release_id: id, edition_id: null, folder_id: null, slot: null };
-    if (kind === 'ed') {
-      const e = this.editions.get(id);
-      if (e) return { release_id: e.release_id, edition_id: e.id, folder_id: null, slot: e.slot };
-    }
-    if (kind === 'fd') {
-      const f = this.folders.get(id);
-      if (f) {
-        const e = f.edition_id ? this.editions.get(f.edition_id) : undefined;
-        return { release_id: f.release_id, edition_id: f.edition_id, folder_id: f.id, slot: e?.slot ?? null };
-      }
-    }
-    if (kind === 'era' || key === TOP) throw new UserError('文件不能直接放在名义或顶层，请放进作品、版本或文件夹');
-    throw new UserError('找不到这个位置');
+    if (key === TOP || key === UNPLACED) throw new UserError('文件要放进某个文件夹');
+    const f = this.folderOf(key);
+    if (!f) throw new UserError('找不到这个位置');
+    const ctx = this.context(f.id);
+    const edition = ctx.edition_id ? this.editions.get(ctx.edition_id) : undefined;
+    return { release_id: ctx.release_id, edition_id: ctx.edition_id, folder_id: f.id, slot: edition?.slot ?? null };
   }
 
-  /** The columns of a folder made directly under this place. */
-  anchorOf(key: string): Pick<FolderRow, 'parent_id' | 'era_id' | 'release_id' | 'edition_id'> {
-    const [kind, id] = split(key);
-    if (key === TOP) return { parent_id: null, era_id: null, release_id: null, edition_id: null };
-    if (kind === 'era' && this.eras.has(id)) return { parent_id: null, era_id: id, release_id: null, edition_id: null };
-    if (kind === 'rel' && this.releases.has(id)) return { parent_id: null, era_id: null, release_id: id, edition_id: null };
-    if (kind === 'ed') {
-      const e = this.editions.get(id);
-      if (e) return { parent_id: null, era_id: null, release_id: e.release_id, edition_id: e.id };
-    }
-    if (kind === 'fd') {
-      const f = this.folders.get(id);
-      if (f) return { parent_id: f.id, era_id: f.era_id, release_id: f.release_id, edition_id: f.edition_id };
-    }
-    throw new UserError('找不到这个位置');
-  }
-
-  /** The folders directly under a place. */
-  childFolders(key: string): FolderInfo[] {
-    const [kind, id] = split(key);
-    return [...this.folders.values()].filter((f) => {
-      if (kind === 'fd') return f.parent_id === id;
-      if (f.parent_id) return false;
-      if (kind === 'ed') return f.edition_id === id;
-      if (f.edition_id) return false;
-      if (kind === 'rel') return f.release_id === id;
-      if (f.release_id) return false;
-      if (kind === 'era') return f.era_id === id;
-      return key === TOP && !f.era_id;
-    });
-  }
-
-  /** The folder and every folder below it. */
-  subtree(folderId: string): string[] {
-    const out = [folderId];
-    for (let i = 0; i < out.length; i += 1) {
-      for (const f of this.folders.values()) if (f.parent_id === out[i]) out.push(f.id);
-    }
-    return out;
-  }
-
-  editionsOf(releaseId: string): EditionInfo[] {
-    return [...this.editions.values()]
-      .filter((e) => e.release_id === releaseId)
-      .sort((a, b) => SLOTS.indexOf(a.slot) - SLOTS.indexOf(b.slot) || a.sort - b.sort
-        || (a.release_date ?? '9999').localeCompare(b.release_date ?? '9999') || a.name.localeCompare(b.name, 'ja'));
-  }
-
-  releasesOf(eraId: string): ReleaseInfo[] {
-    return [...this.releases.values()]
-      .filter((r) => r.era_id === eraId)
-      .sort((a, b) => (a.release_date ?? '9999').localeCompare(b.release_date ?? '9999')
-        || (a.catalog_no ?? '').localeCompare(b.catalog_no ?? '') || a.title.localeCompare(b.title, 'ja'));
-  }
-
-  /** Every place a file can be filed in, for the 「移动到…」 picker (eras and the top only hold folders). */
-  options(t: T): { key: string; path: string; kind: string; depth: number }[] {
-    const out: { key: string; path: string; kind: string; depth: number }[] = [];
-    const walk = (key: string, depth: number) => {
-      out.push({ key, path: this.path(key, t), kind: split(key)[0], depth });
-      for (const child of this.childrenOf(key)) walk(child, depth + 1);
+  /** Every folder in tree order, for the 「移动到…」 picker and the page's scripts. */
+  options(t: T): { key: string; id: string; parent: string | null; path: string; name: string; kind: FolderType; depth: number }[] {
+    const out: { key: string; id: string; parent: string | null; path: string; name: string; kind: FolderType; depth: number }[] = [];
+    const walk = (f: FolderInfo, depth: number, prefix: string) => {
+      const name = this.folderName(f, t);
+      const path = prefix ? `${prefix} / ${name}` : name;
+      out.push({ key: folderKey(f.id), id: f.id, parent: f.parent_id, path, name, kind: f.type, depth });
+      if (depth < MAX_DEPTH) for (const c of this.children(f.id)) walk(c, depth + 1, path);
     };
-    for (const era of this.eras.values()) walk(`era:${era.id}`, 0);
-    for (const f of this.childFolders(TOP).sort(byName)) walk(`fd:${f.id}`, 0);
+    for (const f of this.children(null)) walk(f, 0, '');
     return out;
   }
-
-  /** The nodes directly under a node, in tree order. */
-  childrenOf(key: string): string[] {
-    const [kind, id] = split(key);
-    const folders = this.childFolders(key).sort((a, b) => a.sort - b.sort || byName(a, b)).map((f) => `fd:${f.id}`);
-    if (kind === 'era') return [...this.releasesOf(id).map((r) => `rel:${r.id}`), ...folders];
-    if (kind === 'rel') return [...this.editionsOf(id).map((e) => `ed:${e.id}`), ...folders];
-    return folders;
-  }
-
-  /** Add a row made in this request, so later lookups see it. */
-  addFolder(f: FolderInfo) {
-    this.folders.set(f.id, f);
-  }
-
-  addEdition(e: EditionInfo) {
-    this.editions.set(e.id, e);
-  }
 }
 
-function split(key: string): [string, string] {
-  const at = key.indexOf(':');
-  return at < 0 ? [key, ''] : [key.slice(0, at), key.slice(at + 1)];
-}
-
-/** SQL condition (on `files`) for the files at a place and below it. */
-export function locationWhere(places: Places, key: string): { sql: string; binds: unknown[] } {
-  const [kind, id] = split(key);
+/** SQL condition (on `files`) for the files at a place: in the folder, or (withSub) in it and below it. */
+export function locationWhere(places: Places, key: string, withSub = true): { sql: string; binds: unknown[] } {
   if (key === UNPLACED) return { sql: UNPLACED_SQL, binds: [] };
-  if (kind === 'era') {
-    const folders = [...places.folders.values()].filter((f) => f.era_id === id).map((f) => f.id);
-    return {
-      sql: '(files.release_id IN (SELECT id FROM releases WHERE era_id = ?) OR files.folder_id IN (SELECT value FROM json_each(?)))',
-      binds: [id, JSON.stringify(folders)],
-    };
-  }
-  if (kind === 'rel') return { sql: 'files.release_id = ?', binds: [id] };
-  if (kind === 'ed') return { sql: 'files.edition_id = ?', binds: [id] };
-  if (kind === 'fd') return { sql: 'files.folder_id IN (SELECT value FROM json_each(?))', binds: [JSON.stringify(places.subtree(id))] };
-  if (key === TOP) {
-    const folders = [...places.folders.values()].filter((f) => !f.era_id && !f.release_id).map((f) => f.id);
-    return { sql: 'files.folder_id IN (SELECT value FROM json_each(?))', binds: [JSON.stringify(folders)] };
-  }
-  return { sql: '0', binds: [] };
+  if (key === TOP) return { sql: 'files.folder_id IS NOT NULL', binds: [] };
+  const f = places.folderOf(key);
+  if (!f) return { sql: '0', binds: [] };
+  if (!withSub) return { sql: 'files.folder_id = ?', binds: [f.id] };
+  return { sql: 'files.folder_id IN (SELECT value FROM json_each(?))', binds: [JSON.stringify(places.subtree(f.id))] };
 }
 
 // ------------------------------------------------------------------------------------------ tree
 
 export interface LocNode {
   key: string;
-  kind: 'era' | 'rel' | 'ed' | 'fd';
+  id: string;
+  kind: FolderType;
   name: string;
-  n: number; // files at this place and below
+  n: number; // files in this folder and below
+  own: number; // files directly in it
   children: LocNode[];
+  color: string | null;
   status?: string; // editions: collected / missing …
   readme?: boolean;
 }
 
-/** The archive tree with file counts (visible files that have a place). */
-export async function archiveTree(places: Places, t: T): Promise<LocNode[]> {
+/** The folder tree with file counts (visible files). */
+export async function folderTree(places: Places, t: T): Promise<LocNode[]> {
   const { results } = await db()
-    .prepare(
-      `SELECT release_id, edition_id, folder_id, count(*) AS n FROM files
-       WHERE ${VISIBLE} AND ${PLACED} GROUP BY release_id, edition_id, folder_id`,
-    )
-    .all<{ release_id: string | null; edition_id: string | null; folder_id: string | null; n: number }>();
-  const direct = new Map<string, number>();
-  for (const r of results) {
-    const key = places.keyOf(r);
-    if (key) direct.set(key, (direct.get(key) ?? 0) + r.n);
-  }
-  const build = (key: string): LocNode => {
-    const children = places.childrenOf(key).map(build);
-    const [kind, id] = split(key);
+    .prepare(`SELECT folder_id, count(*) AS n FROM files WHERE ${VISIBLE} AND folder_id IS NOT NULL GROUP BY folder_id`)
+    .all<{ folder_id: string; n: number }>();
+  const direct = new Map(results.map((r) => [r.folder_id, r.n]));
+  const build = (f: FolderInfo, depth: number): LocNode => {
+    const children = depth < MAX_DEPTH ? places.children(f.id).map((c) => build(c, depth + 1)) : [];
+    const own = direct.get(f.id) ?? 0;
     return {
-      key,
-      kind: kind as LocNode['kind'],
-      name: places.name(key, t),
-      n: (direct.get(key) ?? 0) + children.reduce((s, c) => s + c.n, 0),
+      key: folderKey(f.id),
+      id: f.id,
+      kind: f.type,
+      name: places.folderName(f, t),
+      own,
+      n: own + children.reduce((s, c) => s + c.n, 0),
       children,
-      status: kind === 'ed' ? places.editions.get(id)?.status : undefined,
-      readme: kind === 'fd' ? !!places.folders.get(id)?.readme_file_id : undefined,
+      color: f.color,
+      status: f.edition_id ? places.editions.get(f.edition_id)?.status : undefined,
+      readme: !!f.readme_file_id,
     };
   };
-  return [
-    ...[...places.eras.values()].map((e) => build(`era:${e.id}`)),
-    ...places.childFolders(TOP).sort((a, b) => a.sort - b.sort || byName(a, b)).map((f) => build(`fd:${f.id}`)),
-  ];
+  return places.children(null).map((f) => build(f, 0));
 }
 
 // ------------------------------------------------------------------------------------------ folders
@@ -329,103 +408,73 @@ export function checkFolderName(raw: string): string {
   return name;
 }
 
+/** The sort value for a new folder under a parent: last when the siblings are in a manual order. */
+export function nextSort(places: Places, parentId: string | null): number {
+  const max = Math.max(0, ...places.children(parentId).map((f) => f.sort));
+  return max > 0 ? max + 10 : 0;
+}
+
+/** The parent id of a folder made directly under this place (null at the top). */
+export function parentIdOf(places: Places, key: string): string | null {
+  if (key === TOP) return null;
+  const f = places.folderOf(key);
+  if (!f) throw new UserError('找不到这个位置');
+  return f.id;
+}
+
+export function plainFolder(id: string, parentId: string | null, name: string, sort: number): FolderInfo {
+  return { id, parent_id: parentId, type: 'plain', era_id: null, release_id: null, edition_id: null, name, description: null, readme_file_id: null, color: null, sort };
+}
+
 /**
  * The folder at `names` below `under` (e.g. ['游戏与模拟器'] under era:dezaemon), made in `cs` where
  * missing. Returns its id.
  */
 export function ensureFolder(cs: ChangeSet, places: Places, under: string, names: string[]): string {
-  let parent = under;
+  let parentId = under === TOP ? null : ensureEntityFolder(cs, places, under);
   let id = '';
   for (const raw of names) {
     const name = checkFolderName(raw);
-    const found = places.childFolders(parent).find((f) => f.name === name);
+    const found = places.children(parentId).find((f) => f.type === 'plain' && f.name === name);
     if (found) id = found.id;
     else {
       id = newId('fd');
-      const row: FolderInfo = { id, name, description: null, readme_file_id: null, sort: 0, ...places.anchorOf(parent) };
+      const row = plainFolder(id, parentId, name, nextSort(places, parentId));
       cs.queueCreate('folder', { ...row });
       places.addFolder(row);
     }
-    parent = `fd:${id}`;
+    parentId = id;
   }
   return id;
 }
 
-export async function createFolder(actor: string, under: string, rawName: string, t: T): Promise<string> {
-  const places = await Places.load();
-  if (!places.exists(under) || under === UNPLACED) throw new UserError('找不到这个位置');
-  const name = checkFolderName(rawName);
-  if (places.childFolders(under).some((f) => f.name === name)) throw new UserError('这里已经有名为「{name}」的文件夹', { name });
-  const cs = new ChangeSet(db(), actor, summary('新建文件夹 {path}', { path: `${places.path(under, t)} / ${name}` }));
-  const id = ensureFolder(cs, places, under, [name]);
-  await cs.commit();
-  return id;
-}
-
-export async function updateFolder(actor: string, id: string, patch: { name?: string; description?: string | null; readme_file_id?: string | null; sort?: number }, t: T): Promise<number> {
-  const places = await Places.load();
-  const folder = places.folders.get(id);
-  if (!folder) throw new UserError('找不到这个文件夹');
-  const next: Record<string, unknown> = {};
-  if (patch.name !== undefined) {
-    const name = checkFolderName(patch.name);
-    const parent = places.parentOf(`fd:${id}`) ?? TOP;
-    if (name !== folder.name && places.childFolders(parent).some((f) => f.name === name)) {
-      throw new UserError('这里已经有名为「{name}」的文件夹', { name });
-    }
-    next.name = name;
+/**
+ * The folder id of a place key; the folder of an era, release or edition is made in `cs` when it has
+ * none yet (a release added by the import after the tree was built).
+ */
+export function ensureEntityFolder(cs: ChangeSet, places: Places, key: string, direct = false): string {
+  const found = places.folderOf(key);
+  if (found) return found.id;
+  const [kind, id] = split(key);
+  const make = (parentId: string | null, entity: Pick<FolderInfo, 'era_id' | 'release_id' | 'edition_id'>, type: FolderType): string => {
+    const row: FolderInfo = { id: newId('fd'), parent_id: parentId, type, name: '', description: null, readme_file_id: null, color: null, sort: 0, ...entity };
+    // Queued rows are inserted before everything else in the batch; `direct` keeps the order of the calls,
+    // for an entity made with cs.create just before.
+    if (direct) cs.create('folder', { ...row });
+    else cs.queueCreate('folder', { ...row });
+    places.addFolder(row);
+    return row.id;
+  };
+  if (kind === 'era' && places.eras.has(id)) return make(null, { era_id: id, release_id: null, edition_id: null }, 'era');
+  if (kind === 'rel') {
+    const r = places.releases.get(id);
+    if (r) return make(ensureEntityFolder(cs, places, `era:${r.era_id}`, direct), { era_id: null, release_id: id, edition_id: null }, 'release');
   }
-  if (patch.description !== undefined) next.description = patch.description?.trim() || null;
-  if (patch.sort !== undefined) next.sort = patch.sort;
-  if (patch.readme_file_id !== undefined) {
-    if (patch.readme_file_id) {
-      const ok = await db().prepare('SELECT 1 FROM files WHERE id = ? AND folder_id = ?').bind(patch.readme_file_id, id).first();
-      if (!ok) throw new UserError('说明文件要从这个文件夹里的文件中选');
-    }
-    next.readme_file_id = patch.readme_file_id || null;
+  if (kind === 'ed') {
+    const e = places.editions.get(id);
+    if (e) return make(ensureEntityFolder(cs, places, `rel:${e.release_id}`, direct), { era_id: null, release_id: null, edition_id: id }, 'edition');
   }
-  const cs = new ChangeSet(db(), actor, summary('修改文件夹 {path}', { path: places.path(`fd:${id}`, t) }));
-  cs.updateKnown('folder', { id }, folder as unknown as Record<string, unknown>, next);
-  return cs.commit();
-}
-
-export async function deleteFolder(actor: string, id: string, t: T): Promise<string | null> {
-  const places = await Places.load();
-  const folder = places.folders.get(id);
-  if (!folder) throw new UserError('找不到这个文件夹');
-  if (places.childFolders(`fd:${id}`).length) throw new UserError('文件夹里还有子文件夹，先移走或删除它们');
-  const used = await db().prepare('SELECT count(*) AS n FROM files WHERE folder_id = ?').bind(id).first<{ n: number }>();
-  if (used?.n) throw new UserError('文件夹里还有 {n} 个文件，先移走它们', { n: used.n });
-  const parent = places.parentOf(`fd:${id}`);
-  const cs = new ChangeSet(db(), actor, summary('删除文件夹 {path}', { path: places.path(`fd:${id}`, t) }));
-  await cs.delete('folder', { id });
-  await cs.commit();
-  return parent;
-}
-
-/** Move a folder (with everything in it) under another place. */
-export async function moveFolder(actor: string, id: string, under: string, t: T): Promise<number> {
-  const places = await Places.load();
-  const folder = places.folders.get(id);
-  if (!folder) throw new UserError('找不到这个文件夹');
-  if (!places.exists(under) || under === UNPLACED) throw new UserError('找不到这个位置');
-  const subtree = places.subtree(id);
-  if (under.startsWith('fd:') && subtree.includes(under.slice(3))) throw new UserError('不能把文件夹移到它自己里面');
-  if (places.childFolders(under).some((f) => f.name === folder.name && f.id !== id)) {
-    throw new UserError('这里已经有名为「{name}」的文件夹', { name: folder.name });
-  }
-  const anchor = places.anchorOf(under);
-  const cs = new ChangeSet(db(), actor, summary('文件夹 {from} 移到 {to}', { from: places.path(`fd:${id}`, t), to: places.path(under, t) }));
-  cs.updateKnown('folder', { id }, folder as unknown as Record<string, unknown>, anchor);
-  const below = { era_id: anchor.era_id, release_id: anchor.release_id, edition_id: anchor.edition_id };
-  for (const sub of subtree.slice(1)) {
-    cs.updateKnown('folder', { id: sub }, places.folders.get(sub) as unknown as Record<string, unknown>, below);
-  }
-  const edition = anchor.edition_id ? places.editions.get(anchor.edition_id) : undefined;
-  const inside = ['folder_id IN (SELECT value FROM json_each(?))', [JSON.stringify(subtree)]] as const;
-  if (anchor.release_id !== folder.release_id) cs.updateFilesWhere(inside[0], [...inside[1]], { track_id: null });
-  cs.updateFilesWhere(inside[0], [...inside[1]], { release_id: anchor.release_id, edition_id: anchor.edition_id, slot: edition?.slot ?? null });
-  return cs.commit();
+  throw new UserError('找不到这个位置');
 }
 
 // ------------------------------------------------------------------------------------------ moving files
@@ -440,13 +489,13 @@ interface MoveRow {
   sealed_in: string | null;
 }
 
-async function loadRows<T>(columns: string, ids: string[]): Promise<T[]> {
-  const out: T[] = [];
+export async function loadRows<R>(columns: string, ids: string[]): Promise<R[]> {
+  const out: R[] = [];
   for (let i = 0; i < ids.length; i += 2000) {
     const { results } = await db()
       .prepare(`SELECT ${columns} FROM files WHERE id IN (SELECT value FROM json_each(?))`)
       .bind(JSON.stringify(ids.slice(i, i + 2000)))
-      .all<T>();
+      .all<R>();
     out.push(...results);
   }
   return out;
@@ -491,16 +540,16 @@ export interface MoveResult {
 }
 
 /**
- * Put files at a place. With `keep`, the folders below that original folder come along: a file in
+ * Put files in a folder. With `keep`, the folders below that original folder come along: a file in
  * `<keep>/a/b` goes to the folder a/b under the place (made where missing).
  */
 export async function moveFiles(actor: string, ids: string[], where: string, t: T, keep?: string | null, newFolder?: string | null): Promise<MoveResult> {
   const places = await Places.load();
-  if (!places.exists(where) || where === UNPLACED) throw new UserError('找不到这个位置');
+  if (!places.exists(where) || where === UNPLACED || (where === TOP && !newFolder)) throw new UserError('文件要放进某个文件夹');
   const rows = await loadRows<MoveRow>('id, dir, state, rights, release_id, track_id, sealed_in', ids);
   const cs = new ChangeSet(db(), actor, '');
   // A folder made in the 「移动到…」 dialog belongs to the same batch, so one undo removes both.
-  const target = newFolder ? `fd:${ensureFolder(cs, places, where, [newFolder])}` : where;
+  const target = newFolder ? folderKey(ensureFolder(cs, places, where, [newFolder])) : folderKey(ensureEntityFolder(cs, places, where));
   cs.setSummary(summary('整理台：{n} 个文件移到 {place}', { n: ids.length, place: places.path(target, t) }));
   const patches = new Map<string, Record<string, unknown>>();
   let skipped = 0;
@@ -514,10 +563,9 @@ export async function moveFiles(actor: string, ids: string[], where: string, t: 
     if (base !== null) {
       const rel = row.dir === base ? '' : base === '' ? row.dir : row.dir.startsWith(`${base}/`) ? row.dir.slice(base.length + 1) : '';
       const names = rel.split('/').filter(Boolean);
-      if (names.length) key = `fd:${ensureFolder(cs, places, target, names)}`;
+      if (names.length) key = folderKey(ensureFolder(cs, places, target, names));
     }
-    const place = key === target ? places.place(target) : places.place(key);
-    patches.set(row.id, placePatch(row, place));
+    patches.set(row.id, placePatch(row, places.place(key)));
   }
   if (patches.size === 0 && skipped) throw new UserError('这些文件都在整体收藏的压缩包里，不能单独移动');
   applyPatches(cs, patches);

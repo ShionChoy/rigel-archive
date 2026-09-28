@@ -1,0 +1,16 @@
+---
+// 按来源浏览: the original folders (合辑 and uploads) with how many files each still has to organize,
+// loaded when the sidebar section is opened.
+import DirTree from '../../../components/DirTree.astro';
+import { sourceTree } from '../../../lib/inbox';
+
+export const partial = true;
+const { t } = Astro.locals;
+const url = new URL('/admin/inbox?view=all', Astro.url);
+const current = Astro.url.searchParams.get('dir') ?? '';
+const tree = await sourceTree();
+---
+
+<a class:list={['src-all', { current: !current }]} href="/admin/inbox?view=all" data-nav>{t('全部来源')}</a>
+<span class="n">{tree.left} / {tree.total}</span>
+<DirTree nodes={tree.nodes} current={current} url={url} params={{ view: 'all' }} />

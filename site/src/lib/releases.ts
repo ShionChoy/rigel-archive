@@ -1,9 +1,10 @@
 import { ChangeSet } from './changes';
 import {
-  ERAS, NEW_RELEASE_SLOTS, RELEASE_KINDS, SLOTS, SLOT_LABELS, SLOT_STATUSES, isOneOf, type ReleaseKind,
+  NEW_RELEASE_SLOTS, RELEASE_KINDS, SLOTS, SLOT_LABELS, SLOT_STATUSES, isOneOf, type ReleaseKind,
 } from './constants';
 import { db, type ReleaseRow, type SlotRow } from './db';
 import { N_, summary, UserError } from './i18n';
+import { newId } from './ids';
 
 const DATE = /^\d{4}(-\d{2}(-\d{2})?)?$/;
 const SLUG = /^[a-z0-9][a-z0-9-]*$/;
@@ -53,7 +54,7 @@ export function releaseInfoPatch(form: FormData): Record<string, unknown> {
   const kind = text(form, 'kind');
   if (!isOneOf(RELEASE_KINDS, kind)) throw new UserError('未知的作品形式');
   const era = text(form, 'era_id');
-  if (!ERAS.some((e) => e.id === era)) throw new UserError('未知的名义');
+  if (!era) throw new UserError('未知的名义');
   const trackCount = text(form, 'track_count');
   if (trackCount && !/^\d+$/.test(trackCount)) throw new UserError('曲数应为整数');
   const state = text(form, 'state');
@@ -78,14 +79,46 @@ export function releaseInfoPatch(form: FormData): Record<string, unknown> {
   };
 }
 
+export interface EraRow { id: string; name: string; sort: number }
+
+export async function loadEras(): Promise<EraRow[]> {
+  return (await db().prepare('SELECT id, name, sort FROM eras ORDER BY sort, name').all<EraRow>()).results;
+}
+
+async function checkEra(id: unknown) {
+  if (!(await db().prepare('SELECT 1 FROM eras WHERE id = ?').bind(id).first())) throw new UserError('未知的名义');
+}
+
+/**
+ * A release's folder in the 整理台 tree: made under its era's folder when missing, moved there when the
+ * era changes (from wherever it was inside the old era).
+ */
+async function placeReleaseFolder(cs: ChangeSet, releaseId: string, eraId: string) {
+  const database = db();
+  const [era, folder] = await database.batch([
+    database.prepare('SELECT id FROM folders WHERE era_id = ?').bind(eraId),
+    database.prepare('SELECT id, parent_id FROM folders WHERE release_id = ?').bind(releaseId),
+  ]);
+  let eraFolder = (era.results[0] as { id: string } | undefined)?.id;
+  if (!eraFolder) {
+    eraFolder = newId('fd');
+    cs.create('folder', { id: eraFolder, parent_id: null, type: 'era', era_id: eraId, name: '', sort: 0 });
+  }
+  const current = folder.results[0] as { id: string; parent_id: string } | undefined;
+  if (!current) cs.create('folder', { id: newId('fd'), parent_id: eraFolder, type: 'release', release_id: releaseId, name: '', sort: 0 });
+  else if (current.parent_id !== eraFolder) cs.updateKnown('folder', { id: current.id }, { parent_id: current.parent_id }, { parent_id: eraFolder });
+}
+
 export async function saveInfo(actor: string, release: ReleaseRow, form: FormData): Promise<number> {
   const patch = releaseInfoPatch(form);
+  await checkEra(patch.era_id);
   if (patch.catalog_no && patch.catalog_no !== release.catalog_no) {
     const clash = await db().prepare('SELECT id FROM releases WHERE catalog_no = ? AND id != ?').bind(patch.catalog_no, release.id).first();
     if (clash) throw new UserError('编号 {no} 已被其他作品使用', { no: String(patch.catalog_no) });
   }
   const cs = new ChangeSet(db(), actor, summary('作品 {release}：修改基本信息', { release: release.catalog_no ?? release.title }));
   await cs.update('release', { id: release.id }, patch);
+  if (patch.era_id !== release.era_id) await placeReleaseFolder(cs, release.id, String(patch.era_id));
   return cs.commit();
 }
 
@@ -131,6 +164,7 @@ export async function createRelease(actor: string, form: FormData): Promise<stri
   const id = text(form, 'id');
   if (!id || !SLUG.test(id)) throw new UserError('ID 只能用小写字母、数字和连字符，例如 rtcd-014');
   const patch = releaseInfoPatch(form);
+  await checkEra(patch.era_id);
   const database = db();
   if (await database.prepare('SELECT 1 FROM releases WHERE id = ?').bind(id).first()) throw new UserError('ID {id} 已存在', { id });
   if (patch.catalog_no && (await database.prepare('SELECT 1 FROM releases WHERE catalog_no = ?').bind(patch.catalog_no).first())) {
@@ -141,6 +175,7 @@ export async function createRelease(actor: string, form: FormData): Promise<stri
   // Every slot gets a status right away, so the public page shows placeholders for what is missing.
   const defaults = NEW_RELEASE_SLOTS[patch.kind as ReleaseKind];
   for (const slot of SLOTS) cs.create('release_slot', { release_id: id, slot, status: defaults[slot], planned_date: null, note: null });
+  await placeReleaseFolder(cs, id, String(patch.era_id));
   await cs.commit();
   return id;
 }

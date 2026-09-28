@@ -1,6 +1,6 @@
 // Track lists: editing, generating them from a release's audio files, and linking files to tracks.
 // Every track belongs to a song (the same piece across releases); a new track gets a song of its own,
-// and the 单曲 page merges songs that turn out to be the same piece.
+// and the 乐曲 page merges songs that turn out to be the same piece.
 
 import { ChangeSet } from './changes';
 import { summary, UserError } from './i18n';
@@ -99,7 +99,7 @@ export async function saveTracks(actor: string, release: ReleaseRow, current: Tr
       .all<{ id: string }>();
     const known = new Set(results.map((s) => s.id));
     const unknown = songIds.find((s) => !known.has(s));
-    if (unknown) throw new UserError('找不到单曲 {id}', { id: unknown });
+    if (unknown) throw new UserError('找不到乐曲 {id}', { id: unknown });
   }
 
   const cs = new ChangeSet(db(), actor, summary('作品 {release}：修改曲目表', { release: label(release) }));

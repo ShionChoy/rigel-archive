@@ -104,18 +104,18 @@ export async function mergeCandidates(): Promise<{ songs: SongSummary[]; reasons
 /** Move all tracks of the given songs to the target song and delete the merged songs. */
 export async function mergeSongs(actor: string, targetId: string, sourceIds: string[]): Promise<number> {
   const sources = [...new Set(sourceIds)].filter((id) => id !== targetId);
-  if (sources.length === 0) throw new UserError('请至少再选一首要并入的单曲');
+  if (sources.length === 0) throw new UserError('请至少再选一首要并入的乐曲');
   const database = db();
   const target = await database.prepare('SELECT id, title FROM songs WHERE id = ?').bind(targetId).first<{ id: string; title: string }>();
-  if (!target) throw new UserError('找不到要保留的单曲');
+  if (!target) throw new UserError('找不到要保留的乐曲');
   const { results: tracks } = await database
     .prepare('SELECT id, song_id FROM tracks WHERE song_id IN (SELECT value FROM json_each(?))')
     .bind(JSON.stringify(sources))
     .all<{ id: string; song_id: string }>();
-  const cs = new ChangeSet(database, actor, summary('单曲：{n} 首并入「{title}」', { n: sources.length, title: target.title }));
+  const cs = new ChangeSet(database, actor, summary('乐曲：{n} 首并入「{title}」', { n: sources.length, title: target.title }));
   for (const t of tracks) cs.updateKnown('track', { id: t.id }, t, { song_id: targetId });
   for (const id of sources) {
-    if (!(await cs.delete('song', { id }))) throw new UserError('找不到单曲 {id}', { id });
+    if (!(await cs.delete('song', { id }))) throw new UserError('找不到乐曲 {id}', { id });
   }
   return cs.commit();
 }
@@ -126,7 +126,7 @@ export async function splitTrack(actor: string, trackId: string): Promise<string
   const track = await database.prepare('SELECT id, title, song_id FROM tracks WHERE id = ?').bind(trackId).first<{ id: string; title: string; song_id: string | null }>();
   if (!track) throw new UserError('找不到曲目');
   const songId = newId('s');
-  const cs = new ChangeSet(database, actor, summary('单曲：「{title}」拆成独立单曲', { title: track.title }));
+  const cs = new ChangeSet(database, actor, summary('乐曲：「{title}」拆成独立乐曲', { title: track.title }));
   cs.create('song', { id: songId, title: track.title, note: null });
   cs.updateKnown('track', { id: track.id }, track, { song_id: songId });
   await cs.commit();
@@ -136,7 +136,7 @@ export async function splitTrack(actor: string, trackId: string): Promise<string
 export async function saveSong(actor: string, id: string, form: FormData): Promise<number> {
   const title = String(form.get('title') ?? '').trim();
   if (!title) throw new UserError('标题不能为空');
-  const cs = new ChangeSet(db(), actor, summary('单曲：修改「{title}」', { title }));
+  const cs = new ChangeSet(db(), actor, summary('乐曲：修改「{title}」', { title }));
   await cs.update('song', { id }, { title, note: String(form.get('note') ?? '').trim() || null });
   return cs.commit();
 }
@@ -148,7 +148,7 @@ export async function deleteOrphans(actor: string): Promise<number> {
     .prepare('SELECT id FROM songs s WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.song_id = s.id) LIMIT 250')
     .all<{ id: string }>();
   if (results.length === 0) return 0;
-  const cs = new ChangeSet(database, actor, summary('单曲：删除 {n} 首没有曲目的单曲', { n: results.length }));
+  const cs = new ChangeSet(database, actor, summary('乐曲：删除 {n} 首没有曲目的乐曲', { n: results.length }));
   for (const { id } of results) await cs.delete('song', { id });
   return cs.commit();
 }

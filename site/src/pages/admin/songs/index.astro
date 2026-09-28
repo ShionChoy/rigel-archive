@@ -15,7 +15,7 @@ if (Astro.request.method === 'POST') {
     let msg: string;
     if (form.get('action') === 'orphans') {
       const n = await deleteOrphans(actor);
-      msg = n ? t('已删除 {n} 首没有曲目的单曲', { n }) : t('没有需要删除的单曲');
+      msg = n ? t('已删除 {n} 首没有曲目的乐曲', { n }) : t('没有需要删除的乐曲');
     } else {
       const target = String(form.get('target') ?? '');
       const n = await mergeSongs(actor, target, form.getAll('songs').map(String));
@@ -47,20 +47,20 @@ const bySong = new Map<string, typeof versions>();
 for (const v of versions) bySong.set(v.song_id, [...(bySong.get(v.song_id) ?? []), v]);
 ---
 
-<Admin title={t('单曲')}>
+<Admin title={t('乐曲')}>
   <p class="muted">
-    {t('每首曲目都属于一个单曲；同一首曲出现在不同作品里（专辑版、单曲版、DEMO、重制）时，把它们合并为一个单曲，单曲页就会按时间列出全部版本。曲目在作品页的「曲目表」里录入。')}
+    {t('每首曲目都属于一首乐曲；同一首曲出现在不同作品里（专辑版、单曲版、DEMO、重制）时，把它们合并为一首乐曲，乐曲页就会按时间列出全部版本。曲目在作品页的「曲目表」里录入。')}
   </p>
 
   <h2>{t('合并候选（{n} 组）', { n: candidates.length })}</h2>
   <p class="muted">{t('候选来自三条线索：标题相同；文件解码后的音频完全相同；声学指纹判断为同一录音（不同母带、编码或剪辑）。')}</p>
-  {candidates.length === 0 && <p class="muted">{t('没有同名、音频相同或同一录音的单曲。')}</p>}
+  {candidates.length === 0 && <p class="muted">{t('没有同名、音频相同或同一录音的乐曲。')}</p>}
   {
     candidates.map((g) => (
       <form method="post" class="panel">
-        <p class="muted">{t('依据：{reasons}。勾选要合并的单曲，选一首保留（其余并入它）。', { reasons: g.reasons.map((r) => t(r)).join(t('、')) })}</p>
+        <p class="muted">{t('依据：{reasons}。勾选要合并的乐曲，选一首保留（其余并入它）。', { reasons: g.reasons.map((r) => t(r)).join(t('、')) })}</p>
         <table class="grid">
-          <thead><tr><th>{t('合并')}</th><th>{t('保留')}</th><th>{t('单曲')}</th><th>{t('版本')}</th></tr></thead>
+          <thead><tr><th>{t('合并')}</th><th>{t('保留')}</th><th>{t('乐曲')}</th><th>{t('版本')}</th></tr></thead>
           <tbody>
             {g.songs.map((s, i) => (
               <tr>
@@ -84,13 +84,13 @@ for (const v of versions) bySong.set(v.song_id, [...(bySong.get(v.song_id) ?? []
     ))
   }
 
-  <h2>{t('全部单曲')}</h2>
+  <h2>{t('全部乐曲')}</h2>
   <form class="filters" method="get">
     <label>{t('搜索')} <input type="search" name="q" value={q} placeholder={t('标题')} /></label>
     <button type="submit">{t('搜索')}</button>
   </form>
   <table class="grid">
-    <thead><tr><th>{t('单曲')}</th><th class="num">{t('版本')}</th><th>{t('出现在')}</th></tr></thead>
+    <thead><tr><th>{t('乐曲')}</th><th class="num">{t('版本')}</th><th>{t('出现在')}</th></tr></thead>
     <tbody>
       {
         list.results.map((s) => (
@@ -101,14 +101,14 @@ for (const v of versions) bySong.set(v.song_id, [...(bySong.get(v.song_id) ?? []
           </tr>
         ))
       }
-      {list.results.length === 0 && <tr><td colspan="3" class="muted">{t('还没有单曲。在作品页录入曲目表后会自动生成。')}</td></tr>}
+      {list.results.length === 0 && <tr><td colspan="3" class="muted">{t('还没有乐曲。在作品页录入曲目表后会自动生成。')}</td></tr>}
     </tbody>
   </table>
   {
     orphans && orphans.n > 0 && (
       <form method="post" class="panel">
         <input type="hidden" name="action" value="orphans" />
-        {t('有 {n} 首单曲已经没有曲目（合并或删除曲目后留下的）。', { n: orphans.n })}
+        {t('有 {n} 首乐曲已经没有曲目（合并或删除曲目后留下的）。', { n: orphans.n })}
         <button type="submit">{t('删除它们')}</button>
       </form>
     )

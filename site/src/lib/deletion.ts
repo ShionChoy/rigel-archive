@@ -97,17 +97,19 @@ export async function planDelete(db: D1Database, ids: string[]): Promise<DeleteP
   };
 }
 
-export async function deleteFiles(db: D1Database, actor: string, ids: string[]): Promise<DeletePlan & { summary: string }> {
+export async function deleteFiles(db: D1Database, actor: string, ids: string[]): Promise<DeletePlan & { summary: string; batchId: string | null }> {
   const plan = await planDelete(db, ids);
   const summary = plan.members
     ? summaryOf('删除 {n} 个文件（含包内 {members} 个）', { n: plan.count, members: plan.members })
     : summaryOf('删除 {n} 个文件', { n: plan.count });
+  let batchId: string | null = null;
   if (plan.count > 0) {
     const cs = new ChangeSet(db, actor, summary);
     cs.deleteFiles(plan.levels);
     await cs.commit();
+    batchId = cs.batchId;
   }
-  return { ...plan, summary };
+  return { ...plan, summary, batchId };
 }
 
 /** Why some of the requested files were kept, e.g. 「；3 个已发布，要先改状态」 (empty when none were). */

@@ -1,13 +1,14 @@
 // 整理版 downloads: the tags a file gets from the catalog (release, edition, track, credits, MusicBrainz
 // ids, cover), written into the file as it downloads. FLAC keeps its audio frames byte for byte; a WAV
-// or AIFF is offered as its stream FLAC (identical samples); MP3 gets an ID3v2.4 tag. The original is
-// never changed and stays downloadable as it was collected.
+// or AIFF is offered as its stream FLAC (identical samples); MP3 gets an ID3v2.4 tag. What the catalog
+// does not say (lyrics, comments, the file's own cover when the catalog has none …) stays as the file
+// had it. The original is never changed and stays downloadable as it was collected.
 
 import { db, parseFormat, type EditionRow, type FileRow, type ReleaseRow } from './db';
 import { parseCredits, parseIds, trackTitle, type EditionTrackView } from './editions';
 import { concat } from './tagging/bytes';
-import { flacHeader, pictureBlock, readFlacLayout, vorbisComment } from './tagging/flac';
-import { id3v24, mp3AudioRange } from './tagging/id3';
+import { flacHeader, mergeComments, mergePictures, pictureBlock, pictureImage, pictureType, readFlacLayout, vorbisComment } from './tagging/flac';
+import { apicImage, apicType, id3v24, keptFrames, mp3AudioRange, readId3Frames, type Id3Fields } from './tagging/id3';
 import type { ZipEntry } from './tagging/zip';
 
 /** The album artist when a release names none: the era's name (DEZAEMON entries were Inoue⊿'s own). */
@@ -118,7 +119,9 @@ export function trackFileName(tags: TagSet, ext: string, fallback: string): stri
   return `${tags.disc ? `${tags.disc}-` : ''}${n} ${safe(tags.title)}.${ext}`;
 }
 
-type FileForTags = Pick<FileRow, 'id' | 'name' | 'ext' | 'size' | 'mtime' | 'sha256' | 'kind' | 'blob_key' | 'edition_id' | 'track_id' | 'format'>;
+type FileForTags = Pick<FileRow, 'id' | 'name' | 'ext' | 'size' | 'mtime' | 'sha256' | 'kind' | 'blob_key' | 'edition_id' | 'track_id' | 'format'> & {
+  download_name?: string | null;
+};
 
 /** Where a file's tagged version comes from, or null when it has none (not audio in an edition, other formats). */
 export async function taggedSource(file: FileForTags, ctx?: Context | null): Promise<TaggedSource | null> {
@@ -139,7 +142,7 @@ export async function taggedSource(file: FileForTags, ctx?: Context | null): Pro
     format = 'flac';
   } else return null;
   const row = file.track_id ? ctx.rows.find((r) => r.track_id === file.track_id) : undefined;
-  const stem = file.name.replace(/\.[^.]+$/, '');
+  const stem = (file.download_name || file.name).replace(/\.[^.]+$/, '');
   const tags = tagSet(ctx, row, parseFormat(file.format).tags?.title ?? stem);
   return { file, tags, format, key, size, name: trackFileName(tags, format, `${stem}.${format}`) };
 }
@@ -174,12 +177,13 @@ export async function taggedParts(media: R2Bucket, src: TaggedSource): Promise<{
   const cover = await coverBytes(media, src.tags.cover);
   if (src.format === 'flac') {
     const layout = await readFlacLayout(read);
-    const header = flacHeader(layout, vorbisComment(vorbisFields(src.tags)), cover ? pictureBlock(cover.image, cover.mime) : null);
+    const fields = mergeComments(vorbisFields(src.tags), layout.comments, !!cover);
+    const header = flacHeader(layout, vorbisComment(fields), mergePictures(cover ? pictureBlock(cover.image, cover.mime) : null, layout.pictures));
     return { header, offset: layout.audioOffset, length: src.size - layout.audioOffset };
   }
   const range = await mp3AudioRange(src.size, read);
   const t = src.tags;
-  const header = id3v24({
+  const fields: Id3Fields = {
     title: t.title, artist: t.artist, album: t.album, albumArtist: t.albumArtist,
     track: t.track ? `${t.track}${t.trackTotal ? `/${t.trackTotal}` : ''}` : undefined,
     disc: t.disc ? `${t.disc}${t.discTotal ? `/${t.discTotal}` : ''}` : undefined,
@@ -190,8 +194,26 @@ export async function taggedParts(media: R2Bucket, src: TaggedSource): Promise<{
     ],
     ufid: t.mbRecording ? { owner: 'http://musicbrainz.org', id: t.mbRecording } : undefined,
     cover,
-  });
+  };
+  const header = id3v24({ ...fields, keep: keptFrames(range.start > 0 ? await readId3Frames(read) : [], fields) });
   return { header, offset: range.start, length: range.end - range.start };
+}
+
+/** The front cover embedded in a FLAC or MP3 (else its first picture), read from the start of the stored file. */
+export async function embeddedCover(media: R2Bucket, key: string, ext: string, size: number): Promise<{ image: Uint8Array; mime: string } | null> {
+  const read = (offset: number, length: number) => readRange(media, key, offset, Math.max(0, Math.min(length, size - offset)));
+  const e = ext.toLowerCase();
+  if (e === 'flac') {
+    const { pictures } = await readFlacLayout(read);
+    const body = pictures.find((p) => pictureType(p) === 3) ?? pictures[0];
+    return body ? pictureImage(body) : null;
+  }
+  if (e === 'mp3') {
+    const pictures = (await readId3Frames(read)).filter((f) => f.id === 'APIC');
+    const frame = pictures.find((f) => apicType(f.body) === 3) ?? pictures[0];
+    return frame ? apicImage(frame.body) : null;
+  }
+  return null;
 }
 
 function bodyStream(media: R2Bucket, key: string, header: Uint8Array, offset: number, length: number): ReadableStream<Uint8Array> {

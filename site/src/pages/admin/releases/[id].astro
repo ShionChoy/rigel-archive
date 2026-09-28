@@ -87,8 +87,9 @@ const { results: etCounts } = await database
   .all<{ edition_id: string; n: number }>();
 const trackCount = new Map(etCounts.map((r) => [r.edition_id, r.n]));
 const filesIn = (editionId: string) => counts.results.filter((c) => c.edition_id === editionId).reduce((n, c) => n + c.n, 0);
-const loose = counts.results.filter((c) => !c.edition_id && !c.folder_id).reduce((n, c) => n + c.n, 0);
-const releaseFolders = places.childFolders(`rel:${release.id}`);
+// Files of the release that are not in one of its editions (in the release's folder or its plain folders).
+const loose = counts.results.filter((c) => !c.edition_id).reduce((n, c) => n + c.n, 0);
+const releaseFolders = places.childFolders(`rel:${release.id}`).filter((f) => f.type === 'plain');
 const candidates = await sameTitleSongs(tracks);
 const songTitles = new Map<string, string>();
 if (tracks.length) {
@@ -116,7 +117,7 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
     {t(RELEASE_KIND_LABELS[release.kind])} · {release.release_date ?? t('日期未知')} ·
     <a href={`/admin/releases/${release.id}/preview`}>{t('预览公开页')}</a> ·
     <a href={`/admin/history?release=${release.id}`}>{t('这个作品的修改记录')}</a> ·
-    <a href={`/admin/inbox?state=all&loc=rel:${release.id}`}>{t('在整理台查看')}</a>
+    <a href={`/admin/inbox?loc=rel:${release.id}`}>{t('在整理台打开这个作品的文件夹')}</a>
   </p>
 
   <h2 id="editions">{t('版本')}</h2>
@@ -137,7 +138,7 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
               <td>{e.release_date ?? ''}</td>
               <td><span class={`chip ${e.status}`}>{t(EDITION_STATUS_LABELS[e.status])}</span></td>
               <td class="num">{trackCount.get(e.id) ?? 0}{e.track_count && e.track_count !== (trackCount.get(e.id) ?? 0) ? <span class="muted"> / {e.track_count}</span> : null}</td>
-              <td class="num"><a href={`/admin/inbox?state=all&loc=ed:${e.id}`}>{filesIn(e.id)}</a></td>
+              <td class="num"><a href={`/admin/inbox?loc=ed:${e.id}`}>{filesIn(e.id)}</a></td>
               <td>{ids.musicbrainz_release && <a href={`https://musicbrainz.org/release/${ids.musicbrainz_release}`} target="_blank" rel="noopener" title="MusicBrainz">MB</a>}</td>
             </tr>
           );
@@ -147,9 +148,9 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
           <tr>
             <td colspan="5" class="muted">
               {t('相关资料（不属于某个版本）')}
-              {releaseFolders.map((f) => <> · <a href={`/admin/inbox?state=all&loc=fd:${f.id}`}>{f.name}</a></>)}
+              {releaseFolders.map((f) => <> · <a href={`/admin/inbox?loc=fd:${f.id}`}>{f.name}</a></>)}
             </td>
-            <td class="num"><a href={`/admin/inbox?state=all&loc=rel:${release.id}`}>{loose}</a></td>
+            <td class="num"><a href={`/admin/inbox?loc=rel:${release.id}&sub=1`}>{loose}</a></td>
             <td></td>
           </tr>
         )}
@@ -259,10 +260,10 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
   <form method="post" class="panel">
     <input type="hidden" name="section" value="tracks" />
     <input type="hidden" name="anchor" value="tracks" />
-    <p class="muted" set:html={translateHtml(lang, '这个作品各版本出现过的每一首（取并集）。各版的曲目顺序、曲名差异和标签在版本页编辑；这里改条目本身的标题、版本说明和所属单曲。同一首曲在别的作品里的版本在<a href="/admin/songs">单曲</a>页合并。')} />
+    <p class="muted" set:html={translateHtml(lang, '这个作品各版本出现过的每一首（取并集）。各版的曲目顺序、曲名差异和标签在版本页编辑；这里改条目本身的标题、版本说明和所属乐曲。同一首曲在别的作品里的版本在<a href="/admin/songs">乐曲</a>页合并。')} />
     <table class="grid track-table" id="track-table">
       <thead>
-        <tr><th></th><th>{t('碟')}</th><th class="num">{t('序号')}</th><th>{t('标题')}</th><th>{t('版本说明')}</th><th>{t('时长')}</th><th>{t('单曲')}</th><th>{t('备注')}</th><th>{t('删除')}</th></tr>
+        <tr><th></th><th>{t('碟')}</th><th class="num">{t('序号')}</th><th>{t('标题')}</th><th>{t('版本说明')}</th><th>{t('时长')}</th><th>{t('乐曲')}</th><th>{t('备注')}</th><th>{t('删除')}</th></tr>
       </thead>
       <tbody>
         {
@@ -277,10 +278,10 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
               <td>
                 <select name="song">
                   <option value="">{x.song_id ? songTitles.get(x.song_id) ?? x.song_id : t('（无）')}</option>
-                  {(candidates.get(x.id) ?? []).map((s) => <option value={s.id}>{t('改为同名单曲：{title}（{n} 个版本）', { title: s.title, n: s.n })}</option>)}
-                  <option value="new">{t('拆成独立的新单曲')}</option>
+                  {(candidates.get(x.id) ?? []).map((s) => <option value={s.id}>{t('改为同名乐曲：{title}（{n} 个版本）', { title: s.title, n: s.n })}</option>)}
+                  <option value="new">{t('拆成独立的新乐曲')}</option>
                 </select>
-                {x.song_id && <a href={`/admin/songs/${x.song_id}`} title={t('单曲页')}>↗</a>}
+                {x.song_id && <a href={`/admin/songs/${x.song_id}`} title={t('乐曲页')}>↗</a>}
               </td>
               <td><input type="text" name="track_note" value={x.note ?? ''} size="10" /></td>
               <td><input type="checkbox" name="remove" value={x.id} aria-label={t('删除这一行')} /></td>
@@ -298,7 +299,7 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
         <td><input type="text" name="title" style="width:100%" placeholder={t('新曲目标题')} /></td>
         <td><input type="text" name="version_label" size="10" /></td>
         <td><input type="text" name="duration" size="5" placeholder="4:32" /></td>
-        <td><select name="song"><option value="new">{t('新建单曲')}</option></select></td>
+        <td><select name="song"><option value="new">{t('新建乐曲')}</option></select></td>
         <td><input type="text" name="track_note" size="10" /></td>
         <td></td>
       </tr>

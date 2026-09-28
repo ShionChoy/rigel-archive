@@ -1,23 +1,42 @@
 ---
+// 整理台: an explorer over the archive. Left: fixed entries, 快速访问, 智能文件夹, the folder tree (eras,
+// releases and editions are folders of their type) and 按来源浏览. Middle: the open folder (subfolders
+// first, then files) or list. Right: the inspector. scripts/desk.ts adds selection, the right-click menu,
+// drag and drop, the keyboard and loading without page reloads; everything also works as plain links.
+import { env } from 'cloudflare:workers';
 import Admin from '../../layouts/Admin.astro';
-import DirTree from '../../components/DirTree.astro';
-import LocTree from '../../components/LocTree.astro';
+import Dialogs from '../../components/desk/Dialogs.astro';
+import FolderIcon from '../../components/desk/FolderIcon.astro';
+import FolderTree from '../../components/desk/FolderTree.astro';
+import Inspector from '../../components/desk/Inspector.astro';
 import PlacePicker from '../../components/PlacePicker.astro';
-import { ARCHIVE_STATUS_LABELS, FILE_KIND_LABELS, FILE_STATES, FILE_STATE_LABELS, RIGHTS, RIGHTS_LABELS, ROLE_LABELS } from '../../lib/constants';
+import {
+  ARCHIVE_STATUS_LABELS, FILE_KIND_LABELS, FILE_STATES, FILE_STATE_LABELS, RELEASE_KINDS, RELEASE_KIND_LABELS, RIGHTS, RIGHTS_LABELS,
+  ROLE_LABELS, SLOTS, SLOT_LABELS,
+} from '../../lib/constants';
 import { db, parseFormat, parseSuggestion, type FileRow, type Suggestion } from '../../lib/db';
 import { formatBytes, formatSpec, percent, withParams } from '../../lib/format';
 import { keptMessage, originalGone } from '../../lib/deletion';
 import { errorText, summaryText, UserError, type T } from '../../lib/i18n';
-import { applyInboxAction, idsForFilter, parseInboxAction, progress, readFilters, sourceTree, whereClause, type ActionResult, type SourceNode } from '../../lib/inbox';
-import { Places, TOP, UNPLACED, archiveTree, createFolder, deleteFolder, moveFolder, updateFolder } from '../../lib/locations';
-import { deleteView, loadViews, saveView } from '../../lib/views';
+import {
+  FIXED_VIEWS, applyInboxAction, deskOrder, deskWhere, idsForQuery, parseInboxAction, progress, readDeskQuery, viewCounts,
+  type ActionResult, type DeskQuery,
+} from '../../lib/inbox';
+import { Places, folderKey, folderTree, split, type LocNode } from '../../lib/locations';
+import { guessRelease, loadQuickAccess } from '../../lib/folders';
+import { ORIGINS, PRESETS, RULE_FIELDS, RULE_OPS, SUGGEST_KINDS, loadSmartFolders, presetOf, type RuleSet } from '../../lib/smart';
+import { EDITION_PROBLEMS, editionProblems, type EditionProblem } from '../../lib/checks';
+import { folderView, trashBatches } from '../../lib/desk';
+import { derivedFor } from '../../lib/processing';
+import { imageSrc } from '../../lib/media';
+import { graceDays } from '../../lib/storage';
 
-const PAGE_SIZE = 300;
+const PAGE_SIZE = 200;
 const url = Astro.url;
-const filters = readFilters(url.searchParams);
 const { t } = Astro.locals;
 const actor = Astro.locals.admin!.email;
 const wantsJson = (Astro.request.headers.get('accept') ?? '').includes('application/json');
+const database = db();
 
 /** The message shown after an action, in the admin's language. */
 function resultMessage(r: ActionResult, deleting: boolean, tr: T): string {
@@ -36,46 +55,23 @@ function resultMessage(r: ActionResult, deleting: boolean, tr: T): string {
   return `${head}${skipped}${low}${refused}${r.kept ? keptMessage(r.kept, tr) : ''}`;
 }
 
+// ---------------------------------------------------------------- actions on files (JSON from the page's script, or a plain form)
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
-  const section = String(form.get('section') ?? '');
   const back = (params: Record<string, string | null>) => Astro.redirect(withParams(url, { msg: null, err: null, undo: null, ...params }), 303);
   try {
-    if (section === 'folder_new') {
-      const id = await createFolder(actor, String(form.get('under') ?? ''), String(form.get('name') ?? ''), t);
-      return back({ loc: `fd:${id}`, state: 'all', dir: null, page: null, msg: t('已新建文件夹') });
-    }
-    if (section === 'folder_edit') {
-      const id = String(form.get('folder') ?? '');
-      const n = await updateFolder(actor, id, {
-        name: String(form.get('name') ?? ''),
-        description: String(form.get('description') ?? ''),
-        readme_file_id: String(form.get('readme') ?? ''),
-      }, t);
-      return back({ msg: n ? t('已保存') : t('没有改动') });
-    }
-    if (section === 'folder_move') {
-      await moveFolder(actor, String(form.get('folder') ?? ''), String(form.get('target') ?? ''), t);
-      return back({ msg: t('已移动文件夹') });
-    }
-    if (section === 'folder_delete') {
-      const parent = await deleteFolder(actor, String(form.get('folder') ?? ''), t);
-      return back({ loc: parent, page: null, msg: t('已删除文件夹') });
-    }
-    if (section === 'view_save') {
-      await saveView(actor, String(form.get('name') ?? ''), String(form.get('query') ?? ''));
-      return back({ msg: t('已保存筛选') });
-    }
-    if (section === 'view_delete') {
-      await deleteView(actor, String(form.get('view') ?? ''));
-      return back({ msg: t('已删除保存的筛选') });
-    }
     const action = parseInboxAction(form);
     const places = await Places.load();
-    const ids = form.get('scope') === 'filter' ? await idsForFilter(filters, places) : form.getAll('ids').map(String);
+    let ids = form.getAll('ids').map(String);
+    if (form.get('scope') === 'filter') {
+      const q = readDeskQuery(url.searchParams, places);
+      const smart = q.view.startsWith('sf:') ? (await loadSmartFolders()).find((s) => s.id === q.view.slice(3)) : null;
+      const preset = q.view.startsWith('p:') ? presetOf(q.view.slice(2)) : undefined;
+      ids = await idsForQuery(q, places, smart, preset?.ids ? await preset.ids() : null);
+    }
     if (ids.length === 0) throw new UserError('没有选中文件');
     const r = await applyInboxAction(actor, ids, action, t);
-    const msg = resultMessage(r, action.action === 'delete', t);
+    const msg = action.action === 'rename' && !r.changed ? t('没有改动') : resultMessage(r, ['delete', 'discard', 'note', 'rename'].includes(action.action), t);
     if (wantsJson) return new Response(JSON.stringify({ ok: true, msg, batch: r.batchId, changed: r.changed }), { headers: { 'content-type': 'application/json' } });
     return back({ msg, undo: r.batchId });
   } catch (e) {
@@ -85,729 +81,517 @@ if (Astro.request.method === 'POST') {
   }
 }
 
-const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
-const treeTab = url.searchParams.get('tree') === 'source' ? 'source' : 'archive';
+// ---------------------------------------------------------------- what to show
 const places = await Places.load();
-const loc = filters.loc && places.exists(filters.loc) ? filters.loc : '';
-const groupParam = url.searchParams.get('group');
-const group = groupParam === 'suggest' || groupParam === 'dir' || groupParam === 'place' ? groupParam : loc && loc !== UNPLACED ? 'place' : 'dir';
-const SUGGESTED = "json_extract(suggest, '$.release_id')";
-const w = whereClause(filters, places);
-const database = db();
+const q: DeskQuery = readDeskQuery(url.searchParams, places);
+const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+const smartFolders = await loadSmartFolders();
+const smart = q.view.startsWith('sf:') ? smartFolders.find((s) => s.id === q.view.slice(3)) ?? null : null;
+const preset = q.view.startsWith('p:') ? presetOf(q.view.slice(2)) : undefined;
+const folder = q.loc ? places.folderOf(q.loc) ?? null : null;
+const presetIds = preset?.ids ? await preset.ids() : null;
+const w = deskWhere(q, places, smart, presetIds);
+const listsFiles = q.view !== 'trash' && !preset?.editions;
 
 type Row = Pick<
   FileRow,
-  'id' | 'dir' | 'name' | 'size' | 'kind' | 'rights' | 'state' | 'release_id' | 'edition_id' | 'folder_id' | 'slot' | 'suggest' | 'note' | 'sha256' | 'format' | 'origin' | 'dup_of' | 'sealed' | 'role'
-> & {
-  copies: number;
-  same_audio: number;
-  gone: number;
-  old: number;
-  recordings: number;
-};
+  'id' | 'dir' | 'name' | 'download_name' | 'ext' | 'size' | 'kind' | 'rights' | 'state' | 'release_id' | 'edition_id' | 'folder_id' | 'slot' | 'suggest' | 'note'
+  | 'sha256' | 'format' | 'origin' | 'dup_of' | 'sealed' | 'role' | 'blob_key' | 'created_at'
+> & { copies: number; same_audio: number; gone: number; old: number; recordings: number };
 
-const order = group === 'suggest' ? `${SUGGESTED} IS NULL, ${SUGGESTED}, dir, name`
-  : group === 'place' ? 'release_id IS NULL, release_id, edition_id, folder_id, dir, name' : 'dir, name';
-const [totals, rowsResult, stateCounts, tree, source, overall, views] = await Promise.all([
-  database.prepare(`SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM files ${w.sql}`).bind(...w.binds).first<{ n: number; bytes: number }>(),
-  database
-    .prepare(
-      `SELECT id, dir, name, size, kind, rights, state, release_id, edition_id, folder_id, slot, suggest, note, sha256, format,
-              origin, dup_of, sealed, role, ${originalGone('files')} AS gone,
-              EXISTS (SELECT 1 FROM files n WHERE n.replaces = files.id) AS old,
-              CASE WHEN sha256 IS NULL THEN 1 ELSE (SELECT count(*) FROM files f2 WHERE f2.sha256 = files.sha256) END AS copies,
-              CASE WHEN pcm_md5 IS NULL THEN 1
-                   ELSE (SELECT count(DISTINCT sha256) FROM files f3 WHERE f3.pcm_md5 = files.pcm_md5) END AS same_audio,
-              CASE WHEN sha256 IS NULL THEN 0
-                   ELSE (SELECT count(*) FROM acoustic_matches m WHERE m.a = files.sha256 OR m.b = files.sha256) END AS recordings
-       FROM files ${w.sql} ORDER BY ${order} LIMIT ? OFFSET ?`,
-    )
-    .bind(...w.binds, PAGE_SIZE, (page - 1) * PAGE_SIZE)
-    .all<Row>(),
-  database.prepare('SELECT state, count(*) AS n FROM files WHERE sealed_in IS NULL GROUP BY state').all<{ state: string; n: number }>(),
-  treeTab === 'archive' ? archiveTree(places, t) : Promise.resolve([]),
-  sourceTree(treeTab === 'archive'),
+const [totals, rowsResult, counts, tree, quick, problems, overall] = await Promise.all([
+  listsFiles
+    ? database.prepare(`SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM files ${w.sql}`).bind(...w.binds).first<{ n: number; bytes: number }>()
+    : Promise.resolve({ n: 0, bytes: 0 }),
+  listsFiles
+    ? database
+      .prepare(
+        `SELECT id, dir, name, download_name, ext, size, kind, rights, state, release_id, edition_id, folder_id, slot, suggest, note, sha256, format,
+                origin, dup_of, sealed, role, blob_key, created_at, ${originalGone('files')} AS gone,
+                EXISTS (SELECT 1 FROM files n WHERE n.replaces = files.id) AS old,
+                CASE WHEN sha256 IS NULL THEN 1 ELSE (SELECT count(*) FROM files f2 WHERE f2.sha256 = files.sha256) END AS copies,
+                CASE WHEN pcm_md5 IS NULL THEN 1
+                     ELSE (SELECT count(DISTINCT sha256) FROM files f3 WHERE f3.pcm_md5 = files.pcm_md5) END AS same_audio,
+                CASE WHEN sha256 IS NULL THEN 0
+                     ELSE (SELECT count(*) FROM acoustic_matches m WHERE m.a = files.sha256 OR m.b = files.sha256) END AS recordings
+         FROM files ${w.sql} ORDER BY ${deskOrder(q)} LIMIT ? OFFSET ?`,
+      )
+      .bind(...w.binds, PAGE_SIZE, (page - 1) * PAGE_SIZE)
+      .all<Row>()
+    : Promise.resolve({ results: [] as Row[] }),
+  viewCounts(),
+  folderTree(places, t),
+  loadQuickAccess(actor),
+  editionProblems(),
   progress(),
-  loadViews(actor),
 ]);
-
-const counts = new Map(stateCounts.results.map((r) => [r.state, r.n]));
-const allCount = stateCounts.results.reduce((n, r) => n + r.n, 0);
+const rows = rowsResult.results;
 const total = totals?.n ?? 0;
 const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-const open = new Set(loc ? places.chain(loc) : []);
-const placeOf = (r: Row) => places.keyOf(r);
-const placeLink = (key: string) => withParams(url, { loc: key, dir: null, state: 'all', page: null });
-/** The place's own name, or «release / edition» for an edition (the full path is in the tooltip). */
-const shortPath = (key: string) => {
-  const chain = places.chain(key);
-  const last = chain.at(-1)!;
-  return last.startsWith('ed:') ? chain.slice(-2).map((k) => places.name(k, t)).join(' / ') : places.name(last, t);
-};
 
-// Rows come grouped by original folder, by place, or by the release the rules suggest.
+// Thumbnails for pictures and videos in the list (the processing program's WebP previews and posters).
+const media = rows.filter((r) => r.kind === 'image' || r.kind === 'video');
+const derived = media.length ? await derivedFor(database, media.map((r) => r.sha256)) : new Map();
+const thumbOf = (r: Row): string | null => {
+  const d = r.sha256 ? derived.get(r.sha256) : undefined;
+  if (r.kind === 'image') return imageSrc(r.blob_key ? `/admin/media/${r.blob_key}` : null, d, 240);
+  if (r.kind === 'video') {
+    const poster = d?.get('poster');
+    return poster ? `/admin/media/${poster.key}` : null;
+  }
+  return null;
+};
+// A folder of mostly pictures opens as a grid (the page's script remembers the admin's own choice per folder).
+const layout = q.loc && rows.length > 0 && media.length / rows.length > 0.6 ? 'grid' : 'list';
+
+// The tree: open on the way to the open folder; nodes by key for counts; editions with problems.
+const byKey = new Map<string, LocNode>();
+const index = (nodes: LocNode[]) => nodes.forEach((n) => { byKey.set(n.key, n); index(n.children); });
+index(tree);
+const open = new Set(q.loc ? places.chain(q.loc) : []);
+const editionOfFolder = new Map([...places.folders.values()].filter((f) => f.edition_id).map((f) => [f.id, f.edition_id!]));
+const problemTexts = new Map([...problems].map(([id, list]) => [id, list.map((p) => EDITION_PROBLEMS[p])]));
+const quickFolders = quick.map((id) => places.folders.get(id)).filter((f) => !!f);
+
+const [trash, problemEditions, openFolder, readme] = await Promise.all([
+  q.view === 'trash' ? trashBatches(graceDays(env.STORAGE_GRACE_DAYS)) : Promise.resolve([]),
+  Promise.resolve(preset?.editions ? [...problems].map(([id, list]) => ({ folder: places.editionFolder(id), list })).filter((e) => !!e.folder) : []),
+  folder ? folderView(places, folder.id, t, quick.includes(folder.id)) : Promise.resolve(null),
+  folder?.readme_file_id ? database.prepare('SELECT id, name, blob_key FROM files WHERE id = ?').bind(folder.readme_file_id).first<{ id: string; name: string; blob_key: string | null }>() : Promise.resolve(null),
+]);
+
+// ---------------------------------------------------------------- names and links
+const viewName = (view: string): string => {
+  if (view === 'all') return t('全部');
+  if (view === 'unplaced') return t('未归档');
+  if (view === 'suggested') return t('有建议待确认');
+  if (view === 'ignored') return t('已忽略');
+  if (view === 'trash') return t('回收站');
+  if (view.startsWith('p:')) return t(presetOf(view.slice(2))?.name ?? view);
+  if (view.startsWith('sf:')) return smartFolders.find((s) => s.id === view.slice(3))?.name ?? t('智能文件夹');
+  return view;
+};
+const title = folder ? places.folderName(folder, t) : viewName(q.view);
+const here = (params: Record<string, string | null>) => withParams(url, { page: null, msg: null, err: null, undo: null, ...params });
+const folderHref = (key: string) => `/admin/inbox?loc=${key}`;
+const viewHref = (view: string) => `/admin/inbox?view=${encodeURIComponent(view)}`;
+const dirParts = q.dir ? q.dir.split('/') : [];
+const ruleText = (set: RuleSet) =>
+  set.rules.map((r) => {
+    const field = RULE_FIELDS[r.field];
+    let value = r.value ?? '';
+    if (field?.value === 'kind') value = t(FILE_KIND_LABELS[value] ?? value);
+    if (field?.value === 'rights') value = t(RIGHTS_LABELS[value as keyof typeof RIGHTS_LABELS] ?? value);
+    if (field?.value === 'state') value = t(FILE_STATE_LABELS[value as keyof typeof FILE_STATE_LABELS] ?? value);
+    if (field?.value === 'origin') value = t(ORIGINS[value as keyof typeof ORIGINS] ?? value);
+    if (field?.value === 'suggest') value = t(SUGGEST_KINDS[value as keyof typeof SUGGEST_KINDS] ?? value);
+    if (field?.value === 'release') value = places.releaseLabel(value);
+    if (field?.value === 'folder') value = places.path(`fd:${value}`, t) || value;
+    return `${t(field?.label ?? r.field)} ${t(RULE_OPS[r.op] ?? r.op)} ${value}`.trim();
+  });
+
+// Rows come in groups: by original folder when sorted by path, by suggested release in 有建议待确认.
 const groups: { key: string; label: string; href: string | null; rows: Row[] }[] = [];
-for (const row of rowsResult.results) {
+for (const row of rows) {
   const s = parseSuggestion(row.suggest);
-  const key = group === 'suggest' ? s?.release_id ?? '' : group === 'place' ? placeOf(row) ?? '' : row.dir;
+  const key = q.view === 'suggested' ? s?.release_id ?? '' : q.sort === 'path' ? row.dir : '';
   const last = groups.at(-1);
   if (last && last.key === key) {
     last.rows.push(row);
     continue;
   }
-  if (group === 'suggest') {
-    groups.push({
-      key, rows: [row], href: key ? `/admin/releases/${key}` : null,
-      label: key ? t('建议：{release}', { release: places.releaseLabel(key) }) : t('没有作品建议'),
-    });
-  } else if (group === 'place') {
-    groups.push({ key, rows: [row], href: key ? placeLink(key) : null, label: key ? places.path(key, t) : t('未归档') });
-  } else groups.push({ key, label: row.dir || t('（根目录）'), href: withParams(url, { dir: row.dir, page: null }), rows: [row] });
+  if (q.view === 'suggested') {
+    groups.push({ key, rows: [row], href: key ? `/admin/releases/${key}` : null, label: key ? t('建议：{release}', { release: places.releaseLabel(key) }) : t('没有作品建议') });
+  } else if (q.sort === 'path') {
+    groups.push({ key, label: row.dir || t('（根目录）'), href: here({ dir: row.dir, loc: null, view: q.loc ? 'all' : q.view }), rows: [row] });
+  } else groups.push({ key, label: '', href: null, rows: [row] });
 }
 
 /** What a suggestion would do, in words (the place is only named: editions and folders are made on accept). */
 function suggestionPlace(s: Suggestion): string | null {
   const parts: string[] = [];
-  if (s.release_id) parts.push(places.releaseLabel(s.release_id));
+  if (s.place) parts.push(places.path(s.place, t) || s.place);
+  else if (s.release_id) parts.push(places.releaseLabel(s.release_id));
   else if (s.era_id) parts.push(places.eras.get(s.era_id)?.name ?? s.era_id);
   if (s.slot) parts.push(places.editionLabel({ slot: s.slot, name: s.edition ?? '' }, t));
   if (s.folder) parts.push(s.folder.split('/').join(' / '));
   return parts.length ? parts.join(' / ') : null;
 }
+const placeOf = (r: Row) => places.keyOf(r);
+/** The folder's own name, or «release / edition» for an edition (the full path is in the tooltip). */
+const shortPath = (key: string) => {
+  const chain = places.chain(key);
+  const last = places.folderOf(chain.at(-1)!);
+  return last?.edition_id ? chain.slice(-2).map((k) => places.name(k, t)).join(' / ') : places.name(chain.at(-1)!, t);
+};
+const subfolders = folder ? places.children(folder.id) : [];
+const showPlace = !q.loc || q.sub;
 
-const tabs = [...FILE_STATES.map((s) => ({ id: s, label: t(FILE_STATE_LABELS[s]), n: counts.get(s) ?? 0 })), { id: 'all', label: t('全部'), n: allCount }];
+// Everything the page's script needs to know about the tree (for the picker, drag and drop and menus).
+const deskData = {
+  loc: q.loc,
+  view: q.view,
+  dir: q.dir,
+  sub: q.sub,
+  total,
+  layout,
+  folders: places.options(t).map((o) => {
+    const f = places.folders.get(o.id)!;
+    return { id: o.id, parent: o.parent, kind: o.kind, name: o.name, path: o.path, release: f.release_id ?? undefined, edition: f.edition_id ?? undefined };
+  }),
+  quick,
+  smart: smartFolders.map((s) => ({ id: s.id, name: s.name, rules: s.rules })),
+  releases: [...places.releases.values()].map((r) => ({ id: r.id, label: places.releaseLabel(r.id) })).sort((a, b) => a.label.localeCompare(b.label, 'ja')),
+  ruleFields: Object.entries(RULE_FIELDS).map(([id, f]) => ({ id, label: t(f.label), ops: f.ops, value: f.value })),
+  ruleOps: Object.fromEntries(Object.entries(RULE_OPS).map(([k, v]) => [k, t(v)])),
+  kinds: Object.entries(FILE_KIND_LABELS).map(([id, label]) => ({ id, label: t(label) })),
+  rights: RIGHTS.map((id) => ({ id, label: t(RIGHTS_LABELS[id]) })),
+  states: FILE_STATES.map((id) => ({ id, label: t(FILE_STATE_LABELS[id]) })),
+  origins: Object.entries(ORIGINS).map(([id, label]) => ({ id, label: t(label) })),
+  suggestKinds: Object.entries(SUGGEST_KINDS).map(([id, label]) => ({ id, label: t(label) })),
+  guess: Object.fromEntries([...places.folders.values()].filter((f) => f.type === 'plain').map((f) => [f.id, guessRelease(f.name)])),
+  slots: SLOTS.map((id) => ({ id, label: t(SLOT_LABELS[id]) })),
+  releaseKinds: RELEASE_KINDS.map((id) => ({ id, label: t(RELEASE_KIND_LABELS[id]) })),
+};
+const statusText: Record<string, string> = { missing: '缺档', partial: '部分缺档', planned: '预定', unknown: '待确认' };
 const done = overall.total - overall.left;
-
-// The selected folder (its description, readme and actions), release or edition.
-const locKind = loc.split(':')[0];
-const folder = locKind === 'fd' ? places.folders.get(loc.slice(3)) : undefined;
-const folderFiles = folder
-  ? (await database.prepare("SELECT id, name, ext FROM files WHERE folder_id = ? AND kind = 'text' ORDER BY name").bind(folder.id).all<{ id: string; name: string; ext: string }>()).results
-  : [];
-const readme = folder?.readme_file_id
-  ? await database.prepare('SELECT id, name, blob_key FROM files WHERE id = ?').bind(folder.readme_file_id).first<{ id: string; name: string; blob_key: string | null }>()
-  : null;
-const edition = locKind === 'ed' ? places.editions.get(loc.slice(3)) : undefined;
-const viewQuery = (() => {
-  const q = new URLSearchParams(url.search);
-  for (const k of ['msg', 'err', 'undo', 'page']) q.delete(k);
-  return q.toString();
-})();
-const keepDir = filters.dir || null;
-// Under 未归档 every file is still to organize: show plain counts.
-const countsOnly = (nodes: SourceNode[]): SourceNode[] => nodes.map((n) => ({ ...n, left: undefined as unknown as number, children: countsOnly(n.children as SourceNode[]) }));
 ---
 
 <Admin title={t('整理台')} wide>
-  <div class="progress-row">
-    <div class="progress" title={t('已整理 = 已归档、已发布或已忽略')}>
-      <div class="bar"><span style={`width:${overall.total ? (done / overall.total) * 100 : 0}%`}></span></div>
-      <span>{t('已整理 {done} / {total}（{pct}）· 待整理 {left}', { done, total: overall.total, pct: percent(overall.total ? done / overall.total : 0), left: overall.left })}</span>
-      {overall.hidden > 0 && <span class="muted"> · {t('另有 {n} 个文件在整体收藏的压缩包里，不单独整理', { n: overall.hidden })}</span>}
-    </div>
-    <div class="tops">
-      {overall.tops.map((top) => (
-        <a class:list={['chip', { collected: top.left === 0 }]} href={withParams(url, { tree: 'source', dir: top.name, loc: null, page: null })} title={t('待整理 {left} / 共 {n}', { left: top.left, n: top.n })}>
-          {top.name} {percent(top.n ? (top.n - top.left) / top.n : 1)}
-        </a>
-      ))}
-    </div>
-  </div>
+  <div id="desk" class="desk" data-loc={q.loc} data-view={q.view} data-layout={layout}>
+    <aside id="desk-side" class="desk-side" aria-label={t('位置')}>
+      <nav class="fixed">
+        {FIXED_VIEWS.map((v) => (
+          <a class:list={['entry', { current: !q.loc && q.view === v && !q.dir }]} href={viewHref(v)} data-nav data-view={v} data-drop={v === 'unplaced' || v === 'ignored' || v === 'trash' ? v : undefined}>
+            <span>{viewName(v)}</span>
+            {v !== 'trash' && <span class="n">{counts[v as Exclude<typeof v, 'trash'>]}</span>}
+          </a>
+        ))}
+        <div class="progress mini" title={t('已整理 = 已归档、已发布或已忽略')}>
+          <div class="bar"><span style={`width:${overall.total ? (done / overall.total) * 100 : 0}%`}></span></div>
+          <span class="muted small">{t('已整理 {pct}', { pct: percent(overall.total ? done / overall.total : 0) })}</span>
+        </div>
+      </nav>
 
-  <div class="filters">
-    {
-      tabs.map((tab) => (
-        <a class:list={['button', { primary: filters.state === tab.id }]} href={withParams(url, { state: tab.id, page: null })}>
-          {tab.label} <span class="n">{tab.n}</span>
-        </a>
-      ))
-    }
-    <span class="sep"></span>
-    {views.map((v) => (
-      <span class="view-chip">
-        <a href={`/admin/inbox?${v.query}`}>{v.name}</a>
-        <form method="post" class="inline">
-          <input type="hidden" name="section" value="view_delete" />
-          <input type="hidden" name="view" value={v.id} />
-          <button type="submit" class="link" title={t('删除这个保存的筛选')} aria-label={t('删除')}>×</button>
-        </form>
-      </span>
-    ))}
-    <details class="save-view">
-      <summary class="button">{t('保存当前筛选')}</summary>
-      <form method="post" class="inline">
-        <input type="hidden" name="section" value="view_save" />
-        <input type="hidden" name="query" value={viewQuery} />
-        <input type="text" name="name" required maxlength="40" placeholder={t('名称，如「Bandcamp 待整理」')} />
-        <button type="submit">{t('保存')}</button>
-      </form>
-    </details>
-  </div>
+      <section class="side-sec quick" data-drop="quick">
+        <h3>{t('快速访问')}</h3>
+        {quickFolders.length === 0 && <p class="muted small">{t('右键文件夹「加入快速访问」，或把文件夹拖到这里。')}</p>}
+        <ul>
+          {quickFolders.map((f) => (
+            <li>
+              <div class:list={['frow', 'quick-row', { current: q.loc === folderKey(f!.id) }]} data-folder={f!.id} data-kind={f!.type} data-drop="folder" data-quick draggable="true">
+                <FolderIcon kind={f!.type} color={f!.color} />
+                <a class="fname" href={folderHref(folderKey(f!.id))} data-nav title={places.path(folderKey(f!.id), t)}>{places.folderName(f!, t)}</a>
+                <span class="n">{byKey.get(folderKey(f!.id))?.n || ''}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </section>
 
-  <form class="filters" method="get">
-    <input type="hidden" name="state" value={filters.state} />
-    <input type="hidden" name="dir" value={filters.dir} />
-    <input type="hidden" name="loc" value={loc} />
-    <input type="hidden" name="tree" value={treeTab} />
-    <label>{t('搜索路径')} <input type="search" name="q" value={filters.q} placeholder={t('文件名或目录')} /></label>
-    <label>{t('类型')}
-      <select name="kind">
-        <option value="">{t('全部')}</option>
-        {Object.entries(FILE_KIND_LABELS).map(([k, v]) => <option value={k} selected={filters.kind === k}>{t(v)}</option>)}
-      </select>
-    </label>
-    <label>{t('建议')}
-      <select name="sug">
-        <option value="">{t('全部')}</option>
-        <option value="place" selected={filters.sug === 'place'}>{t('有位置建议')}</option>
-        <option value="release" selected={filters.sug === 'release'}>{t('有作品建议')}</option>
-        <option value="seal" selected={filters.sug === 'seal'}>{t('建议整体收藏')}</option>
-        <option value="rights" selected={filters.sug === 'rights'}>{t('只有权属建议')}</option>
-        <option value="none" selected={filters.sug === 'none'}>{t('没有建议')}</option>
-      </select>
-    </label>
-    <label>{t('压缩包')}
-      <select name="archives">
-        <option value="">{t('全部')}</option>
-        <option value="only" selected={filters.archives === 'only'}>{t('只看压缩包与光盘镜像')}</option>
-        <option value="sealed" selected={filters.archives === 'sealed'}>{t('只看整体收藏的包')}</option>
-      </select>
-    </label>
-    <label>{t('来源')}
-      <select name="origin">
-        <option value="">{t('全部')}</option>
-        <option value="nas" selected={filters.origin === 'nas'}>{t('合辑')}</option>
-        <option value="upload" selected={filters.origin === 'upload'}>{t('后台上传')}</option>
-        <option value="gone" selected={filters.origin === 'gone'}>{t('原件已不存在')}</option>
-      </select>
-    </label>
-    <label>{t('权属')}
-      <select name="rights">
-        <option value="">{t('全部')}</option>
-        {RIGHTS.map((r) => <option value={r} selected={filters.rights === r}>{t(RIGHTS_LABELS[r])}</option>)}
-      </select>
-    </label>
-    <label title={t('声学指纹比对：听起来是同一录音的文件（不同编码、母带、剪辑，或整张抓轨里的一段）')}>{t('同一录音')}
-      <select name="acoustic">
-        <option value="">{t('全部')}</option>
-        <option value="any" selected={filters.acoustic === 'any'}>{t('与其他文件是同一录音')}</option>
-        <option value="own" selected={filters.acoustic === 'own'}>{t('与社团自有的文件是同一录音')}</option>
-      </select>
-    </label>
-    <label>{t('分组')}
-      <select name="group">
-        <option value="dir" selected={group === 'dir'}>{t('按原始文件夹')}</option>
-        <option value="place" selected={group === 'place'}>{t('按归档位置')}</option>
-        <option value="suggest" selected={group === 'suggest'}>{t('按建议作品')}</option>
-      </select>
-    </label>
-    <button type="submit">{t('筛选')}</button>
-    {filters.dir && <a href={withParams(url, { dir: null, page: null })}>{t('清除目录：{dir}', { dir: filters.dir })}</a>}
-    {loc && <a href={withParams(url, { loc: null, page: null })}>{t('清除位置：{place}', { place: places.name(loc, t) })}</a>}
-  </form>
+      <section class="side-sec smart">
+        <h3>{t('智能文件夹')} <button type="button" class="icon-button" data-act="smart-new" title={t('新建智能文件夹')} aria-label={t('新建智能文件夹')}>＋</button></h3>
+        <ul>
+          {smartFolders.map((s) => (
+            <li><a class:list={['entry', { current: q.view === `sf:${s.id}` }]} href={viewHref(`sf:${s.id}`)} data-nav data-smart={s.id}><span class="sf-icon" aria-hidden="true">⚙</span>{s.name}</a></li>
+          ))}
+        </ul>
+        <details class="presets" open={!!preset}>
+          <summary class="muted small">{t('预设（{n}）', { n: PRESETS.length })}</summary>
+          <ul>
+            {PRESETS.map((p) => (
+              <li><a class:list={['entry', { current: q.view === `p:${p.key}` }]} href={viewHref(`p:${p.key}`)} data-nav title={t(p.hint)}><span class="sf-icon" aria-hidden="true">⚙</span>{t(p.name)}</a></li>
+            ))}
+          </ul>
+        </details>
+      </section>
 
-  <div class="inbox-layout">
-    <nav class="tree" aria-label={t('目录')}>
-      <div class="tree-tabs" role="tablist">
-        <a role="tab" aria-selected={treeTab === 'archive'} href={withParams(url, { tree: null, page: null })}>{t('归档位置')}</a>
-        <a role="tab" aria-selected={treeTab === 'source'} href={withParams(url, { tree: 'source', loc: loc === UNPLACED ? null : loc || null, page: null })}>{t('原始位置')}</a>
-      </div>
-      {treeTab === 'archive' ? (
-        <>
-          <LocTree nodes={tree} current={loc} open={open} url={url} />
-          <details class="add-folder">
-            <summary class="muted">{t('＋ 顶层文件夹')}</summary>
-            <form method="post" class="inline">
-              <input type="hidden" name="section" value="folder_new" />
-              <input type="hidden" name="under" value={TOP} />
-              <input type="text" name="name" required maxlength="100" placeholder={t('如「第三方资料」')} />
-              <button type="submit">{t('新建')}</button>
-            </form>
-          </details>
-          <div class="unplaced">
-            <a class:list={['loc', { current: loc === UNPLACED && !filters.dir }]} href={withParams(url, { loc: UNPLACED, dir: null, state: 'inbox', page: null })}>{t('未归档')}</a>
-            <span class="n">{source.total}</span>
-            <DirTree nodes={countsOnly(source.nodes)} current={loc === UNPLACED ? filters.dir : ''} url={url} params={{ loc: UNPLACED, state: 'inbox' }} />
-          </div>
-        </>
-      ) : (
-        <>
-          <a class:list={{ current: !filters.dir }} href={withParams(url, { dir: null, page: null })}>{t('全部目录')}</a>
-          <span class="n">{source.left} / {source.total}</span>
-          <DirTree nodes={source.nodes} current={filters.dir} url={url} params={{ tree: 'source' }} />
-        </>
-      )}
-    </nav>
+      <section class="side-sec folders" data-drop="top">
+        <h3>
+          {t('文件夹')}
+          <span>
+            <button type="button" class="icon-button" data-act="expand-all" title={t('展开或收起全部（*）')} aria-label={t('展开或收起全部')}>⇕</button>
+            <button type="button" class="icon-button" data-act="new-folder" data-under="top" title={t('在顶层新建文件夹')} aria-label={t('在顶层新建文件夹')}>＋</button>
+          </span>
+        </h3>
+        <FolderTree nodes={tree} current={q.loc} open={open} problems={problemTexts} editions={editionOfFolder} />
+      </section>
 
-    <div>
-      {
-        loc && loc !== UNPLACED && (
-          <div class="panel loc-head">
-            <div class="crumbs">
-              {places.chain(loc).map((k, i) => (
-                <>{i > 0 && ' / '}<a href={placeLink(k)}>{places.name(k, t)}</a></>
+      <details class="side-sec source" data-source open={!!q.dir}>
+        <summary><h3>{t('按来源浏览')}</h3></summary>
+        <div data-source-body data-dir={q.dir}><p class="muted small">{t('读取中…')}</p></div>
+      </details>
+    </aside>
+
+    <section id="desk-main" class="desk-main">
+      <header id="desk-top" class="desk-top">
+        <button type="button" class="icon-button pane-toggle" data-act="toggle-side" aria-pressed="true" title={t('收起或展开左栏（[）')} aria-label={t('左栏')}>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path class="pane-fill" d="M4.5 3.5h3v13h-3a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z" /><rect x="2.5" y="3.5" width="15" height="13" rx="2" /><path d="M7.5 3.5v13" /></svg>
+        </button>
+        <nav class="crumbs" aria-label={t('位置')}>
+          {folder ? (
+            <>
+              <a href={viewHref('all')} data-nav class="crumb-root">{t('全部')}</a>
+              {places.chain(q.loc).map((k) => (
+                <> <span class="sep">›</span> <a href={folderHref(k)} data-nav data-drop="folder" data-folder={split(k)[1]}>{places.name(k, t)}</a></>
               ))}
-            </div>
-            {locKind === 'rel' && <p><a href={`/admin/releases/${loc.slice(4)}`}>{t('打开作品页（版本、曲目表、封面）')}</a></p>}
-            {edition && (
-              <p>
-                <a href={`/admin/editions/${edition.id}`}>{t('打开版本页（曲目顺序、标签、下载）')}</a>
-                {edition.status !== 'collected' && <span class={`chip ${edition.status}`}>{t(edition.status === 'missing' ? '缺档' : edition.status === 'partial' ? '部分缺档' : edition.status === 'planned' ? '预定' : '待确认')}</span>}
-              </p>
-            )}
-            {folder?.description && <p class="description">{folder.description}</p>}
-            {readme && (
-              <div class="readme">
-                <div class="muted">{t('说明文件：')}<a href={`/admin/files/${readme.id}`}>{readme.name}</a></div>
-                {readme.blob_key && (
-                  <div data-text-src={`/admin/media/${readme.blob_key}`}>
-                    <select hidden><option value="auto" selected>auto</option></select><span data-detected hidden></span>
-                    <pre>{t('读取中…')}</pre>
-                  </div>
-                )}
+            </>
+          ) : (
+            <a href={viewHref(q.view)} data-nav>{viewName(q.view)}</a>
+          )}
+          {dirParts.length > 0 && (
+            <span class="dir-crumbs" title={t('按来源浏览')}>
+              <span class="sep">·</span> {t('来源：')}
+              {dirParts.map((part, i) => <>{i > 0 && ' / '}<a href={here({ dir: dirParts.slice(0, i + 1).join('/') })} data-nav>{part}</a></>)}
+              <a href={here({ dir: null })} data-nav class="clear" title={t('不限来源')} aria-label={t('不限来源')}>×</a>
+            </span>
+          )}
+        </nav>
+        <form class="search" method="get" action="/admin/inbox" data-search>
+          {q.loc && <input type="hidden" name="loc" value={q.loc} />}
+          {!q.loc && <input type="hidden" name="view" value={q.view} />}
+          {q.dir && <input type="hidden" name="dir" value={q.dir} />}
+          {q.sub && <input type="hidden" name="sub" value="1" />}
+          <input type="search" name="q" value={q.q} placeholder={folder ? t('在这个文件夹里搜索') : t('在这里搜索文件名或路径')} aria-label={t('搜索')} />
+        </form>
+        <div class="top-tools">
+          <label class="small">{t('排序')}
+            <select data-param="sort">
+              {([['name', '名称'], ['path', '原始路径'], ['size', '大小'], ['date', '加入时间'], ['kind', '类型']] as const).map(([v, label]) => <option value={v} selected={q.sort === v}>{t(label)}</option>)}
+            </select>
+          </label>
+          <button type="button" class="icon-button" data-act="sort-dir" data-desc={q.desc ? '1' : '0'} title={q.desc ? t('从大到小') : t('从小到大')} aria-label={t('排序方向')}>{q.desc ? '↓' : '↑'}</button>
+          <span class="seg" role="group" aria-label={t('视图')}>
+            <button type="button" data-act="layout" data-layout="list" title={t('列表')} aria-label={t('列表')}>☰</button>
+            <button type="button" data-act="layout" data-layout="grid" title={t('网格')} aria-label={t('网格')}>▦</button>
+          </span>
+          {folder && (
+            <label class="small sub-toggle"><input type="checkbox" data-act="sub" checked={q.sub} /> {t('显示子文件夹内容')}</label>
+          )}
+          <button type="button" class="icon-button" data-act="help" title={t('快捷键（?）')} aria-label={t('快捷键')}>?</button>
+          <button type="button" class="icon-button pane-toggle" data-act="toggle-insp" aria-pressed="true" title={t('收起或展开右栏（]）')} aria-label={t('右栏')}>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path class="pane-fill" d="M12.5 3.5h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-3z" /><rect x="2.5" y="3.5" width="15" height="13" rx="2" /><path d="M12.5 3.5v13" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <div id="desk-content" class="desk-content" tabindex="-1">
+        {folder?.description && <p class="folder-note">{folder.description}</p>}
+        {readme && (
+          <div class="readme">
+            <div class="muted small">{t('说明文件：')}<a href={`/admin/files/${readme.id}`}>{readme.name}</a></div>
+            {readme.blob_key && (
+              <div data-text-src={`/admin/media/${readme.blob_key}`}>
+                <select hidden><option value="auto" selected>auto</option></select><span data-detected hidden></span>
+                <pre>{t('读取中…')}</pre>
               </div>
             )}
-            <div class="loc-actions">
-              <details>
-                <summary class="button">{t('新建子文件夹')}</summary>
-                <form method="post" class="inline">
-                  <input type="hidden" name="section" value="folder_new" />
-                  <input type="hidden" name="under" value={loc} />
-                  <input type="text" name="name" required maxlength="100" />
-                  <button type="submit">{t('新建')}</button>
-                </form>
-              </details>
-              {folder && (
-                <>
-                  <details>
-                    <summary class="button">{t('重命名与说明')}</summary>
-                    <form method="post" class="folder-edit">
-                      <input type="hidden" name="section" value="folder_edit" />
-                      <input type="hidden" name="folder" value={folder.id} />
-                      <label>{t('名称')} <input type="text" name="name" value={folder.name} required maxlength="100" /></label>
-                      <label>{t('说明')} <textarea name="description" rows="3">{folder.description ?? ''}</textarea></label>
-                      <label>{t('说明文件')}
-                        <select name="readme">
-                          <option value="">{t('（无）')}</option>
-                          {folderFiles.map((f) => <option value={f.id} selected={folder.readme_file_id === f.id}>{f.name}</option>)}
-                        </select>
-                      </label>
-                      <span class="muted">{t('说明文件从这个文件夹里的文本文件中选，正文显示在文件夹顶部。')}</span>
-                      <button class="primary" type="submit">{t('保存')}</button>
-                    </form>
-                  </details>
-                  <form method="post" class="inline" id="folder-move-form">
-                    <input type="hidden" name="section" value="folder_move" />
-                    <input type="hidden" name="folder" value={folder.id} />
-                    <input type="hidden" name="target" value="" />
-                    <button type="button" data-folder-move={folder.id}>{t('移动文件夹…')}</button>
-                  </form>
-                  <form method="post" class="inline">
-                    <input type="hidden" name="section" value="folder_delete" />
-                    <input type="hidden" name="folder" value={folder.id} />
-                    <button type="submit" class="danger" disabled={total > 0} title={total > 0 ? t('文件夹里还有文件') : ''}>{t('删除文件夹')}</button>
-                  </form>
-                </>
-              )}
-            </div>
           </div>
-        )
-      }
+        )}
+        {preset && !preset.editions && <p class="view-note muted">{t(preset.hint)}{preset.link && <> · <a href={preset.link.href}>{t(preset.link.label)} ›</a></>}</p>}
 
-      <form id="inbox-form" method="post" action={url.pathname + url.search}>
-        <input type="hidden" name="target" value="" />
-        <input type="hidden" name="new_folder" value="" />
-        <input type="hidden" name="keep" value="__none__" />
-        <p class="muted">
-          {t('共 {n} 个文件，{size}；本页显示 {shown} 个。', { n: total, size: formatBytes(totals?.bytes), shown: rowsResult.results.length })}
-          {' '}{t('勾选后用底部工具栏处理，也可以把勾选的行拖到左侧的作品、版本或文件夹上。')}
-        </p>
-        <table class="grid inbox-grid">
-          <thead>
-            <tr>
-              <th><input type="checkbox" id="select-all" aria-label={t('全选本页')} /></th>
-              <th>{t('文件')}</th>
-              <th class="num">{t('大小')}</th>
-              <th>{t('规格')}</th>
-              <th>{t('脚本建议')}</th>
-              <th>{t('归档位置')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {
-              groups.map((g, gi) => (
+        {listsFiles && (rows.length > 0 || subfolders.length > 0) && (
+          <div class="items-head" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <a href={here({ sort: 'name', desc: q.sort === 'name' && !q.desc ? '1' : null })} data-nav>{t('名称')}</a>
+            <a href={here({ sort: 'size', desc: q.sort === 'size' && !q.desc ? '1' : null })} data-nav class="num">{t('大小')}</a>
+            <span>{t('规格')}</span>
+            <span>{showPlace ? t('建议 / 位置') : t('建议')}</span>
+            <span></span>
+          </div>
+        )}
+
+        {folder && (
+          <div class="tiles" role="list" aria-label={t('子文件夹')}>
+            {subfolders.map((f) => {
+              const node = byKey.get(folderKey(f.id));
+              return (
+                <div class:list={['tile', 'item-folder']} role="listitem" tabindex="-1" data-folder={f.id} data-kind={f.type} data-drop="folder" draggable="true">
+                  <FolderIcon kind={f.type} color={f.color} size={28} />
+                  <a class="tname" href={folderHref(folderKey(f.id))} data-nav tabindex="-1">{places.folderName(f, t)}</a>
+                  <span class="muted small">
+                    {t('{n} 个', { n: node?.n ?? 0 })}
+                    {node?.status && statusText[node.status] && <span class={`chip ${node.status}`}>{t(statusText[node.status])}</span>}
+                  </span>
+                  <button type="button" class="more" data-act="menu" aria-label={t('更多操作')} tabindex="-1">⋯</button>
+                </div>
+              );
+            })}
+            <button type="button" class="tile new" data-act="new-folder" data-under={q.loc} title="Ctrl+Shift+N">
+              <span aria-hidden="true">＋</span> {t('新建文件夹')}
+            </button>
+          </div>
+        )}
+
+        {q.view === 'trash' && (
+          <div class="trash">
+            <p class="muted">{t('最近删除的文件。存储里的内容保留 {days} 天，在此之前「恢复」就是撤销那次删除。', { days: graceDays(env.STORAGE_GRACE_DAYS) })}</p>
+            {trash.length === 0 && <p class="empty">{t('回收站是空的。')}</p>}
+            {trash.map((b) => (
+              <div class="trash-row panel">
+                <div>
+                  <b>{summaryText(b.summary, t)}</b>
+                  <div class="muted small">{b.at.slice(0, 16).replace('T', ' ')} · {b.actor} · {formatBytes(b.bytes)}</div>
+                  <div class="small">{b.names}</div>
+                </div>
+                <button type="button" data-act="undo" data-batch={b.batch_id}>{t('恢复')}</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {preset?.editions && (
+          <div class="tiles problems">
+            <p class="view-note muted">{t(preset.hint)}</p>
+            {problemEditions.length === 0 && <p class="empty">{t('没有问题。')}</p>}
+            {problemEditions.map(({ folder: f, list }) => (
+              <div class="tile wide-tile" tabindex="-1" data-folder={f!.id} data-kind="edition" data-drop="folder" draggable="true">
+                <FolderIcon kind="edition" color={f!.color} size={28} />
+                <a class="tname" href={folderHref(folderKey(f!.id))} data-nav>{places.path(folderKey(f!.id), t)}</a>
+                <span class="small">{list.map((p: EditionProblem) => <span class="chip partial">{t(EDITION_PROBLEMS[p])}</span>)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {listsFiles && (
+          <>
+            <div class="items" role="listbox" aria-multiselectable="true" aria-label={t('文件')}>
+              {groups.map((g) => (
                 <>
-                  <tr class="group">
-                    <td><input type="checkbox" data-group-toggle={`g${gi}`} aria-label={t('全选本组')} /></td>
-                    <td colspan="5">
-                      {g.href ? <a href={g.href}>{g.label}</a> : g.label}
+                  {g.label && (
+                    <div class="group">
+                      <input type="checkbox" class="pick-group" aria-label={t('全选本组')} />
+                      {g.href ? <a href={g.href} data-nav={g.href.startsWith('/admin/inbox') ? '' : undefined}>{g.label}</a> : g.label}
                       <span class="muted"> · {t('{n} 个', { n: g.rows.length })}</span>
-                    </td>
-                  </tr>
+                    </div>
+                  )}
                   {g.rows.map((f) => {
                     const s = parseSuggestion(f.suggest);
                     const fmt = parseFormat(f.format);
-                    const inside = f.dir ? `${f.dir}/${f.name}` : f.name;
                     const key = placeOf(f);
                     const sugPlace = s ? suggestionPlace(s) : null;
+                    const thumb = thumbOf(f);
+                    const isArchive = f.kind === 'archive' || f.kind === 'disc_image' || !!fmt.archive;
+                    const shown = f.download_name || f.name;
                     return (
-                      <tr draggable="true" data-id={f.id}>
-                        <td><input type="checkbox" name="ids" value={f.id} data-group={`g${gi}`} /></td>
-                        <td class="name">
-                          <button type="button" class="peek" data-peek={f.id} title={t('在右侧预览（j / k 切换上下一个）')} aria-label={t('预览')}>▸</button>
-                          <a href={`/admin/files/${f.id}`}>{f.name}</a>{' '}
-                          <span class="chip">{t(FILE_KIND_LABELS[f.kind] ?? f.kind)}</span>
-                          {f.sealed ? <span class="chip collected" title={t('整体收藏：包内文件不单独整理，只在文件页列出清单')}>{t('整体收藏')}</span> : null}
-                          {f.old ? <span class="chip ignored" title={t('已上传新版本替换')}>{t('旧版本')}</span> : null}
-                          {f.dup_of && <a class="chip ignored" href={`/admin/files/${f.dup_of}`} title={t('标为重复，指向保留的那份')}>{t('重复 → 保留的副本')}</a>}
-                          {f.origin === 'upload' && <span class="chip planned">{t('上传')}</span>}
-                          {f.gone ? <span class="chip missing" title={t('最近一次导入时 source 里已没有这个文件，可以删除')}>{t('原件已不存在')}</span> : null}
-                          {fmt.upload_error && <span class="chip missing" title={fmt.upload_error}>{t('上传内容有误')}</span>}
-                          {f.copies > 1 && <span class="chip partial" title={t('SHA-256 相同的文件数')}>{t('重复 ×{n}', { n: f.copies })}</span>}
-                          {f.same_audio > 1 && (
-                            <span class="chip planned" title={t('解码后的音频完全相同、文件本身不同的版本数（如 WAV 与 FLAC，或只有标签不同）')}>
-                              {t('同音频 ×{n}', { n: f.same_audio })}
-                            </span>
-                          )}
-                          {f.recordings > 0 && (
-                            <a class="chip ask" href={`/admin/files/${f.id}#recordings`} title={t('声学指纹比对：听起来是同一录音的其他文件数')}>
-                              {t('同录音 ×{n}', { n: f.recordings })}
-                            </a>
-                          )}
-                          {fmt.archive && !f.sealed && (
-                            <a class="chip inbox" href={withParams(url, { tree: 'source', dir: inside, loc: null, page: null })} title={t('在整理台查看包内文件')}>
-                              {t('包内 {n} 个', { n: fmt.files })}
-                            </a>
-                          )}
-                          {fmt.archive && f.sealed ? <a class="chip" href={`/admin/files/${f.id}#members`}>{t('包内 {n} 个', { n: fmt.files })}</a> : null}
-                          {fmt.status && fmt.status !== 'ok' && (
-                            <span class="chip missing" title={fmt.error}>{t(ARCHIVE_STATUS_LABELS[fmt.status] ?? fmt.status)}</span>
-                          )}
-                          {f.note && <div class="muted">{f.note}</div>}
-                          {(group !== 'dir' || loc) && <div class="muted mono src-path">{f.dir}</div>}
-                        </td>
-                        <td class="num">{formatBytes(f.size)}</td>
-                        <td class="spec" title={fmt.probe_error}>{formatSpec(fmt)}</td>
-                        <td class="suggest">
+                      <div class="item" role="option" aria-selected="false" tabindex="-1" draggable="true"
+                        data-id={f.id} data-kind={f.kind} data-state={f.state} data-upload={f.origin === 'upload' ? '1' : undefined}
+                        data-name={shown} data-orig={f.name} data-ext={f.ext} data-edition={f.edition_id ?? undefined} data-release={f.release_id ?? undefined}
+                        data-archive={isArchive ? '1' : undefined} data-sealed={f.sealed ? '1' : undefined} data-sug={s && !key ? '1' : undefined}
+                        data-placed={key ? '1' : undefined}>
+                        <input type="checkbox" class="pick" tabindex="-1" aria-label={t('选中')} />
+                        <div class="thumb">{thumb ? <img src={thumb} alt="" loading="lazy" /> : <span class={`kind-icon k-${f.kind}`}>{(f.ext || '?').slice(0, 4).toUpperCase()}</span>}</div>
+                        <div class="iname">
+                          <span class="fn" title={f.download_name ? t('原文件名：{name}', { name: f.name }) : shown}>{shown}</span>
+                          <span class="chips">
+                            {f.download_name && <span class="chip" title={t('原文件名：{name}', { name: f.name })}>{t('已改名')}</span>}
+                            {f.sealed ? <span class="chip collected" title={t('整体收藏：包内文件不单独整理，只在文件页列出清单')}>{t('整体收藏')}</span> : null}
+                            {f.old ? <span class="chip ignored" title={t('已上传新版本替换')}>{t('旧版本')}</span> : null}
+                            {f.dup_of && <span class="chip ignored" title={t('标为重复，指向保留的那份')}>{t('重复')}</span>}
+                            {f.origin === 'upload' && <span class="chip planned">{t('上传')}</span>}
+                            {f.gone ? <span class="chip missing" title={t('最近一次导入时 source 里已没有这个文件，可以删除')}>{t('原件已不存在')}</span> : null}
+                            {fmt.upload_error && <span class="chip missing" title={fmt.upload_error}>{t('上传内容有误')}</span>}
+                            {f.copies > 1 && <span class="chip partial" title={t('SHA-256 相同的文件数')}>{t('重复 ×{n}', { n: f.copies })}</span>}
+                            {f.same_audio > 1 && <span class="chip planned" title={t('解码后的音频完全相同、文件本身不同的版本数（如 WAV 与 FLAC，或只有标签不同）')}>{t('同音频 ×{n}', { n: f.same_audio })}</span>}
+                            {f.recordings > 0 && <span class="chip ask" title={t('声学指纹比对：听起来是同一录音的其他文件数')}>{t('同录音 ×{n}', { n: f.recordings })}</span>}
+                            {fmt.archive && <span class="chip">{t('包内 {n} 个', { n: fmt.files })}</span>}
+                            {fmt.status && fmt.status !== 'ok' && <span class="chip missing" title={fmt.error}>{t(ARCHIVE_STATUS_LABELS[fmt.status] ?? fmt.status)}</span>}
+                            {f.rights !== 'unknown' && <span class={`chip ${f.rights}`}>{t(RIGHTS_LABELS[f.rights])}</span>}
+                            {f.role && ROLE_LABELS[f.role] && <span class="chip">{t(ROLE_LABELS[f.role])}</span>}
+                          </span>
+                          {f.note && <span class="muted small note">{f.note}</span>}
+                          {(q.sort !== 'path' || q.view === 'suggested') && <span class="muted mono src-path">{f.dir}</span>}
+                        </div>
+                        <div class="isize">{formatBytes(f.size)}</div>
+                        <div class="ispec" title={fmt.probe_error}>{formatSpec(fmt)}</div>
+                        <div class="isug">
                           {key ? (
-                            <span class="muted">—</span>
+                            showPlace ? <a href={folderHref(key)} data-nav title={places.path(key, t)} class="place-link">{shortPath(key)}</a> : null
                           ) : s ? (
                             <>
                               {s.state === 'ignored' && <span class="chip ignored">{t('建议忽略')}</span>}
                               {sugPlace && <b>{sugPlace}</b>}
                               {s.seal && <span class="chip collected">{t('整体收藏')}</span>}
-                              {s.readme && <span class="chip">{t('说明文件')}</span>}
-                              {s.rights && <span class={`chip ${s.rights}`}>{t(RIGHTS_LABELS[s.rights])}</span>}{' '}
-                              {s.role && ROLE_LABELS[s.role] && <span class="chip">{t(ROLE_LABELS[s.role])}</span>}{' '}
+                              {s.rights && <span class={`chip ${s.rights}`}>{t(RIGHTS_LABELS[s.rights])}</span>}
                               <span class="rule" title={t('规则：{rule}', { rule: t(s.rule) })}>{percent(s.confidence)}</span>
-                              {s.note && <div class="muted">{s.note}</div>}
                             </>
-                          ) : (
-                            <span class="muted">—</span>
-                          )}
-                        </td>
-                        <td class="place">
-                          {key ? (
-                            <a href={placeLink(key)} title={places.path(key, t)}>{shortPath(key)}</a>
                           ) : (
                             <span class={`chip ${f.state}`}>{t(f.state === 'inbox' ? '未归档' : FILE_STATE_LABELS[f.state])}</span>
                           )}
-                          {f.rights !== 'unknown' && <span class={`chip ${f.rights}`}>{t(RIGHTS_LABELS[f.rights])}</span>}
-                          {f.role && ROLE_LABELS[f.role] && <span class="chip">{t(ROLE_LABELS[f.role])}</span>}
-                        </td>
-                      </tr>
+                        </div>
+                        <button type="button" class="more" data-act="menu" aria-label={t('更多操作')} tabindex="-1">⋯</button>
+                      </div>
                     );
                   })}
                 </>
-              ))
-            }
-            {total === 0 && <tr><td colspan="6" class="muted">{t('没有符合条件的文件。')}</td></tr>}
-          </tbody>
-        </table>
-
-        {
-          pages > 1 && (
-            <div class="pager">
-              {page > 1 && <a href={withParams(url, { page: page - 1 })}>{t('上一页')}</a>}
-              <span>{t('第 {page} / {pages} 页', { page, pages })}</span>
-              {page < pages && <a href={withParams(url, { page: page + 1 })}>{t('下一页')}</a>}
+              ))}
             </div>
-          )
-        }
+            {total === 0 && (
+              <div class="empty">
+                {q.view === 'unplaced' && !q.dir && !q.q ? (
+                  <p>{t('全部整理完了。')}</p>
+                ) : folder && subfolders.length === 0 ? (
+                  <p>{t('这个文件夹是空的：把文件拖到这里的文件夹上，或右键新建子文件夹。')}</p>
+                ) : folder ? (
+                  <p class="muted">{q.sub ? t('没有文件。') : t('文件都在子文件夹里；勾选「显示子文件夹内容」可以一起列出。')}</p>
+                ) : (
+                  <p class="muted">{t('没有符合条件的文件。')}</p>
+                )}
+              </div>
+            )}
+            {pages > 1 && (
+              <div class="pager">
+                {page > 1 && <a href={withParams(url, { page: page - 1 })} data-nav>{t('上一页')}</a>}
+                <span>{t('第 {page} / {pages} 页', { page, pages })}</span>
+                {page < pages && <a href={withParams(url, { page: page + 1 })} data-nav>{t('下一页')}</a>}
+              </div>
+            )}
+          </>
+        )}
+      </div>
 
-        <div class="toolbar">
-          <span set:html={t('已选 {n} 个', { n: '<b id="selected-count">0</b>' })} />
-          <label><input type="checkbox" name="scope" value="filter" id="scope-filter" /> {t('改为应用到当前筛选的全部 {n} 个', { n: total })}</label>
-          <span class="sep"></span>
-          <button class="primary" name="action" value="accept" title={t('按脚本建议放入位置、设权属或整体收藏；把握度低于 50% 的跳过')}>{t('按建议确认')}</button>
-          <button type="button" id="move-button" data-keep-dir={keepDir ?? ''}>{t('移动到…')}</button>
-          <span class="sep"></span>
-          <select name="rights_value" aria-label={t('权属')}>
-            {RIGHTS.map((r) => <option value={r} selected={r === 'third_party'}>{t(RIGHTS_LABELS[r])}</option>)}
-          </select>
-          <button name="action" value="rights">{t('设权属')}</button>
-          <span class="sep"></span>
-          <details class="more">
-            <summary class="button">{t('更多')}</summary>
-            <div class="menu">
-              <button name="action" value="seal" title={t('包内文件不再单独整理，只在文件页列出清单；可随时展开')}>{t('整体收藏（压缩包）')}</button>
-              <button name="action" value="unseal">{t('展开整体收藏的包')}</button>
-              <button name="action" value="dup" title={t('有相同内容（或相同音频）的其他文件时，指向保留的那份并忽略这些')}>{t('标为重复')}</button>
-              <button name="action" value="ignore">{t('忽略')}</button>
-              <button name="action" value="reset">{t('退回待整理')}</button>
-              <button class="danger" name="action" value="delete" title={t('只删除后台上传的文件，以及原件已不存在的合辑文件；可在修改记录里撤销')}>{t('删除')}</button>
-            </div>
-          </details>
-          <span class="muted keys">{t('预览时：1–5 最近位置 · m 移动 · a 按建议 · i 忽略 · d 重复 · t 第三方 · u 撤销')}</span>
-        </div>
-      </form>
-    </div>
+      <div id="desk-bar" class="desk-bar" hidden>
+        <span class="count" set:html={t('已选 {n} 个', { n: '<b data-count>0</b>' })} />
+        {listsFiles && total > 0 && <label class="small"><input type="checkbox" data-scope-all /> {t('改为当前列表全部 {n} 个文件', { n: total })}</label>}
+        <span class="sep"></span>
+        <button type="button" data-act="move-selection" title="M">{t('移动到…')}</button>
+        <button type="button" class="primary" data-act="file-action" data-action="accept" title="A">{t('按建议归档')}</button>
+        <button type="button" data-act="file-action" data-action="ignore" title="I">{t('忽略')}</button>
+        <button type="button" data-act="menu-selection">{t('更多…')}</button>
+        <button type="button" class="link" data-act="clear-selection">{t('取消选择')}</button>
+      </div>
+      <div id="desk-toast" class="desk-toast" role="status" aria-live="polite" hidden>
+        <span data-text></span>
+        <button type="button" data-act="undo-toast" hidden>{t('撤销')}</button>
+        <button type="button" class="link" data-act="close-toast" aria-label={t('关闭')}>×</button>
+      </div>
+    </section>
+
+    <div class="desk-resize" data-resize="side" title={t('拖动调整宽度，双击恢复')} aria-hidden="true"></div>
+    <div class="desk-resize" data-resize="insp" title={t('拖动调整宽度，双击恢复')} aria-hidden="true"></div>
+    <aside id="desk-inspector" class="desk-inspector" aria-label={t('详情')}>
+      {openFolder ? (
+        <Inspector mode="folder" places={places} view={openFolder} />
+      ) : (
+        <Inspector
+          mode="view" title={title} hint={preset ? t(preset.hint) : q.view === 'unplaced' ? t('还不在任何文件夹里的文件。有规则建议的可以「按建议归档」，其余的拖到左侧的文件夹上。') : undefined}
+          count={total} bytes={totals?.bytes ?? 0} link={preset?.link ? { href: preset.link.href, label: t(preset.link.label) } : null}
+          smart={smart?.id ?? null} rules={smart ? ruleText(smart.rules) : []}
+        />
+      )}
+    </aside>
   </div>
-  <aside id="peek" class="peek-panel" hidden>
-    <button type="button" class="close" aria-label={t('关闭预览')}>×</button>
-    <div data-status class="peek-status"></div>
-    <div data-body></div>
-  </aside>
+
+  <div id="desk-menu" class="ctx-menu" role="menu" hidden></div>
+  <div id="desk-drag" class="drag-label" hidden></div>
   <PlacePicker places={places} />
+  <Dialogs />
+  <script type="application/json" id="desk-data" set:html={JSON.stringify(deskData).replace(/</g, '\\u003c')} />
 </Admin>
 
 <script>
-  import { initPreviews } from '../../scripts/previews';
-  import { initTextPreviews } from '../../scripts/text-preview';
-  import { openPicker, placePath, recentPlaces, rememberPlace } from '../../scripts/place-picker';
-  import { t } from '../../scripts/i18n';
-
-  initTextPreviews(document);
-  const form = document.querySelector<HTMLFormElement>('#inbox-form')!;
-  const counter = document.querySelector('#selected-count');
-  const boxes = () => Array.from(form.querySelectorAll<HTMLInputElement>('input[name="ids"]'));
-  const selected = () => boxes().filter((b) => b.checked);
-  const update = () => {
-    if (counter) counter.textContent = String(selected().length);
-  };
-  form.addEventListener('change', (event) => {
-    const target = event.target as HTMLInputElement;
-    if (target.id === 'select-all') boxes().forEach((b) => (b.checked = target.checked));
-    const group = target.dataset.groupToggle;
-    if (group) form.querySelectorAll<HTMLInputElement>(`input[data-group="${group}"]`).forEach((b) => (b.checked = target.checked));
-    update();
-  });
-  update();
-
-  const field = (name: string) => form.querySelector<HTMLInputElement>(`input[type="hidden"][name="${name}"]`)!;
-  function submitAction(action: string) {
-    const button = document.createElement('button');
-    button.name = 'action';
-    button.value = action;
-    button.hidden = true;
-    form.appendChild(button);
-    form.requestSubmit(button);
-  }
-  function submitMove(target: string, newFolder = '', keep: string | null = null) {
-    field('target').value = target;
-    field('new_folder').value = newFolder;
-    field('keep').value = keep ?? '__none__';
-    submitAction('move');
-  }
-  const scopeAll = () => document.querySelector<HTMLInputElement>('#scope-filter')?.checked;
-
-  // 「移动到…」
-  const moveButton = document.querySelector<HTMLButtonElement>('#move-button')!;
-  moveButton.addEventListener('click', async () => {
-    if (!scopeAll() && selected().length === 0) {
-      alertInline(t('先勾选文件'));
-      return;
-    }
-    const keepDir = moveButton.dataset.keepDir || null;
-    const r = await openPicker({ keepDir });
-    if (r) submitMove(r.target, r.newFolder, r.keep ? keepDir ?? '' : null);
-  });
-
-  // Folder actions in the header.
-  document.querySelector<HTMLButtonElement>('[data-folder-move]')?.addEventListener('click', async (e) => {
-    const id = (e.currentTarget as HTMLElement).dataset.folderMove!;
-    const r = await openPicker({ title: t('把文件夹移到…'), confirm: t('移到这里'), exclude: (k) => k === `fd:${id}` });
-    if (!r) return;
-    const f = document.querySelector<HTMLFormElement>('#folder-move-form')!;
-    f.querySelector<HTMLInputElement>('input[name="target"]')!.value = r.target;
-    f.submit();
-  });
-
-  function alertInline(text: string) {
-    const bar = document.querySelector('.toolbar');
-    let note = bar?.querySelector<HTMLElement>('.toolbar-note');
-    if (!note && bar) {
-      note = document.createElement('span');
-      note.className = 'toolbar-note';
-      bar.appendChild(note);
-    }
-    if (note) note.textContent = text;
-  }
-
-  // Drag rows (the dragged row, or every checked row when it is checked) onto a place in the tree.
-  let dragIds: string[] = [];
-  form.addEventListener('dragstart', (e) => {
-    const row = (e.target as HTMLElement).closest<HTMLTableRowElement>('tr[data-id]');
-    if (!row) return;
-    const box = row.querySelector<HTMLInputElement>('input[name="ids"]')!;
-    dragIds = box.checked ? selected().map((b) => b.value) : [row.dataset.id!];
-    e.dataTransfer?.setData('text/plain', dragIds.join(','));
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-    document.body.classList.add('dragging-files');
-  });
-  document.addEventListener('dragend', () => {
-    document.body.classList.remove('dragging-files');
-    document.querySelectorAll('.drop-over').forEach((el) => el.classList.remove('drop-over'));
-  });
-  for (const node of document.querySelectorAll<HTMLElement>('.tree a[data-drop]')) {
-    node.addEventListener('dragover', (e) => {
-      if (!dragIds.length) return;
-      e.preventDefault();
-      node.classList.add('drop-over');
-    });
-    node.addEventListener('dragleave', () => node.classList.remove('drop-over'));
-    node.addEventListener('drop', (e) => {
-      e.preventDefault();
-      node.classList.remove('drop-over');
-      if (!dragIds.length) return;
-      document.querySelector<HTMLInputElement>('#scope-filter')!.checked = false;
-      boxes().forEach((b) => (b.checked = dragIds.includes(b.value)));
-      rememberPlace(node.dataset.loc!);
-      submitMove(node.dataset.loc!);
-    });
-  }
-
-  // Side preview: ▸ on a row loads the file's preview here; j / k move to the next / previous file.
-  // While it is open, keys act on the previewed file without reloading the page.
-  const panel = document.querySelector<HTMLElement>('#peek')!;
-  const panelBody = panel.querySelector<HTMLElement>('[data-body]')!;
-  const panelStatus = panel.querySelector<HTMLElement>('[data-status]')!;
-  const peekButtons = () => Array.from(document.querySelectorAll<HTMLButtonElement>('button.peek'));
-  let peeking: string | null = null;
-  let lastBatch: string | null = null;
-  async function peek(id: string) {
-    peeking = id;
-    panel.hidden = false;
-    document.querySelectorAll('tr.peeking').forEach((r) => r.classList.remove('peeking'));
-    const button = document.querySelector<HTMLButtonElement>(`button.peek[data-peek="${id}"]`);
-    button?.closest('tr')?.classList.add('peeking');
-    button?.closest('tr')?.scrollIntoView({ block: 'nearest' });
-    // The last action's message stays; the list of places under 1–5 is redrawn.
-    const recent = recentPlaces();
-    panelStatus.querySelector('.recent-keys')?.remove();
-    if (recent.length) {
-      const list = document.createElement('ol');
-      list.className = 'recent-keys';
-      for (const key of recent) {
-        const li = document.createElement('li');
-        li.textContent = placePath(key);
-        list.appendChild(li);
-      }
-      panelStatus.appendChild(list);
-    }
-    panelBody.innerHTML = `<p class="muted">${t('读取中…')}</p>`;
-    const response = await fetch(`/admin/files/${id}/preview`);
-    if (peeking !== id) return;
-    panelBody.innerHTML = response.ok ? await response.text() : `<p class="muted">${t('读取失败（HTTP {status}）', { status: response.status })}</p>`;
-    initPreviews(panelBody as unknown as ParentNode);
-  }
-  document.addEventListener('click', (e) => {
-    const button = (e.target as HTMLElement).closest<HTMLButtonElement>('button.peek');
-    if (button?.dataset.peek) peek(button.dataset.peek);
-  });
-  panel.querySelector('.close')?.addEventListener('click', () => {
-    panel.hidden = true;
-    peeking = null;
-    panelBody.innerHTML = '';
-    document.querySelectorAll('tr.peeking').forEach((r) => r.classList.remove('peeking'));
-  });
-
-  let busy = false;
-  async function act(id: string, fields: Record<string, string>) {
-    if (busy) return false;
-    busy = true;
-    showStatus(t('处理中…'));
-    const body = new FormData();
-    body.append('ids', id);
-    for (const [k, v] of Object.entries(fields)) body.append(k, v);
-    const row = document.querySelector<HTMLTableRowElement>(`tr[data-id="${id}"]`);
-    try {
-      // form.action would be the buttons named «action»
-      const response = await fetch(form.getAttribute('action') ?? location.href, { method: 'POST', body, headers: { accept: 'application/json' } });
-      const r = (await response.json()) as { ok: boolean; msg?: string; err?: string; batch?: string | null };
-      showStatus(r.ok ? r.msg ?? '' : r.err ?? '', !r.ok);
-      if (!r.ok) return false;
-      lastBatch = r.batch ?? null;
-      row?.classList.add('handled');
-      return true;
-    } catch (e) {
-      showStatus(String(e), true);
-      return false;
-    } finally {
-      busy = false;
-    }
-  }
-  function showStatus(text: string, bad = false) {
-    let line = panelStatus.querySelector<HTMLElement>('.flash');
-    if (!line) {
-      line = document.createElement('p');
-      panelStatus.insertBefore(line, panelStatus.firstChild);
-    }
-    line.className = `flash ${bad ? 'err' : 'ok'}`;
-    line.textContent = text;
-  }
-  function next() {
-    const ids = peekButtons().map((b) => b.dataset.peek!);
-    const at = peeking ? ids.indexOf(peeking) : -1;
-    const after = ids.slice(at + 1).find((id) => !document.querySelector(`tr[data-id="${id}"]`)?.classList.contains('handled'));
-    if (after) peek(after);
-  }
-  async function undoLast() {
-    if (!lastBatch || busy) return;
-    const body = new FormData();
-    body.append('batch', lastBatch);
-    const response = await fetch('/admin/history', { method: 'POST', body, headers: { accept: 'application/json' } });
-    const r = (await response.json().catch(() => ({ ok: false, err: t('撤销失败') }))) as { ok: boolean; msg?: string; err?: string };
-    showStatus(r.ok ? r.msg ?? t('已撤销') : r.err ?? '', !r.ok);
-    if (r.ok && peeking) document.querySelector(`tr[data-id="${peeking}"]`)?.classList.remove('handled');
-    lastBatch = null;
-  }
-
-  document.addEventListener('keydown', async (e) => {
-    if (panel.hidden || !peeking || e.ctrlKey || e.metaKey || e.altKey) return;
-    if ((e.target as HTMLElement).closest('input, select, textarea, dialog')) return;
-    const ids = peekButtons().map((b) => b.dataset.peek!);
-    const at = ids.indexOf(peeking);
-    const id = peeking;
-    if (e.key === 'j' && at < ids.length - 1) peek(ids[at + 1]);
-    else if (e.key === 'k' && at > 0) peek(ids[at - 1]);
-    else if (e.key === 'x') {
-      const box = document.querySelector<HTMLInputElement>(`input[name="ids"][value="${id}"]`);
-      if (box) {
-        box.checked = !box.checked;
-        box.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    } else if (e.key === 'Escape') panel.querySelector<HTMLButtonElement>('.close')?.click();
-    else if (/^[1-5]$/.test(e.key)) {
-      const key = recentPlaces()[Number(e.key) - 1];
-      if (key && (await act(id, { action: 'move', target: key, keep: '__none__' }))) {
-        rememberPlace(key);
-        next();
-      }
-    } else if (e.key === 'm') {
-      e.preventDefault();
-      const r = await openPicker();
-      if (r && (await act(id, { action: 'move', target: r.target, new_folder: r.newFolder, keep: '__none__' }))) next();
-    } else if (e.key === 'a') {
-      if (await act(id, { action: 'accept' })) next();
-    } else if (e.key === 'i') {
-      if (await act(id, { action: 'ignore' })) next();
-    } else if (e.key === 'd') {
-      if (await act(id, { action: 'dup' })) next();
-    } else if (e.key === 't') {
-      if (await act(id, { action: 'rights', rights_value: 'third_party' })) next();
-    } else if (e.key === 'u') {
-      await undoLast();
-    }
-  });
+  import { initDesk } from '../../scripts/desk';
+  initDesk();
 </script>

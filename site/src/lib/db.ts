@@ -73,12 +73,14 @@ export interface EditionTrackRow {
 export interface FolderRow {
   id: string;
   parent_id: string | null;
-  era_id: string | null;
+  type: 'plain' | 'era' | 'release' | 'edition';
+  era_id: string | null; // the entity a typed folder is (plain folders: all three null)
   release_id: string | null;
   edition_id: string | null;
-  name: string;
+  name: string; // plain folders; typed folders show their entity's name
   description: string | null;
   readme_file_id: string | null;
+  color: string | null;
   sort: number;
 }
 
@@ -95,7 +97,7 @@ export interface Suggestion {
   confidence: number;
   release_id?: string;
   slot?: Slot;
-  place?: string; // a place chosen when uploading (era:/rel:/ed:/fd: key); folder then goes below it
+  place?: string; // a place chosen when uploading (a fd: key, or era:/rel:/ed: of the entity's folder); folder then goes below it
   edition?: string; // name of the release's edition of this slot (made when missing)
   edition_catalog?: string;
   folder?: string; // folder path ('/'-separated) under the edition, release or era, or at the top

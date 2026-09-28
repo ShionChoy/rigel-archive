@@ -78,13 +78,6 @@ export const NEW_RELEASE_SLOTS: Record<ReleaseKind, Record<Slot, SlotStatus>> = 
   },
 };
 
-export const ERAS = [
-  { id: 'rigel-theatre', name: 'Rigël Theatre' },
-  { id: 'grand-thaw', name: 'Grand Thaw' },
-  { id: 'delta-records', name: 'Delta Records' },
-  { id: 'dezaemon', name: 'DEZAEMON' },
-] as const;
-
 export const RIGHTS = ['own', 'third_party', 'licensed', 'unknown'] as const;
 export type Rights = (typeof RIGHTS)[number];
 export const RIGHTS_LABELS: Record<Rights, string> = {

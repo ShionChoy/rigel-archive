@@ -53,7 +53,7 @@ export function parseUpload(body: Record<string, unknown>): UploadInput {
   const release = text(body.release, 100);
   if (slot && !release) throw new UserError('选择版本栏位前要先选作品');
   const place = text(body.place, 80);
-  if (place && !/^(era|rel|ed|fd):[\w-]{1,80}$/.test(place)) throw new UserError('找不到这个位置');
+  if (place && !/^((era|rel|ed|fd):[\w-]{1,80}|top)$/.test(place)) throw new UserError('找不到这个位置');
   return {
     batch, batchDir, sha256, size, slot, release, place, keep: body.keep === true, sealed: body.sealed === true,
     folder: text(body.folder, 200)?.replace(/\//g, '_') ?? null,

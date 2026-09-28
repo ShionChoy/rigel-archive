@@ -1,0 +1,332 @@
+---
+// The 整理台's inspector: what is selected (one file, several, a folder) or, with nothing selected, the
+// open folder or list. Buttons carry data-act (handled by scripts/desk.ts); forms with data-op are
+// sent to /admin/desk/folder as JSON.
+import FilePreview from '../FilePreview.astro';
+import FolderIcon from './FolderIcon.astro';
+import { FILE_KIND_LABELS, FILE_STATE_LABELS, RELEASE_KIND_LABELS, RIGHTS, RIGHTS_LABELS, ROLE_LABELS, SLOT_LABELS, type Slot } from '../../lib/constants';
+import { formatBytes, formatSpec, percent } from '../../lib/format';
+import { parseFormat } from '../../lib/db';
+import { EDITION_STATUS_LABELS } from '../../lib/editions';
+import { FOLDER_COLORS, FOLDER_COLOR_LABELS, FOLDER_TYPE_LABELS, type Places } from '../../lib/locations';
+import type { FilesSummary, FileView, FolderView } from '../../lib/desk';
+import type { Derived } from '../../lib/media';
+import type { TagEditView } from '../../lib/tagedit';
+
+type Props =
+  | { mode: 'folder'; places: Places; view: FolderView; selected?: boolean }
+  | { mode: 'file'; places: Places; file: FileView; derived: Derived; base: string; tags?: TagEditView | null }
+  | { mode: 'files'; places: Places; summary: FilesSummary; folders: number }
+  | { mode: 'view'; title: string; hint?: string; count: number; bytes: number; link?: { href: string; label: string } | null; smart?: string | null; rules?: string[] }
+  | { mode: 'empty' };
+
+const props = Astro.props;
+const { t } = Astro.locals;
+const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDITION_STATUS_LABELS] ?? s);
+---
+
+<div class="insp" data-mode={props.mode}>
+  {
+    props.mode === 'folder' && (() => {
+      const { view: v, places } = props;
+      const f = v.folder;
+      const chain = places.chain(v.key);
+      return (
+        <div data-folder={f.id} data-kind={f.type}>
+          <div class="insp-head">
+            <FolderIcon kind={f.type} color={f.color} size={22} />
+            <div>
+              <b class="insp-name">{v.name}</b>
+              <div><span class={`chip type-${f.type}`}>{t(FOLDER_TYPE_LABELS[f.type])}</span></div>
+            </div>
+          </div>
+          {chain.length > 1 && <p class="muted insp-path">{chain.slice(0, -1).map((k) => places.name(k, t)).join(' / ')}</p>}
+          <p class="insp-stats">
+            {t('{n} 个文件（直接在里面 {own} 个）', { n: v.stats.total, own: v.stats.own })} · {formatBytes(v.stats.bytes)}
+            {v.stats.folders > 0 && <> · {t('{n} 个子文件夹', { n: v.stats.folders })}</>}
+          </p>
+          <div class="insp-actions">
+            {props.selected && <button type="button" data-act="open" data-key={v.key}>{t('打开')}</button>}
+            <button type="button" data-act="rename" data-folder={f.id} title="F2">{t('重命名')}</button>
+            <button type="button" data-act="new-folder" data-under={v.key} title="Ctrl+Shift+N">{t('新建子文件夹')}</button>
+            <button type="button" data-act="move-folders" data-folders={f.id} disabled={f.type === 'era'}>{t('移动到…')}</button>
+            <button type="button" data-act={v.pinned ? 'unpin' : 'pin'} data-folder={f.id}>{v.pinned ? t('移出快速访问') : t('加入快速访问')}</button>
+            <button type="button" class="danger" data-act="delete-folders" data-folders={f.id} title="Delete">{t('删除')}</button>
+          </div>
+
+          {v.release && (
+            <section class="insp-sec">
+              <h4>{t('作品')}</h4>
+              <dl class="kv">
+                <dt>{t('编号')}</dt><dd>{v.release.catalog_no ?? '—'}</dd>
+                <dt>{t('标题')}</dt><dd>{v.release.title}</dd>
+                <dt>{t('形式')}</dt><dd>{t(RELEASE_KIND_LABELS[v.release.kind as keyof typeof RELEASE_KIND_LABELS] ?? v.release.kind)}</dd>
+                <dt>{t('发行日期')}</dt><dd>{v.release.release_date ?? '—'}</dd>
+                <dt>{t('曲目表')}</dt><dd>{t('{n} 首', { n: v.release.tracks })}</dd>
+                <dt>{t('公开')}</dt><dd><span class:list={['chip', v.release.state === 'published' ? 'published' : 'inbox']}>{v.release.state === 'published' ? t('已发布') : t('草稿')}</span></dd>
+              </dl>
+              <p><a href={`/admin/releases/${v.release.id}`}>{t('打开作品页（资料、版本对比、曲目表）›')}</a></p>
+            </section>
+          )}
+          {v.edition && (
+            <section class="insp-sec">
+              <h4>{t('版本')}</h4>
+              <dl class="kv">
+                <dt>{t('来源')}</dt><dd>{t(SLOT_LABELS[v.edition.slot as Slot] ?? v.edition.slot)}</dd>
+                <dt>{t('名称')}</dt><dd>{v.edition.name || '—'}</dd>
+                <dt>{t('编号')}</dt><dd>{v.edition.catalog_no ?? '—'}</dd>
+                <dt>{t('状态')}</dt><dd><span class={`chip ${v.edition.status}`}>{statusLabel(v.edition.status)}</span></dd>
+                <dt>{t('曲目顺序')}</dt><dd>{t('{n} 首', { n: v.edition.tracks })}</dd>
+              </dl>
+              <p>
+                <a href={`/admin/editions/${v.edition.id}`}>{t('打开版本页（曲目顺序、标签）›')}</a><br />
+                <a href={`/admin/editions/${v.edition.id}/zip`} download>{t('下载整理版（带标签的 zip）')}</a>
+              </p>
+            </section>
+          )}
+          {v.edition && (
+            <section class="insp-sec">
+              <h4>{t('整理版封面')}</h4>
+              <div class="insp-tags">
+                {v.edition.cover?.src ? <img class="insp-cover" src={v.edition.cover.src} alt="" loading="lazy" /> : null}
+                <p class="small">
+                  {v.edition.cover
+                    ? (v.edition.cover.own ? t('这个版本的封面：{name}', { name: v.edition.cover.name }) : t('用作品的封面：{name}', { name: v.edition.cover.name }))
+                    : t('还没有封面：下载时保留各文件自带的封面。')}
+                  <br /><span class="muted">{t('右键图片「设为封面」；右键音频「编辑标签与封面」（E）。')}</span>
+                </p>
+              </div>
+            </section>
+          )}
+
+          <section class="insp-sec">
+            <h4>{t('类型')}</h4>
+            <p class="muted small">
+              {f.type === 'plain' ? t('普通文件夹可以设为名义（在最顶层）、作品（在名义里）或版本（在作品的下一层），里面的文件随之归入。') : t('改回普通文件夹时，文件和名字都保留。')}
+            </p>
+            <button type="button" data-act="set-type" data-folder={f.id} data-kind={f.type}>{f.type === 'plain' ? t('设为名义、作品或版本…') : t('改回普通文件夹…')}</button>
+          </section>
+
+          <section class="insp-sec">
+            <h4>{t('颜色')}</h4>
+            <div class="swatches">
+              <button type="button" class:list={['swatch', 'none', { on: !f.color }]} data-act="color" data-folder={f.id} data-color="" title={t('无')} aria-label={t('无')} />
+              {FOLDER_COLORS.map((c) => <button type="button" class:list={['swatch', { on: f.color === c }]} data-act="color" data-folder={f.id} data-color={c} title={t(FOLDER_COLOR_LABELS[c])} aria-label={t(FOLDER_COLOR_LABELS[c])} />)}
+            </div>
+          </section>
+
+          <section class="insp-sec">
+            <h4>{t('说明')}</h4>
+            <form data-op="info" data-folder={f.id} class="stack">
+              <textarea name="description" rows="3" placeholder={t('写给整理者看的说明，显示在文件夹顶部')}>{f.description ?? ''}</textarea>
+              <label>{t('说明文件')}
+                <select name="readme_file_id">
+                  <option value="">{t('（无）')}</option>
+                  {v.texts.map((x) => <option value={x.id} selected={f.readme_file_id === x.id}>{x.name}</option>)}
+                </select>
+              </label>
+              <span class="muted small">{t('说明文件从这个文件夹里的文本文件中选，正文显示在文件夹顶部。')}</span>
+              <button type="submit">{t('保存')}</button>
+            </form>
+          </section>
+        </div>
+      );
+    })()
+  }
+
+  {
+    props.mode === 'file' && (() => {
+      const { file: f, places } = props;
+      const fmt = parseFormat(f.format);
+      const s = f.suggestion;
+      const key = places.keyOf(f);
+      const tags = Object.entries(fmt.tags ?? {}).slice(0, 8);
+      const tv = props.tags;
+      const isArchive = f.kind === 'archive' || f.kind === 'disc_image' || !!fmt.archive;
+      return (
+        <div data-file={f.id}>
+          <FilePreview file={f} base={props.base} derived={props.derived} />
+          <div class="insp-head">
+            <div>
+              <b class="insp-name">{f.download_name || f.name}</b>
+              <button type="button" class="icon-button" data-act="rename-file" data-file={f.id} title={t('重命名（F2）')} aria-label={t('重命名')}>✎</button>
+              {f.download_name && <div class="muted small">{t('原文件名：{name}', { name: f.name })}</div>}
+              <div>
+                <span class="chip">{t(FILE_KIND_LABELS[f.kind] ?? f.kind)}</span> {formatBytes(f.size)} {formatSpec(fmt) && `· ${formatSpec(fmt)}`}
+              </div>
+            </div>
+          </div>
+          <section class="insp-sec">
+            <h4>{t('位置')}</h4>
+            {key ? (
+              <p>{places.chain(key).map((k, i) => <>{i > 0 && ' / '}<a href={`/admin/inbox?loc=${k}`} data-nav>{places.name(k, t)}</a></>)}</p>
+            ) : (
+              <p><span class={`chip ${f.state}`}>{t(f.state === 'inbox' ? '未归档' : FILE_STATE_LABELS[f.state])}</span></p>
+            )}
+            {f.track_title && <p class="muted">{t('曲目：{title}', { title: f.track_title })}</p>}
+            {f.edition_id && f.edition_has_tracks && !f.track_id && f.kind === 'audio' ? <p><a href={`/admin/editions/${f.edition_id}#files`}>{t('还没对应到曲目 · 在版本页对应 ›')}</a></p> : null}
+            <div class="insp-actions">
+              <button type="button" data-act="move-files" data-files={f.id} title="M">{t('移动到…')}</button>
+              {key && <button type="button" data-act="file-action" data-action="reset" data-files={f.id}>{t('退回未归档')}</button>}
+              {f.state === 'ignored'
+                ? <button type="button" data-act="file-action" data-action="reset" data-files={f.id}>{t('取消忽略')}</button>
+                : <button type="button" data-act="file-action" data-action="ignore" data-files={f.id} title="I">{t('忽略')}</button>}
+            </div>
+          </section>
+          {!key && s && (
+            <section class="insp-sec">
+              <h4>{t('规则建议')} <span class="muted">{percent(s.confidence)}</span></h4>
+              <p>
+                {s.state === 'ignored' && <span class="chip ignored">{t('建议忽略')}</span>}
+                {s.release_id && <b>{places.releaseLabel(s.release_id)}</b>}
+                {s.slot && <> · {places.editionLabel({ slot: s.slot, name: s.edition ?? '' }, t)}</>}
+                {s.folder && <> · {s.folder.split('/').join(' / ')}</>}
+                {s.seal && <span class="chip collected">{t('整体收藏')}</span>}
+                {s.rights && <span class={`chip ${s.rights}`}>{t(RIGHTS_LABELS[s.rights])}</span>}
+                {s.role && ROLE_LABELS[s.role] && <span class="chip">{t(ROLE_LABELS[s.role])}</span>}
+              </p>
+              <p class="muted small">{t('规则：{rule}', { rule: t(s.rule) })}{s.note && ` · ${s.note}`}</p>
+              <button type="button" class="primary" data-act="file-action" data-action="accept" data-files={f.id} title="A">{t('按建议归档')}</button>
+            </section>
+          )}
+          <section class="insp-sec">
+            <h4>{t('原始位置')}</h4>
+            <p class="mono small"><a href={`/admin/inbox?view=all&dir=${encodeURIComponent(f.dir)}`} data-nav>{f.dir || '/'}</a></p>
+            {f.copies > 1 && <p><span class="chip partial">{t('重复 ×{n}', { n: f.copies })}</span> <a href="/admin/inbox?view=p:dups" data-nav>{t('查看疑似重复')}</a></p>}
+          </section>
+          <section class="insp-sec">
+            <h4>{t('权利')} <span class="help" title={t('社团自有的文件公开站可以播放、下载；第三方只列条目。放进作品时，未知会自动设为社团自有。')}>?</span></h4>
+            <select data-act="rights" data-files={f.id} aria-label={t('权利')}>
+              {RIGHTS.map((r) => <option value={r} selected={f.rights === r}>{t(RIGHTS_LABELS[r])}</option>)}
+            </select>
+          </section>
+          {isArchive && (
+            <section class="insp-sec">
+              <h4>{t('整体收藏')} <span class="help" title={t('整体收藏：包内文件不单独整理，只在文件页列出清单')}>?</span></h4>
+              {f.sealed
+                ? <p>{t('已整体收藏，包内 {n} 个文件不单独整理。', { n: f.members })} <button type="button" data-act="file-action" data-action="unseal" data-files={f.id}>{t('展开')}</button></p>
+                : <button type="button" data-act="file-action" data-action="seal" data-files={f.id}>{t('整体收藏这个包')}</button>}
+            </section>
+          )}
+          {f.kind === 'audio' && (
+            <section class="insp-sec">
+              <h4>{t('标签与封面')} <span class="help" title={t('下载「整理版」时按这里写入标签和封面；原件不变。')}>?</span></h4>
+              {tv?.edition && tv.tags ? (
+                <>
+                  <div class="insp-tags">
+                    {tv.cover.src ? <img class="insp-cover" src={tv.cover.src} alt="" loading="lazy" /> : null}
+                    <dl class="kv small">
+                      <dt>{t('标题')}</dt><dd>{tv.tags.title}</dd>
+                      <dt>{t('艺术家')}</dt><dd>{tv.tags.artist}</dd>
+                      <dt>{t('专辑')}</dt><dd>{tv.tags.album}</dd>
+                      {tv.tags.track && <><dt>{t('序号')}</dt><dd>{tv.tags.track}</dd></>}
+                      <dt>{t('封面')}</dt>
+                      <dd>{tv.cover.from === 'edition' ? t('版本的封面') : tv.cover.from === 'release' ? t('作品的封面') : tv.cover.from === 'file' ? t('文件自带') : t('无')}</dd>
+                    </dl>
+                  </div>
+                  {!tv.row && <p class="muted small">{t('还没对应到曲目：保存标签时会加进这个版本的曲目表。')}</p>}
+                  <div class="insp-actions">
+                    <button type="button" data-act="edit-tags" data-file={f.id} title="E">{t('编辑标签与封面…')}</button>
+                    {tv.file.taggable && <a class="button" href={`/admin/download/${f.id}?tagged=1`}>{t('下载整理版')}</a>}
+                  </div>
+                </>
+              ) : (
+                <p class="muted small">{t('整理版标签来自版本的曲目表：把文件放进某个版本后就能编辑。')}</p>
+              )}
+              {tags.length > 0 && (
+                <details>
+                  <summary class="muted small">{t('文件自带的标签')}{fmt.cover ? ` · ${t('有内嵌封面')}` : ''}</summary>
+                  <dl class="kv small">{tags.map(([k, v]) => <><dt>{k}</dt><dd>{String(v)}</dd></>)}</dl>
+                </details>
+              )}
+            </section>
+          )}
+          {f.kind !== 'audio' && tags.length > 0 && (
+            <section class="insp-sec">
+              <h4>{t('内嵌标签')}</h4>
+              <dl class="kv small">{tags.map(([k, v]) => <><dt>{k}</dt><dd>{String(v)}</dd></>)}</dl>
+            </section>
+          )}
+          {f.kind === 'image' && f.release_id && (
+            <section class="insp-sec">
+              <h4>{t('封面')}</h4>
+              {f.cover_of ? (
+                <p><span class="chip collected">{f.cover_of === 'edition' ? t('是这个版本的封面') : t('是作品的封面')}</span></p>
+              ) : /^(jpe?g|png)$/i.test(f.ext) && f.size < 12000000 ? (
+                <button type="button" data-act="set-cover" data-file={f.id}>{f.edition_id ? t('设为这个版本的封面') : t('设为作品的封面')}</button>
+              ) : (
+                <p class="muted small">{t('整理版只能嵌入 12 MB 以内的 JPEG 或 PNG 图片。')}</p>
+              )}
+            </section>
+          )}
+          <section class="insp-sec">
+            <h4>{t('备注')}</h4>
+            <form data-op="note" data-file={f.id} class="stack">
+              <textarea name="note" rows="2">{f.note ?? ''}</textarea>
+              <button type="submit">{t('保存')}</button>
+            </form>
+          </section>
+          <p><a href={`/admin/files/${f.id}`}>{t('打开文件页 ›')}</a></p>
+        </div>
+      );
+    })()
+  }
+
+  {
+    props.mode === 'files' && (() => {
+      const s = props.summary;
+      return (
+        <div>
+          <div class="insp-head"><b class="insp-name">{t('已选 {n} 个文件', { n: s.count })}{props.folders ? t('、{n} 个文件夹', { n: props.folders }) : ''}</b></div>
+          <p class="insp-stats">{formatBytes(s.bytes)}</p>
+          <p class="small">{s.kinds.map((k) => <span class="chip">{t(FILE_KIND_LABELS[k.kind] ?? k.kind)} {k.n}</span>)}</p>
+          <p class="small">{s.rights.map((r) => <span class={`chip ${r.rights}`}>{t(RIGHTS_LABELS[r.rights as keyof typeof RIGHTS_LABELS] ?? r.rights)} {r.n}</span>)}</p>
+          <p class="muted small">{t('已归档 {a} · 有建议 {b} · 已忽略 {c}', { a: s.placed, b: s.suggested, c: s.ignored })}</p>
+          <div class="insp-actions">
+            <button type="button" data-act="move-selection" title="M">{t('移动到…')}</button>
+            {s.suggested > 0 && <button type="button" class="primary" data-act="file-action" data-action="accept" title="A">{t('按建议归档')}</button>}
+            <button type="button" data-act="file-action" data-action="ignore" title="I">{t('忽略')}</button>
+            {s.placed > 0 && <button type="button" data-act="file-action" data-action="reset">{t('退回未归档')}</button>}
+            <button type="button" data-act="file-action" data-action="dup" title="D">{t('标为重复')}</button>
+            {s.archives > 0 && <button type="button" data-act="file-action" data-action="seal">{t('整体收藏压缩包')}</button>}
+            {s.sealed > 0 && <button type="button" data-act="file-action" data-action="unseal">{t('展开整体收藏的包')}</button>}
+            {s.uploads > 0 && <button type="button" class="danger" data-act="file-action" data-action="discard" title="Delete">{t('删除或忽略')}</button>}
+          </div>
+          <section class="insp-sec">
+            <h4>{t('权利')}</h4>
+            <select data-act="rights" aria-label={t('权利')}>
+              <option value="">{t('（不改）')}</option>
+              {RIGHTS.map((r) => <option value={r}>{t(RIGHTS_LABELS[r])}</option>)}
+            </select>
+          </section>
+        </div>
+      );
+    })()
+  }
+
+  {
+    props.mode === 'view' && (
+      <div>
+        <div class="insp-head"><b class="insp-name">{props.title}</b></div>
+        {props.hint && <p class="muted">{props.hint}</p>}
+        <p class="insp-stats">{t('{n} 个文件', { n: props.count })} · {formatBytes(props.bytes)}</p>
+        {props.link && <p><a href={props.link.href}>{props.link.label} ›</a></p>}
+        {props.rules && props.rules.length > 0 && (
+          <section class="insp-sec">
+            <h4>{t('条件')}</h4>
+            <ul class="small">{props.rules.map((r) => <li>{r}</li>)}</ul>
+          </section>
+        )}
+        {props.smart && (
+          <div class="insp-actions">
+            <button type="button" data-act="smart-edit" data-smart={props.smart}>{t('编辑条件…')}</button>
+            <button type="button" class="danger" data-act="smart-delete" data-smart={props.smart}>{t('删除智能文件夹')}</button>
+          </div>
+        )}
+        <p class="muted small">{t('单击选中文件，Ctrl / Shift 多选；右键看全部操作；按 ? 看快捷键。')}</p>
+      </div>
+    )
+  }
+
+  {props.mode === 'empty' && <p class="muted">{t('没有选中任何东西。')}</p>}
+</div>

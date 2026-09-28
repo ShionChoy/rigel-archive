@@ -48,7 +48,7 @@ export async function runChecks(t: T): Promise<Check[]> {
     ),
     // Folders named after a format, and the formats really in them.
     database.prepare(
-      `SELECT dir, group_concat(DISTINCT lower(ext)) AS exts, count(*) AS n, min(id) AS id FROM files
+      `SELECT dir, group_concat(DISTINCT lower(ext)) AS exts FROM files
        WHERE kind = 'audio' AND ${VISIBLE} AND state != 'ignored' GROUP BY dir`,
     ),
     // Audio in an edition that has a track order but is not linked to a track.
@@ -78,9 +78,9 @@ export async function runChecks(t: T): Promise<Check[]> {
        JOIN tracks t ON t.id = f.track_id
        WHERE f.kind = 'audio' AND f.sealed_in IS NULL AND json_extract(f.format, '$.tags.title') IS NOT NULL`,
     ),
-    // Folders with nothing in them.
+    // Folders with nothing in them (the admins' own; an empty edition folder is a missing edition).
     database.prepare(
-      `SELECT id, name FROM folders fd WHERE NOT EXISTS (SELECT 1 FROM files f WHERE f.folder_id = fd.id)
+      `SELECT id, name FROM folders fd WHERE fd.type = 'plain' AND NOT EXISTS (SELECT 1 FROM files f WHERE f.folder_id = fd.id)
          AND NOT EXISTS (SELECT 1 FROM folders c WHERE c.parent_id = fd.id)`,
     ),
   ]);
@@ -97,29 +97,15 @@ export async function runChecks(t: T): Promise<Check[]> {
     ...cap((noLog.results as EditionInfo[]).map((e) => edItem(e))),
   });
 
-  const FORMAT_WORDS: [RegExp, string[]][] = [
-    [/\bflac\b/i, ['flac']], [/\bwav\b/i, ['wav']], [/\bmp3\b/i, ['mp3']], [/\bm4a\b|\baac\b/i, ['m4a', 'aac']], [/\bogg\b/i, ['ogg']],
-  ];
-  const mislabelled: CheckItem[] = [];
-  for (const d of dirs.results as { dir: string; exts: string; n: number; id: string }[]) {
-    const last = d.dir.split('/').at(-1) ?? '';
-    const exts = d.exts.split(',');
-    const named = FORMAT_WORDS.filter(([re]) => re.test(last));
-    if (named.length === 0) continue;
-    const allowed = new Set(named.flatMap(([, e]) => e));
-    const wrong = exts.filter((e) => !allowed.has(e));
-    if (wrong.length) mislabelled.push({ label: d.dir, href: `/admin/inbox?state=all&tree=source&dir=${encodeURIComponent(d.dir)}`, detail: t('目录名写 {named}，实际是 {exts}', { named: [...allowed].join('/').toUpperCase(), exts: exts.join('/').toUpperCase() }) });
-  }
+  const mislabelled: CheckItem[] = mislabelledDirs(dirs.results as DirExts[]).map((d) => ({
+    label: d.dir, href: `/admin/inbox?view=all&dir=${encodeURIComponent(d.dir)}`,
+    detail: t('目录名写 {named}，实际是 {exts}', { named: d.named.join('/').toUpperCase(), exts: d.exts.join('/').toUpperCase() }),
+  }));
   checks.push({ id: 'format', title: N_('目录名与实际格式不符'), hint: N_('确认是不是放错了目录，或目录名写错了。'), ...cap(mislabelled) });
 
-  const tagDiff: CheckItem[] = [];
-  for (const r of tagRows.results as { id: string; name: string; format: string; et_title: string | null; entry_title: string; version_label: string | null; edition_id: string }[]) {
-    const tag = parseFormat(r.format).tags?.title;
-    const mine = r.et_title ?? (r.version_label ? `${r.entry_title} (${r.version_label})` : r.entry_title);
-    if (tag && titleKey(tag.replace(/^\d{1,3}\s*[.．)）]\s+/, '')) !== titleKey(mine) && titleKey(tag) !== titleKey(r.entry_title)) {
-      tagDiff.push({ label: r.name, href: `/admin/editions/${r.edition_id}#tracks`, detail: t('文件：{tag} · 本站：{mine}', { tag, mine }) });
-    }
-  }
+  const tagDiff: CheckItem[] = tagDifferences(tagRows.results as TagRow[]).map(({ r, tag, mine }) => ({
+    label: r.name, href: `/admin/editions/${r.edition_id}#tracks`, detail: t('文件：{tag} · 本站：{mine}', { tag, mine }),
+  }));
   checks.push({ id: 'tags', title: N_('内嵌标签与本站不一致'), hint: N_('整理版下载会写入本站的标签；确认本站的曲名是对的，或在版本页「从文件标签导入」。'), ...cap(tagDiff) });
 
   checks.push({
@@ -132,11 +118,106 @@ export async function runChecks(t: T): Promise<Check[]> {
   });
   checks.push({
     id: 'sure', title: N_('把握度高的建议还没确认'), hint: N_('这些文件的建议把握度在 80% 以上，可以在整理台「按建议确认」。'),
-    ...cap((sure.results as { dir: string; n: number }[]).map((d) => ({ label: d.dir || '/', href: `/admin/inbox?state=inbox&tree=source&dir=${encodeURIComponent(d.dir)}`, detail: t('{n} 个', { n: d.n }) }))),
+    ...cap((sure.results as { dir: string; n: number }[]).map((d) => ({ label: d.dir || '/', href: `/admin/inbox?view=unplaced&dir=${encodeURIComponent(d.dir)}`, detail: t('{n} 个', { n: d.n }) }))),
   });
   checks.push({
     id: 'empty', title: N_('空文件夹'), hint: N_('没有文件也没有子文件夹；不需要的话在整理台删除。'),
-    ...cap((emptyFolders.results as { id: string; name: string }[]).map((f) => ({ label: f.name, href: `/admin/inbox?state=all&loc=fd:${f.id}` }))),
+    ...cap((emptyFolders.results as { id: string; name: string }[]).map((f) => ({ label: f.name, href: `/admin/inbox?loc=fd:${f.id}` }))),
   });
   return checks;
+}
+
+// ------------------------------------------------------------------------------------------ for the 整理台
+
+interface DirExts { dir: string; exts: string }
+interface TagRow { id: string; name: string; format: string; et_title: string | null; entry_title: string; version_label: string | null; edition_id: string }
+
+const FORMAT_WORDS: [RegExp, string[]][] = [
+  [/\bflac\b/i, ['flac']], [/\bwav\b/i, ['wav']], [/\bmp3\b/i, ['mp3']], [/\bm4a\b|\baac\b/i, ['m4a', 'aac']], [/\bogg\b/i, ['ogg']],
+];
+
+/** Original folders named after a format (「FLAC」) that hold audio of another one. */
+function mislabelledDirs(rows: DirExts[]): { dir: string; named: string[]; exts: string[] }[] {
+  const out: { dir: string; named: string[]; exts: string[] }[] = [];
+  for (const d of rows) {
+    const last = d.dir.split('/').at(-1) ?? '';
+    const exts = d.exts.split(',');
+    const named = FORMAT_WORDS.filter(([re]) => re.test(last));
+    if (named.length === 0) continue;
+    const allowed = new Set(named.flatMap(([, e]) => e));
+    if (exts.some((e) => !allowed.has(e))) out.push({ dir: d.dir, named: [...allowed], exts });
+  }
+  return out;
+}
+
+/** Files whose own title tag differs from what their edition calls the track. */
+function tagDifferences(rows: TagRow[]): { r: TagRow; tag: string; mine: string }[] {
+  const out: { r: TagRow; tag: string; mine: string }[] = [];
+  for (const r of rows) {
+    const tag = parseFormat(r.format).tags?.title;
+    const mine = r.et_title ?? (r.version_label ? `${r.entry_title} (${r.version_label})` : r.entry_title);
+    if (tag && titleKey(tag.replace(/^\d{1,3}\s*[.．)）]\s+/, '')) !== titleKey(mine) && titleKey(tag) !== titleKey(r.entry_title)) out.push({ r, tag, mine });
+  }
+  return out;
+}
+
+/** 智能文件夹「目录名与格式不符」: the audio files in those folders. */
+export async function formatMismatchIds(): Promise<string[]> {
+  const database = db();
+  const { results } = await database
+    .prepare(`SELECT dir, group_concat(DISTINCT lower(ext)) AS exts FROM files WHERE kind = 'audio' AND ${VISIBLE} AND state != 'ignored' GROUP BY dir`)
+    .all<DirExts>();
+  const dirs = mislabelledDirs(results).map((d) => d.dir);
+  if (dirs.length === 0) return [];
+  const { results: ids } = await database
+    .prepare(`SELECT id FROM files WHERE kind = 'audio' AND ${VISIBLE} AND state != 'ignored' AND dir IN (SELECT value FROM json_each(?))`)
+    .bind(JSON.stringify(dirs))
+    .all<{ id: string }>();
+  return ids.map((r) => r.id);
+}
+
+/** 智能文件夹「标签与本站不一致」. */
+export async function tagMismatchIds(): Promise<string[]> {
+  const { results } = await db()
+    .prepare(
+      `SELECT f.id, f.name, f.format, et.title AS et_title, t.title AS entry_title, t.version_label, f.edition_id
+       FROM files f JOIN edition_tracks et ON et.edition_id = f.edition_id AND et.track_id = f.track_id
+       JOIN tracks t ON t.id = f.track_id
+       WHERE f.kind = 'audio' AND f.sealed_in IS NULL AND json_extract(f.format, '$.tags.title') IS NOT NULL`,
+    )
+    .all<TagRow>();
+  return tagDifferences(results).map((d) => d.r.id);
+}
+
+export const EDITION_PROBLEMS = { count: N_('曲数与声明不符'), log: N_('CD 抓轨没有 LOG'), cover: N_('没有封面') } as const;
+export type EditionProblem = keyof typeof EDITION_PROBLEMS;
+
+/** Editions with something to fix, for the 「有问题的版本」 list and the marks in the folder tree. */
+export async function editionProblems(): Promise<Map<string, EditionProblem[]>> {
+  const database = db();
+  const [counts, noLog, noCover] = await database.batch([
+    database.prepare(
+      `SELECT e.id FROM editions e WHERE e.track_count IS NOT NULL
+         AND e.track_count != (SELECT count(*) FROM edition_tracks et WHERE et.edition_id = e.id)
+         AND EXISTS (SELECT 1 FROM edition_tracks et WHERE et.edition_id = e.id)`,
+    ),
+    database.prepare(
+      `SELECT e.id FROM editions e WHERE e.slot = 'cd_rip'
+         AND EXISTS (SELECT 1 FROM files f WHERE f.edition_id = e.id AND f.kind = 'audio' AND f.sealed_in IS NULL)
+         AND NOT EXISTS (SELECT 1 FROM files f WHERE f.edition_id = e.id AND lower(f.ext) = 'log')`,
+    ),
+    database.prepare(
+      `SELECT e.id FROM editions e JOIN releases r ON r.id = e.release_id
+       WHERE e.cover_file_id IS NULL AND r.cover_file_id IS NULL
+         AND EXISTS (SELECT 1 FROM files f WHERE f.edition_id = e.id AND f.kind = 'audio' AND f.sealed_in IS NULL)`,
+    ),
+  ]);
+  const out = new Map<string, EditionProblem[]>();
+  const add = (rows: unknown[], p: EditionProblem) => {
+    for (const { id } of rows as { id: string }[]) out.set(id, [...(out.get(id) ?? []), p]);
+  };
+  add(counts.results, 'count');
+  add(noLog.results, 'log');
+  add(noCover.results, 'cover');
+  return out;
 }

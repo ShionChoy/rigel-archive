@@ -6,7 +6,7 @@ import { t } from './i18n';
 interface Option {
   key: string;
   path: string;
-  kind: string; // era, rel, ed, fd, top
+  kind: string; // a folder's type (plain, era, release, edition), or top
   depth: number;
 }
 
@@ -23,6 +23,10 @@ export interface PickOptions {
   keepDir?: string | null;
   /** Places that cannot be chosen (a folder cannot move into itself). */
   exclude?: (key: string) => boolean;
+  /** The top level can be chosen (moving folders); files need a folder. */
+  allowTop?: boolean;
+  /** Only choose a folder to open (Ctrl+J): no new folder, no sub-structure. */
+  go?: boolean;
 }
 
 const RECENT = 'rigel.recentPlaces';
@@ -45,9 +49,14 @@ export function rememberPlace(key: string) {
 }
 
 const fold = (s: string) => s.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
-const placeable = (o: Option) => o.kind !== 'era' && o.kind !== 'top';
+const placeable = (o: Option, allowTop = false) => allowTop || o.kind !== 'top';
 
 let options: Option[] | null = null;
+
+/** The page was reloaded in place (a folder added or moved): read the options again next time. */
+export function resetPickerOptions() {
+  options = null;
+}
 
 export function pickerOptions(): Option[] {
   if (!options) {
@@ -73,6 +82,7 @@ export function openPicker(opts: PickOptions = {}): Promise<PickResult | null> {
   const keep = dialog.querySelector<HTMLInputElement>('[data-keep]')!;
   const chosenText = dialog.querySelector<HTMLElement>('[data-chosen]')!;
   dialog.querySelector('[data-title]')!.textContent = opts.title ?? t('移动到…');
+  (dialog.querySelector('[data-new-row]') as HTMLElement).hidden = !!opts.go;
   ok.textContent = opts.confirm ?? t('移动到这里');
   search.value = '';
   newFolder.value = '';
@@ -84,10 +94,11 @@ export function openPicker(opts: PickOptions = {}): Promise<PickResult | null> {
 
   const allowed = (o: Option) => !opts.exclude?.(o.key);
   const update = () => {
-    const canFile = !!chosen && (placeable(chosen) || newFolder.value.trim() !== '');
+    const top = !!opts.allowTop || !!opts.go;
+    const canFile = !!chosen && (placeable(chosen, top) || newFolder.value.trim() !== '');
     ok.disabled = !canFile;
     chosenText.textContent = chosen
-      ? `${chosen.path}${newFolder.value.trim() ? ` / ${newFolder.value.trim()}` : ''}${!placeable(chosen) && !newFolder.value.trim() ? ` — ${t('名义和顶层只能放文件夹，请输入新文件夹名')}` : ''}`
+      ? `${chosen.path}${newFolder.value.trim() ? ` / ${newFolder.value.trim()}` : ''}${!placeable(chosen, top) && !newFolder.value.trim() ? ` — ${t('顶层只能放文件夹，请选一个文件夹或输入新文件夹名')}` : ''}`
       : t('请选择位置');
   };
   const render = () => {
@@ -163,7 +174,7 @@ export function openPicker(opts: PickOptions = {}): Promise<PickResult | null> {
       newFolder.removeEventListener('input', update);
       dialog.removeEventListener('close', onClose);
       if (dialog.returnValue === 'ok' && chosen) {
-        rememberPlace(chosen.key);
+        if (!opts.go && chosen.kind !== 'top') rememberPlace(chosen.key);
         resolve({ target: chosen.key, newFolder: newFolder.value.trim(), keep: keep.checked });
       } else resolve(null);
     };

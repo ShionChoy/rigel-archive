@@ -49,6 +49,38 @@ def insert(table: str, columns: Sequence[str], rows: Iterable[Sequence], or_igno
     return statements
 
 
+def _guarded(table: str, columns: Sequence[str], rows: list[Sequence], where: str) -> list[str]:
+    """INSERT OR IGNORE of rows that pass `where` (on the VALUES row `v`, columns column1, column2 …)."""
+    statements = []
+    for i in range(0, len(rows), ROWS_PER_INSERT):
+        values = ",\n".join("(" + ", ".join(q(v) for v in row) + ")" for row in rows[i : i + ROWS_PER_INSERT])
+        statements.append(
+            f"INSERT OR IGNORE INTO {table} ({', '.join(columns)})\nSELECT * FROM (VALUES\n{values}) AS v\nWHERE {where};"
+        )
+    return statements
+
+
+# The admin is where the catalog is edited once it has been imported: a release deleted there (or turned
+# back into a plain folder) is not brought back, and one whose era is gone waits for it.
+RELEASE_WANTED = """NOT EXISTS (SELECT 1 FROM revisions r WHERE r.entity = 'release' AND r.entity_id = v.column1
+    AND r.action = 'delete' AND r.reverted_by_batch IS NULL)
+  AND EXISTS (SELECT 1 FROM eras e WHERE e.id = v.column3)"""
+
+# Every era, release and edition is a folder in the 整理台's tree (migration 0007); releases the import
+# adds get theirs here. Not in the revision log, like the rest of the import.
+ENSURE_FOLDERS = [
+    """INSERT INTO folders (id, parent_id, type, era_id)
+SELECT 'fd_' || lower(hex(randomblob(8))), NULL, 'era', e.id FROM eras e
+WHERE NOT EXISTS (SELECT 1 FROM folders f WHERE f.era_id = e.id);""",
+    """INSERT INTO folders (id, parent_id, type, release_id)
+SELECT 'fd_' || lower(hex(randomblob(8))), (SELECT f.id FROM folders f WHERE f.era_id = r.era_id), 'release', r.id FROM releases r
+WHERE NOT EXISTS (SELECT 1 FROM folders f WHERE f.release_id = r.id);""",
+    """INSERT INTO folders (id, parent_id, type, edition_id)
+SELECT 'fd_' || lower(hex(randomblob(8))), (SELECT f.id FROM folders f WHERE f.release_id = e.release_id), 'edition', e.id FROM editions e
+WHERE NOT EXISTS (SELECT 1 FROM folders f WHERE f.edition_id = e.id);""",
+]
+
+
 def release_statements(releases: list[Release]) -> list[str]:
     release_rows = [
         (
@@ -62,12 +94,20 @@ def release_statements(releases: list[Release]) -> list[str]:
         for r in releases
         for slot, state in r.slots.items()
     ]
-    return insert(
-        "releases",
-        ("id", "catalog_no", "era_id", "kind", "series", "title", "release_date", "event",
-         "track_count", "aliases", "links", "note"),
-        release_rows,
-    ) + insert("release_slots", ("release_id", "slot", "status", "planned_date", "note"), slot_rows)
+    return (
+        _guarded(
+            "releases",
+            ("id", "catalog_no", "era_id", "kind", "series", "title", "release_date", "event",
+             "track_count", "aliases", "links", "note"),
+            release_rows,
+            RELEASE_WANTED,
+        )
+        + _guarded(
+            "release_slots", ("release_id", "slot", "status", "planned_date", "note"), slot_rows,
+            "EXISTS (SELECT 1 FROM releases x WHERE x.id = v.column1)",
+        )
+        + ENSURE_FOLDERS
+    )
 
 
 # Columns the import owns: re-running it refreshes these and never touches admin decisions
