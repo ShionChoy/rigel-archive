@@ -1,14 +1,13 @@
 import { ChangeSet } from './changes';
-import { RIGHTS, RIGHTS_LABELS, isOneOf, type Slot } from './constants';
+import { RIGHTS, RIGHTS_LABELS, isOneOf } from './constants';
 import type { DirNode } from '../components/DirTree.astro';
 import { db, parseSuggestion, type Suggestion } from './db';
 import { deleteFiles, planDelete, type DeletePlan } from './deletion';
 import { newId } from './ids';
 import {
-  Places, TOP, UNPLACED, UNPLACED_SQL, VISIBLE, applyPatches, ensureEntityFolder, ensureFolder, folderKey, locationWhere,
+  Places, TOP, UNPLACED, UNPLACED_SQL, VISIBLE, applyPatches, ensureEntityFolder, ensureExtras, ensureFolder, folderKey, locationWhere,
   markEditionsCollected, moveFiles, placePatch, sealArchives,
 } from './locations';
-import { markCollected } from './releases';
 import { presetOf, ruleSetSql, type SmartFolder } from './smart';
 import { summary, UserError, type T } from './i18n';
 
@@ -218,12 +217,17 @@ export interface ActionResult {
   refused?: string[]; // archives that could not be kept whole
   placed?: number; // accept: files put at a place (or ignored)
   sealed?: { archives: number; hidden: number }; // archives kept whole, and the files that left the 整理台
+  created?: string[]; // accept: editions made because a suggestion named one that did not exist yet
+  noType?: number; // accept: files skipped because their suggestion's edition type has been deleted
 }
 
 const UNPLACE = { release_id: null, edition_id: null, folder_id: null, slot: null, track_id: null };
 
-/** The edition of a release's slot with this name (and its folder), made in `cs` when missing. */
-export function ensureEdition(cs: ChangeSet, places: Places, releaseId: string, slot: Slot, name: string, catalog: string | null): string {
+/**
+ * The edition of this type and name of a release (with its folder and 附件), made in `cs` when missing
+ * (its id is added to `created`).
+ */
+export function ensureEdition(cs: ChangeSet, places: Places, releaseId: string, slot: string, name: string, catalog: string | null, created?: string[]): string {
   const found = [...places.editions.values()].find((e) => e.release_id === releaseId && e.slot === slot && e.name === name);
   if (found) return found.id;
   const id = newId('e');
@@ -231,21 +235,30 @@ export function ensureEdition(cs: ChangeSet, places: Places, releaseId: string, 
   cs.queueCreate('edition', { ...row, source: null, based_on: null, track_count: null, album_title: null, cover_file_id: null, external_ids: '{}', note: null });
   places.addEdition(row);
   ensureEntityFolder(cs, places, `ed:${id}`);
+  created?.push(id);
   return id;
 }
 
-/** Where a suggestion puts a file (making the edition or folders it names), or null for nowhere. */
-export function suggestedPlace(cs: ChangeSet, places: Places, s: Suggestion): string | null {
+/** Where a rule suggests a file: an edition (made when missing) and the folders under it. */
+export interface SuggestedEdition {
+  edition: string;
+  folder: string[];
+}
+
+/**
+ * Where a suggestion puts a file (making the edition or folders it names), or null for nowhere. A
+ * suggestion into an edition is returned as such (the caller decides between the edition and its 附件).
+ */
+export function suggestedPlace(cs: ChangeSet, places: Places, s: Suggestion, created?: string[]): string | SuggestedEdition | null {
   const folder = s.folder ? s.folder.split('/').filter(Boolean) : [];
   if (s.place && s.place !== UNPLACED && (s.place === TOP || places.exists(s.place))) {
     if (folder.length) return folderKey(ensureFolder(cs, places, s.place, folder));
     return s.place === TOP ? null : folderKey(ensureEntityFolder(cs, places, s.place));
   }
   if (s.release_id && places.releases.has(s.release_id)) {
-    let key = folderKey(ensureEntityFolder(cs, places, `rel:${s.release_id}`));
-    if (s.slot) key = folderKey(ensureEntityFolder(cs, places, `ed:${ensureEdition(cs, places, s.release_id, s.slot, s.edition ?? '', s.edition_catalog ?? null)}`));
-    if (folder.length) key = folderKey(ensureFolder(cs, places, key, folder));
-    return key;
+    if (s.slot) return { edition: ensureEdition(cs, places, s.release_id, s.slot, s.edition ?? '', s.edition_catalog ?? null, created), folder };
+    const key = folderKey(ensureEntityFolder(cs, places, `rel:${s.release_id}`));
+    return folder.length ? folderKey(ensureFolder(cs, places, key, folder)) : key;
   }
   if (folder.length) {
     const under = s.era_id && places.eras.has(s.era_id) ? `era:${s.era_id}` : TOP;
@@ -261,6 +274,8 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
   let lowConfidence = 0;
   let placedCount: number | undefined;
   let sealed: { archives: number; hidden: number } | undefined;
+  let created: string[] | undefined;
+  let noType = 0;
   let refused: string[] | undefined;
   let cs: ChangeSet;
 
@@ -350,8 +365,41 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
       seals = seals.filter((id) => !inside.has(id)); // an archive inside another one kept whole goes with it
       lowConfidence = unsure.size;
       skipped += none.size;
+      // A suggestion whose edition type has been deleted since is skipped (and said so).
+      for (const row of rows) {
+        const s = suggestions.get(row.id);
+        if (s?.slot && s.release_id && !s.place && !places.types.has(s.slot) && !inside.has(row.id)) {
+          suggestions.delete(row.id);
+          noType += 1;
+        }
+      }
+      seals = seals.filter((id) => suggestions.has(id));
       const patches = new Map<string, Record<string, unknown>>();
       const readmes: [string, string][] = [];
+      const made: string[] = [];
+      const targets = new Map<string, string | SuggestedEdition | null>();
+      for (const row of rows) {
+        const s = suggestions.get(row.id);
+        if (!s || inside.has(row.id) || s.state === 'ignored') continue;
+        targets.set(row.id, suggestedPlace(cs, places, s, made));
+      }
+      // Into an edition that has audio (already, or filed in this same step), what is not audio (LOG, CUE,
+      // scans, notes …) goes to its 附件, keeping the folders the rule named below it; an edition without
+      // audio (scans, PV) takes everything directly.
+      const isAudio = (row: Record<string, unknown>) => row.kind === 'audio' || isArchive(row);
+      const intoEditions = [...new Set([...targets.values()].filter((v): v is SuggestedEdition => !!v && typeof v === 'object').map((v) => v.edition))];
+      const withAudio = new Set<string>();
+      if (intoEditions.length) {
+        const { results } = await database
+          .prepare("SELECT DISTINCT edition_id FROM files WHERE edition_id IN (SELECT value FROM json_each(?)) AND kind = 'audio' AND sealed_in IS NULL AND state != 'ignored'")
+          .bind(JSON.stringify(intoEditions))
+          .all<{ edition_id: string }>();
+        for (const r of results) withAudio.add(r.edition_id);
+        for (const row of rows) {
+          const target = targets.get(row.id);
+          if (target && typeof target === 'object' && row.kind === 'audio') withAudio.add(target.edition);
+        }
+      }
       for (const row of rows) {
         const s = suggestions.get(row.id);
         if (!s || inside.has(row.id)) continue;
@@ -359,7 +407,13 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
           patches.set(row.id, { ...UNPLACE, state: 'ignored' });
           continue;
         }
-        const key = suggestedPlace(cs, places, s);
+        const target = targets.get(row.id) ?? null;
+        let key: string | null;
+        if (target && typeof target === 'object') {
+          const edition = folderKey(ensureEntityFolder(cs, places, `ed:${target.edition}`));
+          const base = !isAudio(row) && withAudio.has(target.edition) ? folderKey(ensureExtras(cs, places, places.folderOf(edition)!.id)) : edition;
+          key = target.folder.length ? folderKey(ensureFolder(cs, places, base, target.folder)) : base;
+        } else key = target;
         const patch: Record<string, unknown> = key ? placePatch(row as never, places.place(key)) : {};
         if (s.rights) patch.rights = s.rights;
         if (s.role) patch.role = s.role;
@@ -374,8 +428,11 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
       cs.setSummary(summary('整理台：按建议确认 {n} 个文件', { n: accepted }));
       applyPatches(cs, patches);
       const placed = [...patches.values()].filter((p) => p.state !== 'ignored');
-      await markCollected(cs, placed.map((p) => [p.release_id as string | null, p.slot as string | null] as const));
       markEditionsCollected(cs, places, placed.map((p) => p.edition_id as string | null));
+      created = made.map((id) => {
+        const e = places.editions.get(id)!;
+        return `${places.releaseLabel(e.release_id)} / ${places.editionLabel(e, t)}`;
+      });
       for (const [folder, file] of readmes) {
         const f = places.folders.get(folder);
         if (f && !f.readme_file_id) {
@@ -420,7 +477,7 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
     }
   }
   const changed = await cs.commit();
-  return { summary: cs.summary, changed, skipped, lowConfidence, batchId: changed ? cs.batchId : null, placed: placedCount, sealed, refused };
+  return { summary: cs.summary, changed, skipped, lowConfidence, batchId: changed ? cs.batchId : null, placed: placedCount, sealed, refused, created, noType };
 }
 
 /**

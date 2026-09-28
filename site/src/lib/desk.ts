@@ -1,10 +1,10 @@
 // What the 整理台's inspector (the right-hand pane) shows: the open or selected folder, one file, several
 // files; and the 回收站 (files deleted recently, restored by undoing their deletion).
 
+import { editionCovers } from './covers';
 import { db, parseFormat, parseSuggestion, type FileRow, type Suggestion } from './db';
+import type { T } from './i18n';
 import { folderKey, type FolderInfo, type Places } from './locations';
-import { imageSrc } from './media';
-import { derivedFor } from './processing';
 
 export interface FolderStats {
   own: number; // files directly in it
@@ -20,15 +20,15 @@ export interface FolderView {
   stats: FolderStats;
   release?: { id: string; catalog_no: string | null; title: string; kind: string; release_date: string | null; state: string; tracks: number };
   edition?: {
-    id: string; slot: string; name: string; status: string; catalog_no: string | null; release_date: string | null; tracks: number;
-    cover: { src: string | null; name: string; own: boolean } | null; // the cover its 整理版 embeds (own = the edition's, else the release's)
+    id: string; slot: string; type: string; name: string; status: string; catalog_no: string | null; release_date: string | null; tracks: number;
+    covers: { src: string; name: string; chosen: boolean; tracks: number | null }[]; // chosen by hand, or what its tracks carry
   };
   texts: { id: string; name: string }[]; // text files directly in it (for 说明文件)
   readme: { id: string; name: string; blob_key: string | null } | null;
   pinned: boolean;
 }
 
-export async function folderView(places: Places, id: string, t: (s: string) => string, pinned: boolean): Promise<FolderView | null> {
+export async function folderView(places: Places, id: string, t: T, pinned: boolean): Promise<FolderView | null> {
   const folder = places.folders.get(id);
   if (!folder) return null;
   const database = db();
@@ -46,22 +46,21 @@ export async function folderView(places: Places, id: string, t: (s: string) => s
       .bind(folder.release_id ?? ''),
     database
       .prepare(
-        `SELECT e.id, e.slot, e.name, e.status, e.catalog_no, e.release_date, (SELECT count(*) FROM edition_tracks WHERE edition_id = e.id) AS tracks,
-                e.cover_file_id IS NOT NULL AS own_cover, c.name AS cover_name, c.sha256 AS cover_sha, c.blob_key AS cover_key
-         FROM editions e JOIN releases r ON r.id = e.release_id LEFT JOIN files c ON c.id = coalesce(e.cover_file_id, r.cover_file_id)
-         WHERE e.id = ?`,
+        `SELECT e.id, e.slot, e.name, e.status, e.catalog_no, e.release_date, (SELECT count(*) FROM edition_tracks WHERE edition_id = e.id) AS tracks
+         FROM editions e WHERE e.id = ?`,
       )
       .bind(folder.edition_id ?? ''),
     database.prepare('SELECT id, name, blob_key FROM files WHERE id = ?').bind(folder.readme_file_id ?? ''),
   ]);
   const s = stats.results[0] as { own: number | null; total: number; bytes: number };
-  type E = NonNullable<FolderView['edition']> & { own_cover: number; cover_name: string | null; cover_sha: string | null; cover_key: string | null };
-  const e = edition.results[0] as E | undefined;
+  const e = edition.results[0] as Omit<NonNullable<FolderView['edition']>, 'covers' | 'type'> | undefined;
   let editionView: FolderView['edition'];
   if (e) {
-    const { own_cover, cover_name, cover_sha, cover_key, ...rest } = e;
-    const derived = cover_sha ? (await derivedFor(database, [cover_sha])).get(cover_sha) : undefined;
-    editionView = { ...rest, cover: cover_name ? { name: cover_name, own: !!own_cover, src: imageSrc(cover_key ? `/admin/media/${cover_key}` : null, derived, 240) } : null };
+    const covers = (await editionCovers([e.id], { size: 240 })).get(e.id) ?? [];
+    editionView = {
+      ...e, type: places.types.label(e.slot, t),
+      covers: covers.map((c) => ({ src: c.src, name: c.file?.name ?? '', chosen: c.source === 'chosen', tracks: c.tracks ?? null })),
+    };
   }
   return {
     folder,
@@ -82,7 +81,7 @@ export type FileView = FileRow & {
   edition_has_tracks: number;
   copies: number;
   members: number;
-  cover_of: 'edition' | 'release' | null; // a picture that is its edition's or release's cover
+  cover_of: 'edition' | null; // a picture chosen as its edition's cover (of its tracks, or of an edition without tracks)
 };
 
 export async function fileView(id: string): Promise<FileView | null> {
@@ -95,7 +94,7 @@ export async function fileView(id: string): Promise<FileView | null> {
               (SELECT count(*) FROM files m WHERE m.sealed_in = f.id) AS members,
               CASE WHEN f.kind != 'image' THEN NULL
                    WHEN EXISTS (SELECT 1 FROM editions e WHERE e.id = f.edition_id AND e.cover_file_id = f.id) THEN 'edition'
-                   WHEN EXISTS (SELECT 1 FROM releases r WHERE r.id = f.release_id AND r.cover_file_id = f.id) THEN 'release' END AS cover_of
+                   WHEN EXISTS (SELECT 1 FROM edition_tracks et WHERE et.edition_id = f.edition_id AND json_extract(et.cover, '$.file') = f.id) THEN 'edition' END AS cover_of
        FROM files f WHERE f.id = ?`,
     )
     .bind(id)

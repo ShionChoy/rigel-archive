@@ -1,26 +1,25 @@
 ---
 import Admin from '../../../layouts/Admin.astro';
 import ReleaseFields from '../../../components/ReleaseFields.astro';
-import { RELEASE_KIND_LABELS, SLOTS, SLOT_LABELS, SLOT_STATUSES, SLOT_STATUS_LABELS } from '../../../lib/constants';
+import { RELEASE_KIND_LABELS } from '../../../lib/constants';
 import { batchSince } from '../../../lib/changes';
-import { db, type ReleaseRow, type SlotRow } from '../../../lib/db';
+import { editionCovers } from '../../../lib/covers';
+import { db, type ReleaseRow } from '../../../lib/db';
 import {
   EDITION_STATUSES, EDITION_STATUS_LABELS, RELATION_MARK, RELATION_TEXT, comparison, createEdition, loadEditions, mergeTracks, parseIds,
 } from '../../../lib/editions';
 import { formatDuration, percent, withParams } from '../../../lib/format';
 import { N_, UserError, errorText, translateHtml } from '../../../lib/i18n';
 import { Places } from '../../../lib/locations';
-import { LANGS, derivedSlotStatus, saveCover, saveInfo, saveSlots, saveTranslations } from '../../../lib/releases';
+import { LANGS, saveInfo, saveTranslations } from '../../../lib/releases';
 import { formatMs, loadTracks, sameTitleSongs, saveTracks } from '../../../lib/tracks';
+import { NEW_TYPE } from '../../../lib/types';
 
 const { id } = Astro.params;
 const { t, lang } = Astro.locals;
 const database = db();
 const release = await database.prepare('SELECT * FROM releases WHERE id = ?').bind(id).first<ReleaseRow>();
 if (!release) return new Response(t('找不到作品'), { status: 404 });
-
-const loadSlots = async () =>
-  (await database.prepare('SELECT * FROM release_slots WHERE release_id = ?').bind(release.id).all<SlotRow>()).results;
 
 if (Astro.request.method === 'POST') {
   const started = new Date().toISOString();
@@ -33,14 +32,8 @@ if (Astro.request.method === 'POST') {
       case 'info':
         msg = saved(await saveInfo(actor, release, form));
         break;
-      case 'slots':
-        msg = saved(await saveSlots(actor, release, await loadSlots(), form));
-        break;
       case 'i18n':
         msg = saved(await saveTranslations(actor, release, form));
-        break;
-      case 'cover':
-        msg = saved(await saveCover(actor, release, form));
         break;
       case 'tracks':
         msg = saved(await saveTracks(actor, release, await loadTracks(release.id), form));
@@ -62,8 +55,7 @@ if (Astro.request.method === 'POST') {
   }
 }
 
-const [slots, editions, tracks, translations, matrix, places, counts, images] = await Promise.all([
-  loadSlots(),
+const [editions, tracks, translations, matrix, places, counts] = await Promise.all([
   loadEditions(release.id),
   loadTracks(release.id),
   database
@@ -79,8 +71,8 @@ const [slots, editions, tracks, translations, matrix, places, counts, images] = 
     )
     .bind(release.id)
     .all<{ edition_id: string | null; folder_id: string | null; n: number; audio: number }>(),
-  database.prepare("SELECT id, name, slot FROM files WHERE release_id = ? AND kind = 'image' AND sealed_in IS NULL ORDER BY slot, name").bind(release.id).all<{ id: string; name: string; slot: string | null }>(),
 ]);
+const covers = await editionCovers(editions.map((e) => e.id), { read: true, size: 240 });
 const { results: etCounts } = await database
   .prepare('SELECT et.edition_id, count(*) AS n FROM edition_tracks et JOIN editions e ON e.id = et.edition_id WHERE e.release_id = ? GROUP BY et.edition_id')
   .bind(release.id)
@@ -99,10 +91,10 @@ if (tracks.length) {
     .all<{ id: string; title: string; n: number }>();
   for (const s of results) songTitles.set(s.id, s.n > 1 ? t('{title}（{n} 个版本）', { title: s.title, n: s.n }) : s.title);
 }
-const slotBy = new Map(slots.map((s) => [s.slot, s]));
 const tr = (field: string, code: string) => translations.results.find((x) => x.field === field && x.lang === code)?.value ?? '';
 const LANG_NAMES: Record<string, string> = { zh: N_('中文'), ja: N_('日文'), en: N_('英文') };
-const editionLabel = (e: { slot: string; name: string }) => `${t(SLOT_LABELS[e.slot as keyof typeof SLOT_LABELS])}${e.name ? ` · ${e.name}` : ''}`;
+const editionLabel = (e: { slot: string; name: string }) => places.editionLabel(e, t);
+const types = places.types;
 const hasMatrix = matrix.editions.length > 1 && matrix.rows.length > 0;
 const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>) => {
   const mark = RELATION_MARK[c.relation];
@@ -122,13 +114,21 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
 
   <h2 id="editions">{t('版本')}</h2>
   <div class="panel">
-    <table class="grid">
-      <thead><tr><th>{t('类型 · 名称')}</th><th>{t('编号')}</th><th>{t('发行日')}</th><th>{t('状态')}</th><th class="num">{t('曲目')}</th><th class="num">{t('文件')}</th><th></th></tr></thead>
+    <table class="grid editions-table">
+      <thead><tr><th></th><th>{t('类型 · 名称')}</th><th>{t('编号')}</th><th>{t('发行日')}</th><th>{t('状态')}</th><th class="num">{t('曲目')}</th><th class="num">{t('文件')}</th><th></th></tr></thead>
       <tbody>
         {editions.map((e) => {
           const ids = parseIds(e.external_ids);
+          const cover = covers.get(e.id) ?? [];
           return (
             <tr>
+              <td class="ed-cover">
+                {cover.length ? (
+                  <a href={`/admin/editions/${e.id}`} class="ed-thumbs" title={cover.length > 1 ? t('各曲目的封面不同（{n} 种）', { n: cover.length }) : undefined}>
+                    {cover.slice(0, 3).map((c) => <img src={c.src} alt="" loading="lazy" />)}
+                  </a>
+                ) : <span class="ed-nocover" title={t('没有封面')}></span>}
+              </td>
               <td>
                 <a href={`/admin/editions/${e.id}`}>{editionLabel(e)}</a>
                 {e.is_default ? <span class="chip collected" title={t('公开页默认显示这个版本')}>{t('默认')}</span> : null}
@@ -138,14 +138,15 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
               <td>{e.release_date ?? ''}</td>
               <td><span class={`chip ${e.status}`}>{t(EDITION_STATUS_LABELS[e.status])}</span></td>
               <td class="num">{trackCount.get(e.id) ?? 0}{e.track_count && e.track_count !== (trackCount.get(e.id) ?? 0) ? <span class="muted"> / {e.track_count}</span> : null}</td>
-              <td class="num"><a href={`/admin/inbox?loc=ed:${e.id}`}>{filesIn(e.id)}</a></td>
+              <td class="num"><a href={`/admin/inbox?loc=ed:${e.id}&sub=1`}>{filesIn(e.id)}</a></td>
               <td>{ids.musicbrainz_release && <a href={`https://musicbrainz.org/release/${ids.musicbrainz_release}`} target="_blank" rel="noopener" title="MusicBrainz">MB</a>}</td>
             </tr>
           );
         })}
-        {editions.length === 0 && <tr><td colspan="7" class="muted">{t('还没有版本。把文件放进作品时按建议会自动建好，也可以在下面新建，或从 MusicBrainz 导入。')}</td></tr>}
+        {editions.length === 0 && <tr><td colspan="8" class="muted">{t('还没有版本。在下面新建（如「实体 CD · 初版」「官方数字版 · Bandcamp」「图片 · 扫图集」），或从 MusicBrainz 导入；把文件按建议归档时也会自动建好。')}</td></tr>}
         {(loose > 0 || releaseFolders.length > 0) && (
           <tr>
+            <td></td>
             <td colspan="5" class="muted">
               {t('相关资料（不属于某个版本）')}
               {releaseFolders.map((f) => <> · <a href={`/admin/inbox?loc=fd:${f.id}`}>{f.name}</a></>)}
@@ -156,17 +157,24 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
         )}
       </tbody>
     </table>
-    <form method="post" class="inline-form">
+    <form method="post" class="inline-form new-edition">
       <input type="hidden" name="section" value="edition_new" />
-      <select name="slot" aria-label={t('类型')}>{SLOTS.map((s) => <option value={s}>{t(SLOT_LABELS[s])}</option>)}</select>
-      <input type="text" name="name" placeholder={t('名称，如「第 2 版」')} maxlength="100" />
+      <select name="slot" aria-label={t('类型')} data-type-select>
+        {types.options(t).map((o) => <option value={o.id}>{o.label}</option>)}
+        <option value={NEW_TYPE}>{t('＋ 新类型…')}</option>
+      </select>
+      <input type="text" name="new_type" placeholder={t('新类型名称')} maxlength="40" hidden data-new-type />
+      <input type="text" name="name" placeholder={t('名称，如「初版」「扫图集」「Bandcamp 24bit」')} maxlength="100" />
       <input type="text" name="catalog_no" placeholder={t('编号')} size="12" />
       <input type="text" name="release_date" placeholder={t('发行日')} size="11" />
       <select name="status" aria-label={t('状态')}>{EDITION_STATUSES.map((s) => <option value={s}>{t(EDITION_STATUS_LABELS[s])}</option>)}</select>
-      <button type="submit">{t('新建版本')}</button>
+      <button type="submit" class="primary">{t('＋ 新建版本')}</button>
       <a class="button" href={`/admin/releases/${release.id}/musicbrainz`}>{t('从 MusicBrainz 导入版本…')}</a>
     </form>
-    <p class="muted">{t('没收到的版本也可以建，状态选「缺档」，公开页会显示缺的是哪一版。')}</p>
+    <p class="muted">
+      {t('版本的数量和名称不限，也可以没有曲目（如只放扫图的「图片」版本）。每个版本自带一个「附件」文件夹，放 LOG、CUE、扫图等。知道存在、还没收到的版本也可以建，状态选「缺档」：它只出现在后台和缺档看板。')}
+      <a href="/admin/types">{t('管理版本类型 ›')}</a>
+    </p>
   </div>
 
   {
@@ -222,40 +230,6 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
     )
   }
 
-  <h2>{t('版本栏位')}</h2>
-  <form method="post" class="panel">
-    <input type="hidden" name="section" value="slots" />
-    <p class="muted">{t('公开页固定显示 7 个栏位。有版本的栏位状态由版本推导（改版本状态即可）；没有版本的在这里手选。')}</p>
-    <table class="grid slot-table">
-      <thead><tr><th>{t('栏位')}</th><th>{t('状态')}</th><th>{t('预定日期')}</th><th>{t('说明')}</th><th>{t('版本')}</th></tr></thead>
-      <tbody>
-        {
-          SLOTS.map((s) => {
-            const row = slotBy.get(s);
-            const mine = editions.filter((e) => e.slot === s);
-            const derived = derivedSlotStatus(mine.map((e) => e.status));
-            return (
-              <tr>
-                <td>{t(SLOT_LABELS[s])}</td>
-                <td>
-                  <select name={`status_${s}`} required>
-                    {!row && <option value="">{t('（缺少状态）')}</option>}
-                    {SLOT_STATUSES.map((st) => <option value={st} selected={(derived ?? row?.status) === st}>{t(SLOT_STATUS_LABELS[st])}</option>)}
-                  </select>
-                  {derived && <span class="muted"> {t('由版本推导')}</span>}
-                </td>
-                <td><input type="text" name={`planned_${s}`} value={row?.planned_date ?? ''} size="10" placeholder={t('仅「预定」')} /></td>
-                <td><input type="text" name={`note_${s}`} value={row?.note ?? ''} style="width:100%" /></td>
-                <td>{mine.map((e) => <a href={`/admin/editions/${e.id}`} class={`chip ${e.status}`}>{e.name || t('默认')}</a>)}</td>
-              </tr>
-            );
-          })
-        }
-      </tbody>
-    </table>
-    <p><button class="primary" type="submit">{t('保存栏位')}</button></p>
-  </form>
-
   <h2 id="tracks">{t('曲目条目')}</h2>
   <form method="post" class="panel">
     <input type="hidden" name="section" value="tracks" />
@@ -310,25 +284,6 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
     </p>
   </form>
 
-  <h2>{t('封面')}</h2>
-  <form method="post" class="panel">
-    <input type="hidden" name="section" value="cover" />
-    {
-      images.results.length === 0 ? (
-        <p class="muted">{t('这个作品还没有图片文件。把扫图或封面归入作品后可以在这里选。')}</p>
-      ) : (
-        <>
-          <select name="cover_file_id">
-            <option value="">{t('（不设封面）')}</option>
-            {images.results.map((f) => <option value={f.id} selected={release.cover_file_id === f.id}>{f.slot ? `${t(SLOT_LABELS[f.slot as keyof typeof SLOT_LABELS])}：` : ''}{f.name}</option>)}
-          </select>
-          <button type="submit">{t('保存封面')}</button>
-          <span class="muted">{t('各版本可以另设自己的封面。')}</span>
-        </>
-      )
-    }
-  </form>
-
   <h2>{t('基本信息')}</h2>
   <form method="post" class="panel">
     <input type="hidden" name="section" value="info" />
@@ -356,6 +311,18 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
 </Admin>
 
 <script>
+  // 「＋ 新类型…」 asks for the new type's name.
+  for (const el of Array.from(document.querySelectorAll('[data-type-select]'))) {
+    const select = el as unknown as HTMLSelectElement;
+    const input = select.form?.querySelector('[data-new-type]') as unknown as HTMLInputElement | null;
+    const sync = () => {
+      if (!input) return;
+      input.hidden = select.value !== '__new__';
+      input.required = !input.hidden;
+      if (!input.hidden) input.focus();
+    };
+    select.addEventListener('change', sync);
+  }
   const table = document.querySelector<HTMLTableElement>('#track-table');
   const body = table?.tBodies[0];
   const renumber = () => {

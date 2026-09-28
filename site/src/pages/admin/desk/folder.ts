@@ -62,6 +62,7 @@ export const POST: APIRoute = async ({ request, url, locals }) => {
           catalog_no: o.catalog_no === undefined ? undefined : str(o.catalog_no),
           title: o.title === undefined ? undefined : str(o.title),
           slot: o.slot === undefined ? undefined : str(o.slot),
+          new_type: o.new_type === undefined ? undefined : str(o.new_type),
           name: o.name === undefined ? undefined : str(o.name),
         }, t);
         break;

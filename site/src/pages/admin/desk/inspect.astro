@@ -8,7 +8,7 @@ import { loadQuickAccess } from '../../../lib/folders';
 import { Places } from '../../../lib/locations';
 import { derivedFor } from '../../../lib/processing';
 import { db } from '../../../lib/db';
-import { tagEditView } from '../../../lib/tagedit';
+import { fileTagView } from '../../../lib/tagedit';
 
 export const partial = true;
 
@@ -34,7 +34,7 @@ if (files.length === 1 && folders.length === 0) {
     mode = 'file';
     [derived, tags] = await Promise.all([
       file.sha256 ? derivedFor(db(), [file.sha256]).then((m) => m.get(file!.sha256!)) : Promise.resolve(undefined),
-      file.kind === 'audio' ? tagEditView(file.id).catch(() => null) : Promise.resolve(null),
+      file.kind === 'audio' ? fileTagView(file.id).catch(() => null) : Promise.resolve(null),
     ]);
   }
 } else if (files.length === 0 && folders.length === 1) {

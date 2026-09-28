@@ -14,7 +14,9 @@ export const LANG_NAMES: Record<Lang, string> = { zh: '中文', ja: '日本語' 
 export const HTML_LANG: Record<Lang, string> = { zh: 'zh-CN', ja: 'ja' };
 
 export type Params = Record<string, string | number | null | undefined>;
-export type T = (text: string, params?: Params) => string;
+/** A translator; `lang` is the language it translates into (catalog data with its own per-language
+ * values, such as the names of edition types, reads it). */
+export type T = ((text: string, params?: Params) => string) & { lang?: Lang };
 
 /** Marks a text for translation where it is defined (labels in constants); translate it where shown. */
 export const N_ = <S extends string>(text: S): S => text;
@@ -33,7 +35,9 @@ export function translate(lang: Lang, text: string, params?: Params): string {
 }
 
 export function translator(lang: Lang): T {
-  return (text, params) => translate(lang, text, params);
+  const t: T = (text, params) => translate(lang, text, params);
+  t.lang = lang;
+  return t;
 }
 
 /** Japanese first in Accept-Language → ja; anything else → zh. */

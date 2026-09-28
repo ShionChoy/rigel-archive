@@ -9,7 +9,7 @@ const { t } = Astro.locals;
 if (Astro.request.method === 'POST') {
   try {
     const id = await createRelease(Astro.locals.admin!.email, await Astro.request.formData());
-    return Astro.redirect(`/admin/releases/${id}?msg=${encodeURIComponent(t('作品已创建，7 个版本栏位已按形式生成默认状态'))}`, 303);
+    return Astro.redirect(`/admin/releases/${id}?msg=${encodeURIComponent(t('作品已创建，接下来在「版本」里新建它的版本'))}`, 303);
   } catch (e) {
     return Astro.redirect(withParams(Astro.url, { err: errorText(e, t) }), 303);
   }
@@ -23,9 +23,7 @@ if (Astro.request.method === 'POST') {
       <input id="id" type="text" name="id" required pattern="[a-z0-9][a-z0-9\-]*" placeholder={t('rtcd-014（小写字母、数字、连字符）')} />
     </div>
     <ReleaseFields />
-    <p class="muted">
-      {t('保存后自动生成 7 个版本栏位。专辑默认：实体 CD 已收录，CD 抓轨与扫图缺档，数字版、流媒体、PV 未发行，DL 卡/特典不适用；之后可以逐栏修改。')}
-    </p>
+    <p class="muted">{t('保存后在作品页新建它的版本（实体 CD、CD 抓轨、官方数字版、图片……），数量和名称不限。')}</p>
     <button class="primary" type="submit">{t('创建')}</button>
   </form>
 </Admin>

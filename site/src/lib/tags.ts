@@ -1,65 +1,51 @@
-// 整理版 downloads: the tags a file gets from the catalog (release, edition, track, credits, MusicBrainz
-// ids, cover), written into the file as it downloads. FLAC keeps its audio frames byte for byte; a WAV
-// or AIFF is offered as its stream FLAC (identical samples); MP3 gets an ID3v2.4 tag. What the catalog
-// does not say (lyrics, comments, the file's own cover when the catalog has none …) stays as the file
-// had it. The original is never changed and stays downloadable as it was collected.
+// Downloads with tags: every audio file of an edition is written with its track row's tags (lib/tagging,
+// Picard's names) over what the file carries, the track numbers from the list's order and, when one was
+// chosen, the row's cover. FLAC, MP3, WAV (it stays WAV; its stream FLAC is offered too), M4A and Ogg keep
+// their audio byte for byte. The original is never changed and stays downloadable as it was collected.
 
-import { db, parseFormat, type EditionRow, type FileRow, type ReleaseRow } from './db';
-import { parseCredits, parseIds, trackTitle, type EditionTrackView } from './editions';
+import { db, type EditionRow, type FileRow, type ReleaseRow } from './db';
+import { trackTitle, type EditionTrackView } from './editions';
 import { concat } from './tagging/bytes';
-import { flacHeader, mergeComments, mergePictures, pictureBlock, pictureImage, pictureType, readFlacLayout, vorbisComment } from './tagging/flac';
-import { apicImage, apicType, id3v24, keptFrames, mp3AudioRange, readId3Frames, type Id3Fields } from './tagging/id3';
+import { albumArtist, catalogTags, commonAlbumTags } from './rowtags';
+import { numberTags, parseTags, type Tags } from './tagging/model';
+import { renumberOgg } from './tagging/ogg';
+import { WRITABLE, layoutLength, taggedLayout, type Layout, type Part } from './tagging/write';
 import type { ZipEntry } from './tagging/zip';
 
-/** The album artist when a release names none: the era's name (DEZAEMON entries were Inoue⊿'s own). */
-const ERA_ARTIST: Record<string, string> = { dezaemon: '井上⊿' };
+/** Pictures a download can embed as they are; larger ones use their 1600 px copy (derived «embed»). */
+export const COVER_MAX = 12_000_000;
 
-export interface TagSet {
-  title: string;
-  artist: string;
-  album: string;
-  albumArtist: string;
-  track: number | null;
-  trackTotal: number | null;
-  disc: number | null;
-  discTotal: number | null;
-  date: string | null;
-  catalog: string | null;
-  label: string | null;
-  composer: string | null;
-  lyricist: string | null;
-  arranger: string | null;
-  mbAlbum: string | null;
-  mbReleaseGroup: string | null;
-  mbRecording: string | null;
-  mbTrack: string | null;
-  cover: { key: string; ext: string } | null;
+export interface RowCover {
+  file?: string; // a picture file's id
+  picture?: string; // an embedded picture's sha256
+  mode: 'replace' | 'add';
 }
 
-export interface TaggedSource {
-  file: Pick<FileRow, 'id' | 'name' | 'ext' | 'size' | 'mtime' | 'sha256'>;
-  tags: TagSet;
-  format: 'flac' | 'mp3';
-  key: string; // the stored object the audio comes from (the original, or its stream FLAC)
-  size: number;
-  name: string; // download name
+export function parseCover(raw: string | null | undefined): RowCover | null {
+  try {
+    const v = raw ? JSON.parse(raw) : null;
+    if (!v || typeof v !== 'object') return null;
+    const mode = v.mode === 'add' ? 'add' : 'replace';
+    if (typeof v.file === 'string' && v.file) return { file: v.file, mode };
+    if (typeof v.picture === 'string' && /^[0-9a-f]{64}$/.test(v.picture)) return { picture: v.picture, mode };
+    return null;
+  } catch {
+    return null;
+  }
 }
 
-const safe = (s: string) => s.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 150);
-
-export function albumArtist(release: Pick<ReleaseRow, 'artist' | 'era_id'>, eraName: string): string {
-  return release.artist || ERA_ARTIST[release.era_id] || eraName;
+export interface TagRow extends EditionTrackView {
+  tags: string;
+  cover: string | null;
 }
 
-interface Context {
-  release: ReleaseRow;
-  eraName: string;
+export interface Context {
+  release: ReleaseRow & { era_name: string };
   edition: EditionRow;
-  rows: EditionTrackView[];
-  cover: { key: string; ext: string } | null;
+  rows: TagRow[];
 }
 
-async function context(editionId: string): Promise<Context | null> {
+export async function editionContext(editionId: string): Promise<Context | null> {
   const database = db();
   const edition = await database.prepare('SELECT * FROM editions WHERE id = ?').bind(editionId).first<EditionRow>();
   if (!edition) return null;
@@ -68,168 +54,160 @@ async function context(editionId: string): Promise<Context | null> {
     database
       .prepare(
         `SELECT et.*, t.title AS entry_title, t.version_label, t.song_id, t.credits, t.duration_ms AS entry_duration, t.external_ids AS entry_ids
-         FROM edition_tracks et JOIN tracks t ON t.id = et.track_id WHERE et.edition_id = ? ORDER BY et.disc, et.position`,
+         FROM edition_tracks et JOIN tracks t ON t.id = et.track_id WHERE et.edition_id = ? ORDER BY et.disc, et.position, et.id`,
       )
       .bind(editionId)
-      .all<EditionTrackView>(),
+      .all<TagRow>(),
   ]);
   if (!release) return null;
-  const coverId = edition.cover_file_id ?? release.cover_file_id;
-  const cover = coverId
-    ? await database.prepare("SELECT blob_key, ext FROM files WHERE id = ? AND blob_key IS NOT NULL AND lower(ext) IN ('jpg', 'jpeg', 'png') AND size < 12000000").bind(coverId).first<{ blob_key: string; ext: string }>()
-    : null;
-  return { release, eraName: release.era_name, edition, rows: rows.results, cover: cover ? { key: cover.blob_key, ext: cover.ext } : null };
+  return { release, edition, rows: rows.results };
 }
 
-export function tagSet(ctx: Context, row: EditionTrackView | undefined, fallbackTitle: string): TagSet {
-  const { release, edition } = ctx;
-  const credits = parseCredits(row?.credits);
-  const artist = albumArtist(release, ctx.eraName);
+/**
+ * The album-level tags a file without a row gets: the values every row of the edition agrees on, else what
+ * the catalog says.
+ */
+export function albumTags(ctx: Context): Tags {
+  return ctx.rows.length ? commonAlbumTags(ctx.rows.map((r) => r.tags)) : catalogTags(ctx.release, ctx.edition);
+}
+
+/** A row's tags for writing: its own, plus its number on its disc. */
+export function rowTags(ctx: Context, row: TagRow): Tags {
   const discs = new Set(ctx.rows.map((r) => r.disc));
-  const ids = parseIds(edition.external_ids);
-  const rowIds = parseIds(row?.external_ids);
-  const entryIds = parseIds(row?.entry_ids);
-  return {
-    title: row ? trackTitle(row) : fallbackTitle,
-    artist: credits.artist || artist,
-    album: edition.album_title || release.title,
-    albumArtist: artist,
-    track: row?.position ?? null,
-    trackTotal: row ? ctx.rows.filter((r) => r.disc === row.disc).length : null,
-    disc: row && discs.size > 1 ? row.disc : null,
-    discTotal: discs.size > 1 ? Math.max(...discs) : null,
-    date: edition.release_date || release.release_date,
-    catalog: edition.catalog_no || release.catalog_no,
-    label: artist,
-    composer: credits.composer ?? null,
-    lyricist: credits.lyricist ?? null,
-    arranger: credits.arranger ?? null,
-    mbAlbum: ids.musicbrainz_release ?? null,
-    mbReleaseGroup: ids.musicbrainz_release_group ?? null,
-    mbRecording: rowIds.musicbrainz_recording ?? entryIds.musicbrainz_recording ?? null,
-    mbTrack: rowIds.musicbrainz_track ?? null,
-    cover: ctx.cover,
-  };
+  const onDisc = ctx.rows.filter((r) => r.disc === row.disc).length;
+  return { ...parseTags(row.tags), ...numberTags(row.position, row.disc, discs.size, onDisc) };
 }
 
-/** The name a tagged track downloads as: «03 Title.flac», «2-03 Title.flac» on multi-disc editions. */
-export function trackFileName(tags: TagSet, ext: string, fallback: string): string {
-  if (!tags.track) return fallback;
-  const n = String(tags.track).padStart(2, '0');
-  return `${tags.disc ? `${tags.disc}-` : ''}${n} ${safe(tags.title)}.${ext}`;
+/** The title a row shows and downloads as: its title tag, else the edition's or the track's title. */
+export function rowTitle(row: TagRow | EditionTrackView & { tags?: string }): string {
+  return parseTags(row.tags).title?.[0] ?? trackTitle(row);
+}
+
+const safe = (s: string) => s.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 150);
+
+/** «03 Title.flac», «2-03 Title.flac» on multi-disc editions. */
+export function trackFileName(title: string, position: number | null, disc: number | null, ext: string, fallback: string): string {
+  if (!position) return fallback;
+  return `${disc ? `${disc}-` : ''}${String(position).padStart(2, '0')} ${safe(title)}.${ext}`;
 }
 
 type FileForTags = Pick<FileRow, 'id' | 'name' | 'ext' | 'size' | 'mtime' | 'sha256' | 'kind' | 'blob_key' | 'edition_id' | 'track_id' | 'format'> & {
   download_name?: string | null;
 };
 
-/** Where a file's tagged version comes from, or null when it has none (not audio in an edition, other formats). */
-export async function taggedSource(file: FileForTags, ctx?: Context | null): Promise<TaggedSource | null> {
+export interface TaggedSource {
+  file: FileForTags;
+  ext: string; // the format written (a WAV asked for as FLAC is its stream FLAC)
+  key: string; // the stored object the audio comes from
+  size: number;
+  name: string; // download name
+  tags: Tags;
+  cover: RowCover | null;
+}
+
+/**
+ * Where a file's tagged download comes from, or null when it has none (not audio in an edition, a
+ * format that cannot be tagged). `as: 'flac'` gives a WAV / AIFF as its stream FLAC (identical samples).
+ */
+export async function taggedSource(file: FileForTags, ctx?: Context | null, as?: 'flac'): Promise<TaggedSource | null> {
   if (file.kind !== 'audio' || !file.edition_id || !file.blob_key) return null;
-  ctx ??= await context(file.edition_id);
+  ctx ??= await editionContext(file.edition_id);
   if (!ctx) return null;
-  const ext = file.ext.toLowerCase();
+  let ext = file.ext.toLowerCase();
   let key = file.blob_key;
   let size = file.size;
-  let format: 'flac' | 'mp3';
-  if (ext === 'flac') format = 'flac';
-  else if (ext === 'mp3') format = 'mp3';
-  else if ((ext === 'wav' || ext === 'aif' || ext === 'aiff') && file.sha256) {
+  if ((as === 'flac' && (ext === 'wav' || ext === 'aif' || ext === 'aiff')) || ext === 'aif' || ext === 'aiff') {
+    if (!file.sha256) return null;
     const stream = await db().prepare("SELECT key, size FROM derived WHERE sha256 = ? AND kind = 'stream'").bind(file.sha256).first<{ key: string; size: number }>();
     if (!stream) return null;
     key = stream.key;
     size = stream.size;
-    format = 'flac';
-  } else return null;
+    ext = 'flac';
+  }
+  if (!WRITABLE.has(ext)) return null;
   const row = file.track_id ? ctx.rows.find((r) => r.track_id === file.track_id) : undefined;
   const stem = (file.download_name || file.name).replace(/\.[^.]+$/, '');
-  const tags = tagSet(ctx, row, parseFormat(file.format).tags?.title ?? stem);
-  return { file, tags, format, key, size, name: trackFileName(tags, format, `${stem}.${format}`) };
-}
-
-function vorbisFields(t: TagSet): [string, string][] {
-  const f: [string, string | number | null][] = [
-    ['TITLE', t.title], ['ARTIST', t.artist], ['ALBUM', t.album], ['ALBUMARTIST', t.albumArtist],
-    ['TRACKNUMBER', t.track], ['TRACKTOTAL', t.trackTotal], ['DISCNUMBER', t.disc], ['DISCTOTAL', t.discTotal],
-    ['DATE', t.date], ['CATALOGNUMBER', t.catalog], ['LABEL', t.label], ['COMPOSER', t.composer], ['LYRICIST', t.lyricist],
-    ['ARRANGER', t.arranger], ['MUSICBRAINZ_ALBUMID', t.mbAlbum], ['MUSICBRAINZ_RELEASEGROUPID', t.mbReleaseGroup],
-    ['MUSICBRAINZ_TRACKID', t.mbRecording], ['MUSICBRAINZ_RELEASETRACKID', t.mbTrack],
-  ];
-  return f.filter(([, v]) => v !== null && v !== '').map(([k, v]) => [k, String(v)]);
+  const tags = row ? rowTags(ctx, row) : albumTags(ctx);
+  const discs = new Set(ctx.rows.map((r) => r.disc));
+  const name = row ? trackFileName(rowTitle(row), row.position, discs.size > 1 ? row.disc : null, ext, `${stem}.${ext}`) : `${stem}.${ext}`;
+  return { file, ext, key, size, name, tags, cover: row ? parseCover(row.cover) : null };
 }
 
 async function readRange(media: R2Bucket, key: string, offset: number, length: number): Promise<Uint8Array> {
+  if (length <= 0) return new Uint8Array(0);
   const object = await media.get(key, { range: { offset, length } });
   if (!object) throw new Error(`missing ${key}`);
   return new Uint8Array(await object.arrayBuffer());
 }
 
-async function coverBytes(media: R2Bucket, cover: TagSet['cover']): Promise<{ image: Uint8Array; mime: string } | null> {
+/** The bytes of a row's chosen cover (a picture file, or a picture embedded in some track). */
+export async function coverBytes(media: R2Bucket, cover: RowCover | null): Promise<{ image: Uint8Array; mime: string } | null> {
   if (!cover) return null;
-  const object = await media.get(cover.key);
+  const database = db();
+  let key: string | null = null;
+  let mime = 'image/jpeg';
+  if (cover.picture) {
+    const p = await database.prepare('SELECT key, mime, size FROM pictures WHERE sha256 = ?').bind(cover.picture).first<{ key: string; mime: string; size: number }>();
+    if (p && p.size < COVER_MAX) {
+      key = p.key;
+      mime = p.mime;
+    }
+  } else if (cover.file) {
+    const f = await database
+      .prepare("SELECT blob_key, ext, size, sha256 FROM files WHERE id = ? AND kind = 'image' AND blob_key IS NOT NULL")
+      .bind(cover.file)
+      .first<{ blob_key: string; ext: string; size: number; sha256: string | null }>();
+    if (f && f.size < COVER_MAX && /^(jpe?g|png)$/i.test(f.ext)) {
+      key = f.blob_key;
+      mime = f.ext.toLowerCase() === 'png' ? 'image/png' : 'image/jpeg';
+    } else if (f?.sha256) {
+      // A large scan: its 1600 px JPEG copy made by the processing program.
+      const d = await database.prepare("SELECT key FROM derived WHERE sha256 = ? AND kind = 'embed'").bind(f.sha256).first<{ key: string }>();
+      if (d) key = d.key;
+    }
+  }
+  if (!key) return null;
+  const object = await media.get(key);
   if (!object) return null;
-  return { image: new Uint8Array(await object.arrayBuffer()), mime: cover.ext.toLowerCase() === 'png' ? 'image/png' : 'image/jpeg' };
+  return { image: new Uint8Array(await object.arrayBuffer()), mime };
 }
 
-/** The new header and the part of the stored object that follows it. */
-export async function taggedParts(media: R2Bucket, src: TaggedSource): Promise<{ header: Uint8Array; offset: number; length: number }> {
+export async function taggedParts(media: R2Bucket, src: TaggedSource): Promise<Layout> {
   const read = (offset: number, length: number) => readRange(media, src.key, offset, Math.max(0, Math.min(length, src.size - offset)));
-  const cover = await coverBytes(media, src.tags.cover);
-  if (src.format === 'flac') {
-    const layout = await readFlacLayout(read);
-    const fields = mergeComments(vorbisFields(src.tags), layout.comments, !!cover);
-    const header = flacHeader(layout, vorbisComment(fields), mergePictures(cover ? pictureBlock(cover.image, cover.mime) : null, layout.pictures));
-    return { header, offset: layout.audioOffset, length: src.size - layout.audioOffset };
-  }
-  const range = await mp3AudioRange(src.size, read);
-  const t = src.tags;
-  const fields: Id3Fields = {
-    title: t.title, artist: t.artist, album: t.album, albumArtist: t.albumArtist,
-    track: t.track ? `${t.track}${t.trackTotal ? `/${t.trackTotal}` : ''}` : undefined,
-    disc: t.disc ? `${t.disc}${t.discTotal ? `/${t.discTotal}` : ''}` : undefined,
-    date: t.date ?? undefined, composer: t.composer ?? undefined, lyricist: t.lyricist ?? undefined, publisher: t.label ?? undefined,
-    custom: [
-      ['CATALOGNUMBER', t.catalog ?? ''], ['ARRANGER', t.arranger ?? ''], ['MusicBrainz Album Id', t.mbAlbum ?? ''],
-      ['MusicBrainz Release Group Id', t.mbReleaseGroup ?? ''], ['MusicBrainz Release Track Id', t.mbTrack ?? ''],
-    ],
-    ufid: t.mbRecording ? { owner: 'http://musicbrainz.org', id: t.mbRecording } : undefined,
-    cover,
-  };
-  const header = id3v24({ ...fields, keep: keptFrames(range.start > 0 ? await readId3Frames(read) : [], fields) });
-  return { header, offset: range.start, length: range.end - range.start };
+  const cover = await coverBytes(media, src.cover);
+  return taggedLayout(src.ext, read, src.size, { tags: src.tags, cover, coverMode: src.cover?.mode ?? 'replace' });
 }
 
-/** The front cover embedded in a FLAC or MP3 (else its first picture), read from the start of the stored file. */
-export async function embeddedCover(media: R2Bucket, key: string, ext: string, size: number): Promise<{ image: Uint8Array; mime: string } | null> {
-  const read = (offset: number, length: number) => readRange(media, key, offset, Math.max(0, Math.min(length, size - offset)));
-  const e = ext.toLowerCase();
-  if (e === 'flac') {
-    const { pictures } = await readFlacLayout(read);
-    const body = pictures.find((p) => pictureType(p) === 3) ?? pictures[0];
-    return body ? pictureImage(body) : null;
-  }
-  if (e === 'mp3') {
-    const pictures = (await readId3Frames(read)).filter((f) => f.id === 'APIC');
-    const frame = pictures.find((f) => apicType(f.body) === 3) ?? pictures[0];
-    return frame ? apicImage(frame.body) : null;
-  }
-  return null;
-}
-
-function bodyStream(media: R2Bucket, key: string, header: Uint8Array, offset: number, length: number): ReadableStream<Uint8Array> {
+/** The parts one after the other: bytes as they are, ranges from storage (Ogg ranges renumbered). */
+function bodyStream(media: R2Bucket, key: string, parts: Part[]): ReadableStream<Uint8Array> {
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   (async () => {
     const writer = writable.getWriter();
     try {
-      await writer.write(header);
-      const object = await media.get(key, { range: { offset, length } });
-      if (!object) throw new Error(`missing ${key}`);
-      const reader = object.body.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        await writer.write(value);
+      // Small parts next to each other go out as one write.
+      let pending: Uint8Array[] = [];
+      const flush = async () => {
+        if (pending.length) await writer.write(concat(pending));
+        pending = [];
+      };
+      for (const p of parts) {
+        if (p instanceof Uint8Array) {
+          pending.push(p);
+          continue;
+        }
+        await flush();
+        if (p.length === 0) continue;
+        const object = await media.get(key, { range: { offset: p.offset, length: p.length } });
+        if (!object) throw new Error(`missing ${key}`);
+        const source = p.ogg ? object.body.pipeThrough(renumberOgg(p.ogg.serial, p.ogg.delta)) : object.body;
+        const reader = source.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await writer.write(value);
+        }
       }
+      await flush();
       await writer.close();
     } catch (err) {
       await writer.abort(err);
@@ -239,13 +217,13 @@ function bodyStream(media: R2Bucket, key: string, header: Uint8Array, offset: nu
 }
 
 export async function taggedResponse(media: R2Bucket, src: TaggedSource): Promise<Response> {
-  const { header, offset, length } = await taggedParts(media, src);
-  const total = header.length + length;
+  const layout = await taggedParts(media, src);
+  const total = layoutLength(layout);
   const { readable, writable } = new FixedLengthStream(total);
-  bodyStream(media, src.key, header, offset, length).pipeTo(writable).catch(() => undefined);
+  bodyStream(media, src.key, layout.parts).pipeTo(writable).catch(() => undefined);
   return new Response(readable, {
     headers: {
-      'content-type': src.format === 'flac' ? 'audio/flac' : 'audio/mpeg',
+      'content-type': layout.mime,
       'content-length': String(total),
       'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(src.name)}`,
       'x-content-type-options': 'nosniff',
@@ -254,17 +232,13 @@ export async function taggedResponse(media: R2Bucket, src: TaggedSource): Promis
 }
 
 export async function taggedEntry(media: R2Bucket, src: TaggedSource, folder: string): Promise<ZipEntry> {
-  const { header, offset, length } = await taggedParts(media, src);
+  const layout = await taggedParts(media, src);
   return {
     name: `${folder}${src.name}`,
-    size: header.length + length,
+    size: layoutLength(layout),
     mtime: src.file.mtime ? new Date(src.file.mtime) : new Date(),
-    body: async () => bodyStream(media, src.key, header, offset, length),
+    body: async () => bodyStream(media, src.key, layout.parts),
   };
 }
 
-export async function editionContext(editionId: string): Promise<Context | null> {
-  return context(editionId);
-}
-
-export { concat };
+export { albumArtist, concat };

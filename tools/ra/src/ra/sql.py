@@ -78,21 +78,25 @@ WHERE NOT EXISTS (SELECT 1 FROM folders f WHERE f.release_id = r.id);""",
     """INSERT INTO folders (id, parent_id, type, edition_id)
 SELECT 'fd_' || lower(hex(randomblob(8))), (SELECT f.id FROM folders f WHERE f.release_id = e.release_id), 'edition', e.id FROM editions e
 WHERE NOT EXISTS (SELECT 1 FROM folders f WHERE f.edition_id = e.id);""",
+    # Every edition has its attachments folder (附件, migration 0008).
+    """INSERT INTO folders (id, parent_id, type, name, extras)
+SELECT 'fd_' || lower(hex(randomblob(8))), f.id, 'plain', '附件', 1 FROM folders f
+WHERE f.type = 'edition' AND NOT EXISTS (SELECT 1 FROM folders x WHERE x.parent_id = f.id AND x.extras = 1);""",
 ]
 
 
 def release_statements(releases: list[Release]) -> list[str]:
+    """Releases the admin does not have yet, and the folders of new releases and editions.
+
+    The catalog's per-slot statuses are no longer written: since migration 0008 a release has the editions
+    the admins make, and the 缺档看板 lists editions (a known but missing one is an edition with status 缺档).
+    """
     release_rows = [
         (
             r.id, r.catalog_no, r.era, r.kind, r.series, r.title, r.release_date, r.event,
             r.track_count, r.aliases, r.links, r.note,
         )
         for r in releases
-    ]
-    slot_rows = [
-        (r.id, slot, state.status, state.planned_date, state.note)
-        for r in releases
-        for slot, state in r.slots.items()
     ]
     return (
         _guarded(
@@ -101,10 +105,6 @@ def release_statements(releases: list[Release]) -> list[str]:
              "track_count", "aliases", "links", "note"),
             release_rows,
             RELEASE_WANTED,
-        )
-        + _guarded(
-            "release_slots", ("release_id", "slot", "status", "planned_date", "note"), slot_rows,
-            "EXISTS (SELECT 1 FROM releases x WHERE x.id = v.column1)",
         )
         + ENSURE_FOLDERS
     )

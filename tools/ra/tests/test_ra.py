@@ -202,7 +202,8 @@ def test_quote():
 
 def test_seed_skips_releases_deleted_in_the_admin_and_gives_new_ones_folders(tmp_path):
     """The seed SQL runs against the real schema: a release deleted in the admin stays deleted, a new
-    one gets its folder under its era's folder, slots only go to releases that exist."""
+    one gets its folder under its era's folder, no per-slot statuses are written (migration 0008), and
+    every edition folder has its 附件."""
     import sqlite3
 
     from ra.catalog import load_catalog
@@ -223,7 +224,10 @@ def test_seed_skips_releases_deleted_in_the_admin_and_gives_new_ones_folders(tmp
         db.execute(statement)
     ids = {r[0] for r in db.execute("SELECT id FROM releases")}
     assert gone not in ids and len(ids) == len(releases) - 1
-    assert db.execute("SELECT count(*) FROM release_slots WHERE release_id = ?", (gone,)).fetchone()[0] == 0
+    assert db.execute("SELECT count(*) FROM release_slots").fetchone()[0] == 0
+    assert db.execute(
+        "SELECT count(*) FROM folders f WHERE f.type = 'edition' AND NOT EXISTS (SELECT 1 FROM folders x WHERE x.parent_id = f.id AND x.extras = 1)"
+    ).fetchone()[0] == 0
     orphans = db.execute(
         """SELECT count(*) FROM releases r WHERE NOT EXISTS (
              SELECT 1 FROM folders f JOIN folders p ON p.id = f.parent_id WHERE f.release_id = r.id AND p.era_id = r.era_id)"""

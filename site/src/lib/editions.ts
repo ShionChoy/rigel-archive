@@ -4,13 +4,15 @@
 // to the release's tracks (files.track_id), so the same track can be compared across editions.
 
 import { ChangeSet } from './changes';
-import { SLOTS, isOneOf, type Slot } from './constants';
+import { isOneOf } from './constants';
 import { db, parseFormat, type EditionRow, type EditionStatus, type EditionTrackRow, type ReleaseRow, type TrackRow } from './db';
-import { N_, summary, UserError, type T } from './i18n';
+import { N_, summary, UserError } from './i18n';
 import { newId } from './ids';
-import { syncSlots } from './releases';
 import { Places, ensureEntityFolder } from './locations';
-import { loadTracks, parseDuration, titleFromFile, titleKey, trackNumber } from './tracks';
+import { loadTracks, titleFromFile, titleKey, trackNumber } from './tracks';
+import { chosenType, loadTypes, type TypeList } from './types';
+import { parseTags } from './tagging/model';
+import { newRowTags } from './rowtags';
 
 export const EDITION_STATUSES = ['collected', 'partial', 'missing', 'planned', 'unknown'] as const;
 export const EDITION_STATUS_LABELS: Record<EditionStatus, string> = {
@@ -40,16 +42,18 @@ export function parseIds(raw: string | null | undefined): ExternalIds {
   }
 }
 
-const slotIndex = (s: string) => SLOTS.indexOf(s as Slot);
-
-export function sortEditions<E extends Pick<EditionRow, 'slot' | 'sort' | 'release_date' | 'name'>>(list: E[]): E[] {
-  return [...list].sort((a, b) => slotIndex(a.slot) - slotIndex(b.slot) || a.sort - b.sort
+/** A release's editions in order: by type (the types' order), then their own order, then by date. */
+export function sortEditions<E extends Pick<EditionRow, 'slot' | 'sort' | 'release_date' | 'name'>>(list: E[], types: TypeList): E[] {
+  return [...list].sort((a, b) => types.index(a.slot) - types.index(b.slot) || a.sort - b.sort
     || (a.release_date ?? '9999').localeCompare(b.release_date ?? '9999') || a.name.localeCompare(b.name, 'ja'));
 }
 
-export async function loadEditions(releaseId: string): Promise<EditionRow[]> {
-  const { results } = await db().prepare('SELECT * FROM editions WHERE release_id = ?').bind(releaseId).all<EditionRow>();
-  return sortEditions(results);
+export async function loadEditions(releaseId: string, types?: TypeList): Promise<EditionRow[]> {
+  const [{ results }, list] = await Promise.all([
+    db().prepare('SELECT * FROM editions WHERE release_id = ?').bind(releaseId).all<EditionRow>(),
+    types ? Promise.resolve(types) : loadTypes(),
+  ]);
+  return sortEditions(results, list);
 }
 
 export async function loadEdition(id: string): Promise<EditionRow | null> {
@@ -64,10 +68,8 @@ function text(form: FormData, name: string, max = 500): string | null {
 
 const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** The editable fields of an edition from its form. */
-export function editionPatch(form: FormData, siblings: EditionRow[], self: EditionRow | null): Record<string, unknown> {
-  const slot = text(form, 'slot');
-  if (!isOneOf(SLOTS, slot)) throw new UserError('请选择版本类型');
+/** The editable fields of an edition from its form (`slot`: the type, already checked). */
+export function editionPatch(form: FormData, siblings: EditionRow[], self: EditionRow | null, slot: string): Record<string, unknown> {
   const status = text(form, 'status') ?? 'collected';
   if (!isOneOf(EDITION_STATUSES, status)) throw new UserError('未知的状态');
   const date = text(form, 'release_date');
@@ -96,7 +98,8 @@ export function editionPatch(form: FormData, siblings: EditionRow[], self: Editi
     source: text(form, 'source', 200),
     based_on: basedOn,
     track_count: count ? Number(count) : null,
-    album_title: text(form, 'album_title', 300),
+    // The album name is a tag of the rows now; the edition's own is kept for editions without rows.
+    ...(form.has('album_title') ? { album_title: text(form, 'album_title', 300) } : {}),
     note: text(form, 'note', 2000),
     external_ids: JSON.stringify(ids),
   };
@@ -107,82 +110,67 @@ function label(release: Pick<ReleaseRow, 'catalog_no' | 'title'>): string {
 }
 
 export async function createEdition(actor: string, release: ReleaseRow, form: FormData): Promise<string> {
-  const siblings = await loadEditions(release.id);
-  const patch = editionPatch(form, siblings, null);
+  const types = await loadTypes();
+  const siblings = await loadEditions(release.id, types);
   const id = newId('e');
-  const cs = new ChangeSet(db(), actor, summary('作品 {release}：新建版本 {edition}', { release: label(release), edition: String(patch.name || patch.slot) }));
+  const cs = new ChangeSet(db(), actor, '');
+  const slot = chosenType(cs, types, form);
+  const patch = editionPatch(form, siblings, null, slot);
+  cs.setSummary(summary('作品 {release}：新建版本 {edition}', { release: label(release), edition: String(patch.name || types.get(slot)?.name_zh || slot) }));
   cs.create('edition', { id, release_id: release.id, is_default: 0, cover_file_id: null, sort: siblings.length, ...patch });
   await addEditionFolder(cs, id, release.id, patch);
-  await syncSlots(cs, release.id, [...siblings, patch as { slot: string; status: string }]);
   await cs.commit();
   return id;
 }
 
-/** The folder of an edition made in `cs` (in the 整理台 tree, under its release's folder). */
+/** The folder of an edition made in `cs` (in the 整理台 tree, under its release's folder), with its 附件. */
 export async function addEditionFolder(cs: ChangeSet, id: string, releaseId: string, row: Record<string, unknown>) {
   const places = await Places.load();
   places.addEdition({
-    id, release_id: releaseId, slot: row.slot as Slot, name: String(row.name ?? ''), catalog_no: (row.catalog_no as string) ?? null,
+    id, release_id: releaseId, slot: String(row.slot), name: String(row.name ?? ''), catalog_no: (row.catalog_no as string) ?? null,
     release_date: (row.release_date as string) ?? null, status: (row.status as EditionStatus) ?? 'collected', sort: Number(row.sort ?? 0), is_default: 0,
   });
   ensureEntityFolder(cs, places, `ed:${id}`, true);
 }
 
 export async function saveEdition(actor: string, release: ReleaseRow, edition: EditionRow, form: FormData): Promise<number> {
-  const siblings = await loadEditions(release.id);
-  const patch = editionPatch(form, siblings, edition);
-  const cs = new ChangeSet(db(), actor, summary('作品 {release}：修改版本 {edition}', { release: label(release), edition: edition.name || edition.slot }));
+  const types = await loadTypes();
+  const siblings = await loadEditions(release.id, types);
+  const cs = new ChangeSet(db(), actor, summary('作品 {release}：修改版本 {edition}', { release: label(release), edition: edition.name || types.get(edition.slot)?.name_zh || edition.slot }));
+  const patch = editionPatch(form, siblings, edition, chosenType(cs, types, form));
   const isDefault = form.get('is_default') === '1';
   cs.updateKnown('edition', { id: edition.id }, edition as unknown as Record<string, unknown>, { ...patch, is_default: isDefault ? 1 : 0 });
   if (isDefault) {
     for (const e of siblings) if (e.id !== edition.id && e.is_default) cs.updateKnown('edition', { id: e.id }, { is_default: 1 }, { is_default: 0 });
   }
-  // Files keep the slot of the edition they are filed under.
+  // Files keep the type of the edition they are filed under.
   if (patch.slot !== edition.slot) cs.updateFilesWhere('edition_id = ?', [edition.id], { slot: patch.slot });
-  await syncSlots(cs, release.id, siblings.map((e) => (e.id === edition.id ? { slot: patch.slot as string, status: patch.status as string } : e)));
   return cs.commit();
 }
 
 export async function deleteEdition(actor: string, release: ReleaseRow, edition: EditionRow): Promise<void> {
   const database = db();
-  const used = await database
-    .prepare(
-      `SELECT (SELECT count(*) FROM files WHERE edition_id = ?1) AS files,
-              (SELECT count(*) FROM folders c JOIN folders f ON c.parent_id = f.id WHERE f.edition_id = ?1) AS folders`,
-    )
-    .bind(edition.id)
-    .first<{ files: number; folders: number }>();
-  if (used?.files || used?.folders) throw new UserError('版本里还有文件或文件夹，先移走它们');
-  const cs = new ChangeSet(database, actor, summary('作品 {release}：删除版本 {edition}', { release: label(release), edition: edition.name || edition.slot }));
-  cs.deleteWhere('folder', 't.edition_id = ?1', [edition.id]);
+  const places = await Places.load(database);
+  const folder = places.editionFolder(edition.id);
+  const extras = places.extrasOf(edition.id);
+  // Its folder and the empty 附件 go with it; anything else in it has to be moved first.
+  const others = folder ? places.subtree(folder.id).filter((id) => id !== folder.id && id !== extras?.id) : [];
+  const used = await database.prepare('SELECT count(*) AS files FROM files WHERE edition_id = ?1').bind(edition.id).first<{ files: number }>();
+  if (used?.files || others.length) throw new UserError('版本里还有文件或文件夹，先移走它们');
+  const cs = new ChangeSet(database, actor, summary('作品 {release}：删除版本 {edition}', { release: label(release), edition: edition.name || places.types.get(edition.slot)?.name_zh || edition.slot }));
+  if (folder) {
+    const list = [extras?.id, folder.id].filter((id): id is string => !!id);
+    cs.deleteWhere('folder', 't.id IN (SELECT value FROM json_each(?1))', [JSON.stringify(list)], '(SELECT j.key FROM json_each(?1) j WHERE j.value = t.id)');
+  }
   const { results: rows } = await database.prepare('SELECT id FROM edition_tracks WHERE edition_id = ?').bind(edition.id).all<{ id: string }>();
   for (const r of rows) await cs.delete('edition_track', { id: r.id });
   const { results: children } = await database.prepare('SELECT id FROM editions WHERE based_on = ?').bind(edition.id).all<{ id: string }>();
   for (const c of children) cs.updateKnown('edition', { id: c.id }, { based_on: edition.id }, { based_on: null });
   await cs.delete('edition', { id: edition.id });
-  await syncSlots(cs, release.id, (await loadEditions(release.id)).filter((e) => e.id !== edition.id));
   await cs.commit();
 }
 
 // ------------------------------------------------------------------------------------------ track order
-
-export interface Credits {
-  artist?: string;
-  composer?: string;
-  lyricist?: string;
-  arranger?: string;
-}
-export const CREDIT_FIELDS = ['artist', 'composer', 'lyricist', 'arranger'] as const;
-
-export function parseCredits(raw: string | null | undefined): Credits {
-  try {
-    const v = JSON.parse(raw || '{}');
-    if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
-    return Object.fromEntries(CREDIT_FIELDS.filter((k) => typeof v[k] === 'string' && v[k]).map((k) => [k, v[k]]));
-  } catch {
-    return {};
-  }
-}
 
 export interface EditionTrackView extends EditionTrackRow {
   entry_title: string;
@@ -204,102 +192,12 @@ export async function loadEditionTracks(editionId: string): Promise<EditionTrack
   return results;
 }
 
-/** The title an edition gives a track: its own, else the track's (with its version label). */
-export function trackTitle(et: Pick<EditionTrackView, 'title' | 'entry_title' | 'version_label'>): string {
+/** The title an edition gives a track: its title tag, else its own title, else the track's (with its version label). */
+export function trackTitle(et: Pick<EditionTrackView, 'title' | 'entry_title' | 'version_label'> & { tags?: string | null }): string {
+  const tag = parseTags(et.tags).title?.[0];
+  if (tag) return tag;
   if (et.title) return et.title;
   return et.version_label ? `${et.entry_title} (${et.version_label})` : et.entry_title;
-}
-
-interface EditedRow {
-  id: string | null;
-  disc: number;
-  title: string | null;
-  entry: string; // track id, or 'new'
-  duration_ms: number | null;
-  credits: Credits;
-}
-
-function parseEditionTrackForm(form: FormData): { rows: EditedRow[]; removed: Set<string> } {
-  const col = (name: string) => form.getAll(name).map((v) => String(v).trim());
-  const ids = col('et_id');
-  const [discs, titles, entries, durations] = ['disc', 'title', 'entry', 'duration'].map(col);
-  const credits = Object.fromEntries(CREDIT_FIELDS.map((f) => [f, col(f)])) as Record<(typeof CREDIT_FIELDS)[number], string[]>;
-  const removed = new Set(form.getAll('remove').map(String));
-  const rows: EditedRow[] = [];
-  ids.forEach((id, i) => {
-    if (removed.has(id)) return;
-    const disc = Number(discs[i] || 1);
-    if (!Number.isInteger(disc) || disc < 1 || disc > 99) throw new UserError('第 {row} 行：碟号应为 1–99', { row: i + 1 });
-    const entry = entries[i] || 'new';
-    const title = titles[i] || null;
-    if (entry === 'new' && !title) {
-      if (id === 'new') return; // an empty added row
-      throw new UserError('第 {row} 行：新曲目条目需要标题', { row: i + 1 });
-    }
-    if (title && title.length > 300) throw new UserError('第 {row} 行：标题太长', { row: i + 1 });
-    rows.push({
-      id: id === 'new' ? null : id, disc, title, entry,
-      duration_ms: parseDuration(durations[i] ?? ''),
-      credits: Object.fromEntries(CREDIT_FIELDS.map((f) => [f, (credits[f][i] ?? '').slice(0, 300)]).filter(([, v]) => v)) as Credits,
-    });
-  });
-  return { rows, removed };
-}
-
-/**
- * Save an edition's track order and tags. Rows arrive in display order and are numbered per disc. A
- * row's title is kept only where it differs from its track's; credits belong to the track (all editions).
- */
-export async function saveEditionTracks(actor: string, release: ReleaseRow, edition: EditionRow, form: FormData): Promise<number> {
-  const { rows, removed } = parseEditionTrackForm(form);
-  const [current, entries] = await Promise.all([loadEditionTracks(edition.id), loadTracks(release.id)]);
-  const byId = new Map(current.map((r) => [r.id, r]));
-  const entryById = new Map(entries.map((t) => [t.id, t]));
-  for (const r of rows) {
-    if (r.id && !byId.has(r.id)) throw new UserError('曲目表已被别人修改，请刷新后重试');
-    if (r.entry !== 'new' && !entryById.has(r.entry)) throw new UserError('所选曲目条目不属于这个作品');
-  }
-  const cs = new ChangeSet(db(), actor, summary('版本 {edition}：修改曲目与标签', { edition: `${label(release)} ${edition.name}`.trim() }));
-  const counters = new Map<number, number>();
-  let nextPosition = entries.reduce((m, t) => Math.max(m, t.position), 0);
-  const creditsTouched = new Map<string, Credits>();
-  for (const r of rows) {
-    const position = (counters.get(r.disc) ?? 0) + 1;
-    counters.set(r.disc, position);
-    let trackId = r.entry;
-    if (trackId === 'new') {
-      trackId = newId('t');
-      const songId = newId('s');
-      nextPosition += 1;
-      cs.create('song', { id: songId, title: r.title!, note: null });
-      cs.create('track', {
-        id: trackId, release_id: release.id, disc: 1, position: nextPosition, title: r.title!, song_id: songId, version_label: null,
-        duration_ms: r.duration_ms, credits: null, note: null, external_ids: '{}',
-      });
-      entryById.set(trackId, { id: trackId, title: r.title! } as TrackRow);
-    }
-    const entry = entryById.get(trackId)!;
-    const title = r.title && r.title !== entry.title ? r.title : null;
-    const values = { edition_id: edition.id, disc: r.disc, position, track_id: trackId, title, duration_ms: r.duration_ms };
-    if (r.id) cs.updateKnown('edition_track', { id: r.id }, byId.get(r.id) as unknown as Record<string, unknown>, values);
-    else cs.create('edition_track', { id: newId('et'), external_ids: '{}', ...values });
-    creditsTouched.set(trackId, { ...(creditsTouched.get(trackId) ?? {}), ...r.credits });
-    // an emptied credit field is cleared
-    for (const f of CREDIT_FIELDS) if (!r.credits[f]) creditsTouched.set(trackId, { ...creditsTouched.get(trackId), [f]: undefined });
-  }
-  for (const [trackId, credits] of creditsTouched) {
-    const entry = entries.find((t) => t.id === trackId);
-    if (!entry) continue; // made above with no credits yet
-    const next = { ...parseCredits(entry.credits) };
-    for (const f of CREDIT_FIELDS) {
-      if (credits[f]) next[f] = credits[f];
-      else delete next[f];
-    }
-    const json = Object.keys(next).length ? JSON.stringify(next) : null;
-    cs.updateKnown('track', { id: trackId }, entry as unknown as Record<string, unknown>, { credits: json });
-  }
-  for (const id of removed) if (byId.has(id)) await cs.delete('edition_track', { id });
-  return cs.commit();
 }
 
 interface EditionAudio {
@@ -383,6 +281,7 @@ export async function generateEditionTracks(actor: string, release: ReleaseRow, 
     if (f.pcm_md5 && !byAudio.has(f.pcm_md5)) byAudio.set(f.pcm_md5, key);
   }
   const ordered = [...groups.values()].sort((a, b) => a.disc - b.disc || (a.track ?? 999) - (b.track ?? 999) || a.title.localeCompare(b.title, 'ja'));
+  const era = await db().prepare('SELECT name FROM eras WHERE id = ?').bind(release.era_id).first<{ name: string }>();
   const cs = new ChangeSet(db(), actor, summary('版本 {edition}：从 {n} 个文件生成曲目顺序', { edition: `${label(release)} ${edition.name}`.trim(), n: files.length }));
   const counters = new Map<number, number>();
   let nextPosition = entries.reduce((m, t) => Math.max(m, t.position), 0);
@@ -408,10 +307,12 @@ export async function generateEditionTracks(actor: string, release: ReleaseRow, 
       byTitle.set(titleKey(title), trackId);
     }
     const entryTitle = entries.find((t) => t.id === trackId)?.title ?? title;
+    // The row's tags: its title, and what the catalog says about the album (the files' own tags stay under them).
     cs.create('edition_track', {
       id: newId('et'), edition_id: edition.id, disc: g.disc, position, track_id: trackId,
       title: titleKey(entryTitle) === titleKey(title) ? null : title,
       duration_ms: seconds ? Math.round(seconds * 1000) : null, external_ids: '{}',
+      tags: JSON.stringify(newRowTags([], { ...release, era_name: era?.name ?? '' }, edition, title)), cover: null,
     });
     const relink = g.files.filter((f) => f.track_id !== trackId).map((f) => f.id);
     if (relink.length) cs.updateFiles(relink, { track_id: trackId });
@@ -450,48 +351,6 @@ export async function matchEditionFiles(actor: string, release: ReleaseRow, edit
   for (const [trackId, ids] of groups) cs.updateFiles(ids, { track_id: trackId });
   const matched = await cs.commit();
   return { matched, left };
-}
-
-/** Save the track chosen for each listed file of an edition. */
-export async function saveEditionFileTracks(actor: string, release: ReleaseRow, edition: EditionRow, form: FormData): Promise<number> {
-  const ids = form.getAll('file_id').map(String);
-  const chosen = form.getAll('file_track').map(String);
-  const tracks = new Set((await loadTracks(release.id)).map((t) => t.id));
-  const { results: current } = await db()
-    .prepare('SELECT id, track_id FROM files WHERE edition_id = ? AND id IN (SELECT value FROM json_each(?))')
-    .bind(edition.id, JSON.stringify(ids))
-    .all<{ id: string; track_id: string | null }>();
-  const now = new Map(current.map((f) => [f.id, f.track_id]));
-  const groups = new Map<string, string[]>();
-  ids.forEach((id, i) => {
-    const want = chosen[i] || '';
-    if (!now.has(id) || (now.get(id) ?? '') === want) return;
-    if (want && !tracks.has(want)) throw new UserError('所选曲目不属于这个作品');
-    groups.set(want, [...(groups.get(want) ?? []), id]);
-  });
-  const cs = new ChangeSet(db(), actor, summary('版本 {edition}：修改文件对应的曲目', { edition: `${label(release)} ${edition.name}`.trim() }));
-  for (const [trackId, list] of groups) cs.updateFiles(list, { track_id: trackId || null });
-  return cs.commit();
-}
-
-/** Copy titles and artists from the files' own tags where the edition has none yet. */
-export async function importEmbeddedTags(actor: string, release: ReleaseRow, edition: EditionRow): Promise<number> {
-  const [rows, files, entries] = await Promise.all([loadEditionTracks(edition.id), editionAudio(edition.id), loadTracks(release.id)]);
-  const fileOf = new Map(files.filter((f) => f.track_id).map((f) => [f.track_id!, f]));
-  const cs = new ChangeSet(db(), actor, summary('版本 {edition}：从文件标签导入', { edition: `${label(release)} ${edition.name}`.trim() }));
-  for (const r of rows) {
-    const f = fileOf.get(r.track_id);
-    const tags = f ? parseFormat(f.format).tags ?? {} : {};
-    if (tags.title && titleKey(tags.title) !== titleKey(trackTitle(r))) {
-      cs.updateKnown('edition_track', { id: r.id }, r as unknown as Record<string, unknown>, { title: tags.title === r.entry_title ? null : tags.title });
-    }
-    const entry = entries.find((t) => t.id === r.track_id);
-    const credits = parseCredits(entry?.credits);
-    if (entry && tags.artist && !credits.artist) {
-      cs.updateKnown('track', { id: entry.id }, entry as unknown as Record<string, unknown>, { credits: JSON.stringify({ ...credits, artist: tags.artist }) });
-    }
-  }
-  return cs.commit();
 }
 
 // ------------------------------------------------------------------------------------------ comparison
@@ -596,7 +455,7 @@ export async function comparison(releaseId: string): Promise<Matrix> {
   // Columns: editions with a track order or linked audio, oldest first.
   const editions = allEditions
     .filter((e) => rowsOf.has(e.id) || fileRows.results.some((f) => f.edition_id === e.id))
-    .sort((a, b) => (a.release_date ?? '9999').localeCompare(b.release_date ?? '9999') || slotIndex(a.slot) - slotIndex(b.slot) || a.sort - b.sort);
+    .sort((a, b) => (a.release_date ?? '9999').localeCompare(b.release_date ?? '9999') || allEditions.indexOf(a) - allEditions.indexOf(b));
 
   const shas = [...new Set(fileRows.results.map((f) => f.sha256).filter(Boolean))] as string[];
   const matches = new Map<string, { score: number; matched_ms: number }>();
@@ -697,9 +556,4 @@ export function defaultEdition(editions: EditionRow[], trackCounts: Map<string, 
   const audio = editions.filter((e) => (trackCounts.get(e.id) ?? 0) > 0 && e.slot !== 'pv' && e.slot !== 'scans');
   return audio.sort((a, b) => (trackCounts.get(b.id) ?? 0) - (trackCounts.get(a.id) ?? 0)
     || (b.release_date ?? '').localeCompare(a.release_date ?? ''))[0] ?? null;
-}
-
-export function editionName(e: Pick<EditionRow, 'slot' | 'name'>, t: T, slotLabels: Record<string, string>): string {
-  const slot = t(slotLabels[e.slot]);
-  return e.name ? `${slot} · ${e.name}` : slot;
 }

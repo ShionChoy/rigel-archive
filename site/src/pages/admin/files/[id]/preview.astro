@@ -2,7 +2,8 @@
 // The 整理台's side panel: a file's preview and key facts, loaded into the page without navigating.
 import { env } from 'cloudflare:workers';
 import FilePreview from '../../../../components/FilePreview.astro';
-import { FILE_KIND_LABELS, FILE_STATE_LABELS, RIGHTS_LABELS, SLOT_LABELS } from '../../../../lib/constants';
+import { FILE_KIND_LABELS, FILE_STATE_LABELS, RIGHTS_LABELS } from '../../../../lib/constants';
+import { loadTypes } from '../../../../lib/types';
 import { db, parseFormat, releaseLabels, type FileRow } from '../../../../lib/db';
 import { formatBytes, formatSpec } from '../../../../lib/format';
 import { derivedFor } from '../../../../lib/processing';
@@ -10,6 +11,7 @@ import { derivedFor } from '../../../../lib/processing';
 export const partial = true;
 
 const { t } = Astro.locals;
+const types = await loadTypes();
 const database = db();
 const file = await database.prepare('SELECT * FROM files WHERE id = ?').bind(Astro.params.id).first<FileRow>();
 if (!file) return new Response(t('找不到文件'), { status: 404 });
@@ -31,7 +33,7 @@ const tags = Object.entries(fmt.tags ?? {}).slice(0, 6);
   <div>
     <span class={`chip ${file.state}`}>{t(FILE_STATE_LABELS[file.state])}</span>
     {file.release_id && ` ${labels.get(file.release_id) ?? file.release_id}`}
-    {file.slot && ` · ${t(SLOT_LABELS[file.slot])}`}
+    {file.slot && ` · ${types.label(file.slot, t)}`}
     {file.rights !== 'unknown' && <span class={`chip ${file.rights}`}>{t(RIGHTS_LABELS[file.rights])}</span>}
   </div>
   {tags.length > 0 && <div class="muted">{tags.map(([k, v]) => `${k}: ${v}`).join(' · ')}</div>}

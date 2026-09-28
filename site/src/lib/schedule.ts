@@ -1,6 +1,7 @@
 // Scheduled work (crons in wrangler.jsonc) and waking the processing container.
 
 import { backupSettings, processor } from '../processor';
+import { readPending } from './embedded';
 import { failAbandoned, pendingCounts } from './processing';
 
 /** Every 10 minutes: start the processing container when anything is waiting (it stops by itself). */
@@ -31,5 +32,11 @@ export async function wakeIfPending(env: Env): Promise<void> {
 
 export async function onSchedule(cron: string, env: Env): Promise<void> {
   if (cron === BACKUP_CRON && backupSettings(env)) return wakeProcessor(env, true);
-  return wakeIfPending(env);
+  await wakeIfPending(env);
+  // 文件原值: read the tags and pictures of stored audio not read yet (a few hundred per run).
+  try {
+    await readPending(env.DB, env.MEDIA, 25_000);
+  } catch (e) {
+    console.error('reading embedded tags failed:', e instanceof Error ? e.message : e);
+  }
 }

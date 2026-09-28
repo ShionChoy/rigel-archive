@@ -2,6 +2,7 @@
 import { env } from 'cloudflare:workers';
 import Admin from '../../layouts/Admin.astro';
 import { db } from '../../lib/db';
+import { readPending, rereadEmbedded, unreadCount } from '../../lib/embedded';
 import { originalGone } from '../../lib/deletion';
 import { formatBytes, formatTime, withParams } from '../../lib/format';
 import { N_, errorText, translateHtml, UserError } from '../../lib/i18n';
@@ -37,6 +38,17 @@ if (Astro.request.method === 'POST') {
         msg = t('{n} 个失败的任务已重新排队', { n: r.meta.changes });
         break;
       }
+      case 'read_tags': {
+        // A request may run for a while: read for about 20 seconds, then show how many are left.
+        const r = await readPending(database, env.MEDIA, 20_000);
+        msg = t('读取了 {n} 个音频的标签与图片，还有 {left} 个', { n: r.read, left: r.left });
+        break;
+      }
+      case 'reread_tags': {
+        const n = await rereadEmbedded(database, form.get('all') !== '1');
+        msg = t('{n} 个音频会重新读取标签与图片', { n });
+        break;
+      }
       case 'backup':
         if (!canManage(Astro.locals.admin)) throw new UserError('立即备份需要站长或管理员权限');
         if (!backupReady) throw new UserError('备份还没有设置');
@@ -59,7 +71,7 @@ if (Astro.request.method === 'POST') {
 const scan = Astro.url.searchParams.has('scan');
 type Failed = { sha256: string; task: string; attempts: number; error: string | null; updated_at: string; id: string | null; name: string | null };
 type Run = { id: number; started_at: string; finished_at: string | null; ok: number | null; report: string | null };
-const [report, gone, wanted, stored, derived, pending, taskCounts, failed, runs, status, badUploads] = await Promise.all([
+const [report, gone, wanted, stored, derived, pending, taskCounts, failed, runs, status, badUploads, unread, readStats] = await Promise.all([
   scan ? storageReport(database, env.MEDIA, grace) : null,
   database.prepare(`SELECT count(*) AS n FROM files WHERE ${originalGone('files')}`).first<{ n: number }>(),
   wantedTotals(database),
@@ -87,6 +99,13 @@ const [report, gone, wanted, stored, derived, pending, taskCounts, failed, runs,
        ORDER BY checked_at DESC LIMIT 50`,
     )
     .all<{ id: string; dir: string; name: string; upload_error: string | null; probe_error: string | null }>(),
+  unreadCount(database),
+  database
+    .prepare(
+      `SELECT count(*) AS n, sum(error IS NOT NULL) AS failed, sum(cover IS NOT NULL) AS covers,
+              (SELECT count(*) FROM pictures) AS pictures, (SELECT coalesce(sum(size), 0) FROM pictures) AS bytes FROM embedded`,
+    )
+    .first<{ n: number; failed: number | null; covers: number | null; pictures: number; bytes: number }>(),
 ]);
 const purgeable = report?.unreferenced.filter((o) => o.purgeable) ?? [];
 const TASK_NAMES: Record<string, string> = { check: N_('核对上传'), derive: N_('推流版与预览'), fingerprint: N_('声学指纹') };
@@ -120,6 +139,23 @@ const lastOk = runs.results.find((r) => r.ok === 1);
       )
     }
     <p class="muted">{t('存储是私有的，只有管理组能读；第三方文件也存入，公开站上是否展示按权属决定。')}</p>
+  </div>
+
+  <h2>{t('文件原值（内嵌的标签与图片）')}</h2>
+  <div class="panel">
+    <p>
+      {t('网站直接从存储里读取每个音频自带的标签和图片（只读文件开头和结尾，不下载整个文件），用于版本页的「文件原值」和曲目封面；相同的图片只存一份。')}
+    </p>
+    <p>
+      {t('已读取 {n} 个音频（{covers} 个带封面，{failed} 个读取失败），存了 {pictures} 张图片（{size}）。', {
+        n: readStats?.n ?? 0, covers: readStats?.covers ?? 0, failed: readStats?.failed ?? 0, pictures: readStats?.pictures ?? 0, size: formatBytes(readStats?.bytes),
+      })}
+      {unread > 0 ? t('还有 {n} 个没读取：每 10 分钟自动读取几百个，也可以现在读取一批。', { n: unread }) : t('全部已读取。')}
+    </p>
+    <form method="post" class="inline-form">
+      <button type="submit" name="action" value="read_tags" disabled={unread === 0}>{t('现在读取一批')}</button>
+      <button type="submit" name="action" value="reread_tags" disabled={!readStats?.failed}>{t('重试读取失败的')}</button>
+    </form>
   </div>
 
   <h2>{t('处理程序')}</h2>

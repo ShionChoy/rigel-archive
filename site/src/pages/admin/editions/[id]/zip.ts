@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { env } from 'cloudflare:workers';
-import { SLOT_LABELS } from '../../../../lib/constants';
+import { loadTypes } from '../../../../lib/types';
 import { db, type FileRow } from '../../../../lib/db';
 import { Places } from '../../../../lib/locations';
 import { editionContext, taggedEntry, taggedSource } from '../../../../lib/tags';
@@ -25,7 +25,7 @@ export const GET: APIRoute = async ({ params, locals }) => {
     .bind(ctx.edition.id)
     .all<FileRow>();
   const places = await Places.load();
-  const label = `${ctx.release.title} [${t(SLOT_LABELS[ctx.edition.slot])}${ctx.edition.name ? ` ${ctx.edition.name}` : ''}]`;
+  const label = `${ctx.release.title} [${(await loadTypes()).editionLabel(ctx.edition, t).replace(' · ', ' ')}]`;
   const root = `${safe(label)}/`;
   // Folders below the edition's own folder become folders in the zip.
   const home = places.editionFolder(ctx.edition.id);

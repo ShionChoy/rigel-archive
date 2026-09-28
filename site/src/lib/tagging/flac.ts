@@ -19,6 +19,15 @@ export interface FlacLayout {
 
 /** Read the metadata blocks (range reads of `read(offset, length)`): the ones kept as they are, the tags and the pictures. */
 export async function readFlacLayout(read: (offset: number, length: number) => Promise<Uint8Array>): Promise<FlacLayout> {
+  // Some encoders put an ID3v2 tag in front of «fLaC»: it is skipped (and left out of the new file).
+  const id3 = await read(0, 10);
+  const base = id3[0] === 0x49 && id3[1] === 0x44 && id3[2] === 0x33
+    ? 10 + (((id3[6] & 127) << 21) | ((id3[7] & 127) << 14) | ((id3[8] & 127) << 7) | (id3[9] & 127)) + (id3[5] & 0x10 ? 10 : 0)
+    : 0;
+  if (base) {
+    const inner = await readFlacLayout((offset, length) => read(base + offset, length));
+    return { ...inner, audioOffset: base + inner.audioOffset };
+  }
   let head = await read(0, 64 * 1024);
   if (head.length < 8 || head[0] !== 0x66 || head[1] !== 0x4c || head[2] !== 0x61 || head[3] !== 0x43) throw new Error('not a FLAC file');
   const keep: FlacLayout['keep'] = [];
@@ -79,31 +88,8 @@ export function vorbisComment(fields: [string, string][], vendor = 'Rigël Archi
   return concat(parts);
 }
 
-// Fields that say the same thing under other names: once the catalog writes one, the original's others go too.
-const SAME_FIELDS = [
-  ['TRACKNUMBER', 'TRACKTOTAL', 'TOTALTRACKS'],
-  ['DISCNUMBER', 'DISCTOTAL', 'TOTALDISCS'],
-  ['ALBUMARTIST', 'ALBUM ARTIST', 'ALBUM_ARTIST'],
-  ['DATE', 'YEAR'],
-  ['CATALOGNUMBER', 'CATALOG', 'LABELNO'],
-  ['LABEL', 'ORGANIZATION', 'PUBLISHER'],
-];
-
-/** The catalog's fields, then the original's fields the catalog has nothing for (lyrics, ReplayGain, comments …). */
-export function mergeComments(catalog: [string, string][], original: [string, string][], withCover: boolean): [string, string][] {
-  const taken = new Set(catalog.map(([k]) => k.toUpperCase()));
-  for (const group of SAME_FIELDS) if (group.some((k) => taken.has(k))) group.forEach((k) => taken.add(k));
-  if (withCover) taken.add('METADATA_BLOCK_PICTURE').add('COVERART').add('COVERARTMIME');
-  return [...catalog, ...original.filter(([k]) => !taken.has(k.toUpperCase()))];
-}
-
 /** The picture type of a PICTURE block body (3 = front cover). */
 export const pictureType = (body: Uint8Array) => (body.length >= 4 ? ((body[0] << 24) | (body[1] << 16) | (body[2] << 8) | body[3]) >>> 0 : -1);
-
-/** The pictures of the new file: the catalog's cover in place of the original's front cover, the others kept. */
-export function mergePictures(cover: Uint8Array | null, original: Uint8Array[]): Uint8Array[] {
-  return cover ? [cover, ...original.filter((p) => pictureType(p) !== FRONT_COVER)] : original;
-}
 
 /** The image in a PICTURE block body. */
 export function pictureImage(body: Uint8Array): { image: Uint8Array; mime: string } | null {
@@ -123,12 +109,12 @@ export function pictureImage(body: Uint8Array): { image: Uint8Array; mime: strin
   }
 }
 
-/** A PICTURE block body for the front cover. */
-export function pictureBlock(image: Uint8Array, mime: string): Uint8Array {
+/** A PICTURE block body (the front cover unless another type is given). */
+export function pictureBlock(image: Uint8Array, mime: string, type = FRONT_COVER): Uint8Array {
   const size = imageSize(image);
   const m = utf8(size?.mime ?? mime);
   return concat([
-    u32be(FRONT_COVER),
+    u32be(type),
     u32be(m.length), m,
     u32be(0), // no description
     u32be(size?.width ?? 0), u32be(size?.height ?? 0), u32be(24), u32be(0),

@@ -1,10 +1,12 @@
 ---
 import Admin from '../../../layouts/Admin.astro';
-import { RELEASE_KIND_LABELS, SLOTS, SLOT_LABELS, SLOT_STATUS_LABELS, type Slot, type SlotStatus } from '../../../lib/constants';
+import { RELEASE_KIND_LABELS } from '../../../lib/constants';
+import { editionCovers } from '../../../lib/covers';
 import { db, type ReleaseRow } from '../../../lib/db';
+import { EDITION_STATUS_LABELS, sortEditions } from '../../../lib/editions';
 import { withParams } from '../../../lib/format';
-import { N_ } from '../../../lib/i18n';
 import { loadEras } from '../../../lib/releases';
+import { loadTypes } from '../../../lib/types';
 
 const url = Astro.url;
 const { t } = Astro.locals;
@@ -12,47 +14,56 @@ const era = url.searchParams.get('era') ?? '';
 const eras = await loadEras();
 
 type Row = Pick<ReleaseRow, 'id' | 'catalog_no' | 'era_id' | 'kind' | 'series' | 'title' | 'release_date' | 'state'> & {
-  slots: string;
+  editions: string;
   files: number;
 };
+type Ed = { id: string; slot: string; name: string; status: keyof typeof EDITION_STATUS_LABELS; sort: number; release_date: string | null };
 
 const stmt = db().prepare(
   `SELECT r.id, r.catalog_no, r.era_id, r.kind, r.series, r.title, r.release_date, r.state,
-          (SELECT json_group_object(slot, status) FROM release_slots WHERE release_id = r.id) AS slots,
+          (SELECT json_group_array(json_object('id', id, 'slot', slot, 'name', name, 'status', status, 'sort', sort, 'release_date', release_date))
+             FROM editions WHERE release_id = r.id) AS editions,
           (SELECT count(*) FROM files WHERE release_id = r.id) AS files
    FROM releases r JOIN eras e ON e.id = r.era_id
    ${era ? 'WHERE r.era_id = ?' : ''}
    ORDER BY e.sort, r.release_date DESC NULLS LAST, r.catalog_no, r.title`,
 );
-const { results } = await (era ? stmt.bind(era) : stmt).all<Row>();
-// One-character column marks (the table header explains them).
-const short: Record<Slot, string> = { cd: 'CD', cd_rip: N_('抓'), digital: N_('数'), streaming: N_('流'), bonus: N_('特'), scans: N_('扫'), pv: 'PV' };
+const [{ results }, types] = await Promise.all([(era ? stmt.bind(era) : stmt).all<Row>(), loadTypes()]);
+// A release's picture: the first cover of its first collected edition (in the types' order).
+const firstCollected = new Map(results.map((r) => [r.id, sortEditions(JSON.parse(r.editions ?? '[]') as Ed[], types).find((e) => e.status === 'collected' || e.status === 'partial')?.id]));
+const covers = await editionCovers([...firstCollected.values()].filter((x): x is string => !!x), { size: 240 });
 ---
 
 <Admin title={t('作品')}>
   <div class="filters">
     <a class:list={['button', { primary: !era }]} href={withParams(url, { era: null })}>{t('全部')}</a>
     {eras.map((e) => <a class:list={['button', { primary: era === e.id }]} href={withParams(url, { era: e.id })}>{e.name}</a>)}
-    <a class="button primary" href="/admin/releases/new" style="margin-left:auto">{t('新建作品')}</a>
+    <a class="button" href="/admin/types" style="margin-left:auto">{t('版本类型')}</a>
+    <a class="button primary" href="/admin/releases/new">{t('新建作品')}</a>
   </div>
 
   <table class="grid">
     <thead>
       <tr>
+        <th></th>
         <th>{t('编号')}</th>
         <th>{t('作品')}</th>
         <th>{t('发行')}</th>
         <th>{t('形式')}</th>
-        <th>{t('版本栏位（{legend}）', { legend: SLOTS.map((s) => `${t(short[s])}=${t(SLOT_LABELS[s])}`).join(t('，')) })}</th>
+        <th>{t('版本')}</th>
         <th class="num">{t('文件')}</th>
       </tr>
     </thead>
     <tbody>
       {
         results.map((r) => {
-          const slots = JSON.parse(r.slots ?? '{}') as Partial<Record<Slot, SlotStatus>>;
+          const editions = sortEditions(JSON.parse(r.editions ?? '[]') as Ed[], types);
           return (
             <tr>
+              <td class="rel-cover">{(() => {
+                const c = covers.get(firstCollected.get(r.id) ?? '')?.[0];
+                return c ? <img src={c.src} alt="" loading="lazy" /> : <span class="ed-nocover"></span>;
+              })()}</td>
               <td class="mono">{r.catalog_no ?? '—'}</td>
               <td>
                 <a href={`/admin/releases/${r.id}`}>{r.title}</a>
@@ -63,14 +74,10 @@ const short: Record<Slot, string> = { cd: 'CD', cd_rip: N_('抓'), digital: N_('
               <td>{t(RELEASE_KIND_LABELS[r.kind])}</td>
               <td>
                 <div class="slots">
-                  {SLOTS.map((s) => {
-                    const status = slots[s];
-                    return (
-                      <span class={`chip ${status ?? 'missing'}`} title={`${t(SLOT_LABELS[s])}：${status ? t(SLOT_STATUS_LABELS[status]) : t('无状态')}`}>
-                        {t(short[s])}
-                      </span>
-                    );
-                  })}
+                  {editions.map((e) => (
+                    <a class={`chip ${e.status}`} href={`/admin/editions/${e.id}`} title={t(EDITION_STATUS_LABELS[e.status])}>{types.editionLabel(e, t)}</a>
+                  ))}
+                  {editions.length === 0 && <span class="muted">—</span>}
                 </div>
               </td>
               <td class="num"><a href={`/admin/inbox?state=all&release=${r.id}`}>{r.files}</a></td>

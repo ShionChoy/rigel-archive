@@ -1,10 +1,15 @@
 ---
 // The 整理台's dialogs, opened by scripts/desk.ts: set a folder's type, same-name conflicts, confirmations,
-// several folders at once, a smart folder's conditions, renaming several files, a file's 整理版 tags and
-// cover, the keyboard shortcuts, a large preview and the first-visit guide.
-import { RELEASE_KINDS, RELEASE_KIND_LABELS, SLOTS, SLOT_LABELS } from '../../lib/constants';
+// several folders at once, a smart folder's conditions, renaming several files, the keyboard shortcuts, a
+// large preview and the first-visit guide. (A file's tags open in scripts/tag-dialog.ts.)
+import { RELEASE_KINDS, RELEASE_KIND_LABELS } from '../../lib/constants';
 import { N_ } from '../../lib/i18n';
+import type { TypeList } from '../../lib/types';
 
+interface Props {
+  types: TypeList;
+}
+const { types } = Astro.props;
 const { t } = Astro.locals;
 const keys: [string, string][] = [
   ['↑ ↓ / J K', N_('上一个 / 下一个（Shift 连选）')],
@@ -73,8 +78,12 @@ const keys: [string, string][] = [
       <span class="full muted small">{t('文件夹里的文件归入这个作品；之后可以在作品页补全资料。')}</span>
     </div>
     <div data-fields="edition" class="form-grid" hidden>
-      <label>{t('来源')}</label>
-      <select name="slot">{SLOTS.map((s) => <option value={s}>{t(SLOT_LABELS[s])}</option>)}</select>
+      <label>{t('类型')}</label>
+      <select name="slot">
+        {types.options(t).map((o) => <option value={o.id}>{o.label}</option>)}
+        <option value="__new__">{t('＋ 新类型…')}</option>
+      </select>
+      <label data-new-type hidden>{t('新类型名称')}</label><input data-new-type hidden type="text" name="new_type" maxlength="40" placeholder={t('如「图片」「Bandcamp」')} />
       <label>{t('名称')}</label><input type="text" name="name" maxlength="100" placeholder={t('如「初版」「Bandcamp 24bit」')} />
       <span class="full muted small">{t('文件夹里的文件归入这个版本。')}</span>
     </div>
@@ -150,51 +159,6 @@ const keys: [string, string][] = [
     </div>
   </form>
 </dialog>
-
-<dialog id="dlg-tags" class="dlg wide">
-  <form method="dialog">
-    <h3>{t('标签与封面')}</h3>
-    <p class="muted small" data-where></p>
-    <div data-nowhere hidden>
-      <p>{t('这个文件还不在任何版本里。整理版标签来自版本的曲目表：先把文件移到某个版本，再来编辑。')}</p>
-      <button type="button" data-move>{t('移动到…')}</button>
-    </div>
-    <div class="tags-layout" data-body>
-      <div class="form-grid tags-fields">
-        <label for="tg-entry">{t('曲目条目')}</label><select id="tg-entry" name="entry"></select>
-        <label for="tg-title">{t('标题（此版）')}</label><input id="tg-title" type="text" name="title" maxlength="300" />
-        <label for="tg-artist">{t('艺术家')}</label><input id="tg-artist" type="text" name="artist" maxlength="300" />
-        <label for="tg-composer">{t('作曲')}</label><input id="tg-composer" type="text" name="composer" maxlength="300" />
-        <label for="tg-lyricist">{t('作词')}</label><input id="tg-lyricist" type="text" name="lyricist" maxlength="300" />
-        <label for="tg-arranger">{t('编曲')}</label><input id="tg-arranger" type="text" name="arranger" maxlength="300" />
-        <span class="full muted small">{t('标题留空则用曲目条目的标题。艺术家、作曲、作词、编曲属于曲目条目，所有版本共用。')}</span>
-        <label for="tg-album">{t('专辑名（整个版本）')}</label><input id="tg-album" type="text" name="album_title" maxlength="300" />
-        <label>{t('序号')}</label><span class="small" data-track></span>
-      </div>
-      <div class="tags-cover">
-        <b class="small">{t('封面（整个版本）')}</b>
-        <div class="cover-choices" data-covers role="radiogroup" aria-label={t('封面')}></div>
-        <p class="muted small">{t('下载整理版时嵌入。可选的是这个作品里 12 MB 以内的 JPEG / PNG 图片；也可以在整理台右键图片「设为封面」。')}</p>
-      </div>
-    </div>
-    <details class="embedded" data-embedded-box>
-      <summary>{t('文件自带的标签与封面（原件，不会改动）')}</summary>
-      <div class="embedded-body">
-        <img data-own-cover alt={t('文件自带的封面')} hidden />
-        <dl class="kv small" data-embedded></dl>
-      </div>
-      <button type="button" data-fill>{t('用文件自带的标签填入空着的格子')}</button>
-    </details>
-    <p class="err-line" data-err></p>
-    <div class="dlg-buttons">
-      <a class="button" data-edition-link>{t('版本页：全部曲目 ›')}</a>
-      <span class="grow"></span>
-      <button value="cancel">{t('取消')}</button>
-      <button value="ok" class="primary" data-ok>{t('保存')}</button>
-    </div>
-  </form>
-</dialog>
-
 <dialog id="dlg-help" class="dlg">
   <form method="dialog">
     <h3>{t('快捷键')}</h3>

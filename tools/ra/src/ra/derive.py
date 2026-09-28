@@ -24,7 +24,11 @@ from pathlib import Path
 
 from .probe import LOSSLESS_CODECS, ffprobe, flac_md5
 
-DERIVE_VERSION = 1  # site/src/lib/processing.ts has the same number; raising it makes everything again
+# site/src/lib/processing.ts has the same number. 2: pictures of 12 MB or more also get «embed» (the site
+# asks version 1 contents again only when they are such pictures, see EMBED_SQL there).
+DERIVE_VERSION = 2
+EMBED_MIN_BYTES = 12_000_000  # pictures this large are embedded into downloads as their 1600 px JPEG copy
+EMBED_SIZE = 1600
 
 IMAGE_SIZES = (240, 640, 1600)
 WEBP_QUALITY = 80
@@ -48,7 +52,7 @@ class DeriveError(Exception):
 
 @dataclass
 class Output:
-    kind: str  # stream | aac | wave | img240 | img640 | img1600 | video | poster
+    kind: str  # stream | aac | wave | img240 | img640 | img1600 | embed | video | poster
     key: str  # where it is stored
     size: int
     content_type: str
@@ -265,6 +269,13 @@ def derive_image(src: Path, sha256: str, work: Path) -> list[Output]:
         copy.save(out, "WEBP", quality=WEBP_QUALITY, method=5)
         info = {"width": copy.width, "height": copy.height, **({"damaged": True} if damaged else {})}
         outputs.append(_output(f"img{size}", f"derived/img/{sha256}/{size}.webp", out, "image/webp", info))
+    if src.stat().st_size >= EMBED_MIN_BYTES:
+        # A JPEG a download can embed as the cover (a whole-booklet scan is too large to embed as it is).
+        copy = image.convert("RGB")
+        copy.thumbnail((EMBED_SIZE, EMBED_SIZE), Image.Resampling.LANCZOS)
+        out = work / "embed.jpg"
+        copy.save(out, "JPEG", quality=90, optimize=True)
+        outputs.append(_output("embed", f"derived/img/{sha256}/embed.jpg", out, "image/jpeg", {"width": copy.width, "height": copy.height}))
     return outputs
 
 

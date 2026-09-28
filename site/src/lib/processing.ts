@@ -5,7 +5,7 @@
 import { DERIVED_KEY } from './blobs';
 
 /** Versions of the program's rules; tools/ra has the same numbers (a test compares them). */
-export const TASK_VERSIONS = { check: 1, derive: 1, fingerprint: 1 } as const;
+export const TASK_VERSIONS = { check: 1, derive: 2, fingerprint: 1 } as const;
 export type Task = keyof typeof TASK_VERSIONS;
 export const TASKS = Object.keys(TASK_VERSIONS) as Task[];
 
@@ -23,12 +23,19 @@ export const MIN_AUDIO_SECONDS = 30;
 
 const ago = (minutes: number) => `strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-${minutes} minutes')`;
 
+/**
+ * Derive version 2 only adds «embed» (a 1600 px JPEG of a picture of 12 MB or more, for embedding as a
+ * cover): contents derived by version 1 are asked again only when they are such pictures.
+ */
+export const EMBED_SQL = "(f.kind = 'image' AND f.size >= 12000000)";
+
 /** Contents that are not waiting for this task: done, given up, being worked on, or failed a moment ago. */
 function settled(task: Task): string {
   const v = TASK_VERSIONS[task];
+  const current = task === 'derive' ? `(t.version >= ${v} OR (t.version >= 1 AND NOT ${EMBED_SQL}))` : `t.version >= ${v}`;
   return `EXISTS (SELECT 1 FROM media_tasks t WHERE t.sha256 = f.sha256 AND t.task = '${task}' AND (
-    (t.state = 'done' AND t.version >= ${v})
-    OR (t.attempts >= ${MAX_ATTEMPTS} AND t.version >= ${v})
+    (t.state = 'done' AND ${current})
+    OR (t.attempts >= ${MAX_ATTEMPTS} AND ${current})
     OR (t.state = 'running' AND t.started_at > ${ago(STALE_MINUTES)})
     OR (t.state = 'failed' AND t.updated_at > ${ago(RETRY_AFTER_MINUTES)})))`;
 }
@@ -174,7 +181,7 @@ export interface DerivedOutput {
   info: unknown;
 }
 
-export const DERIVED_KINDS = ['stream', 'aac', 'wave', 'img240', 'img640', 'img1600', 'video', 'poster'] as const;
+export const DERIVED_KINDS = ['stream', 'aac', 'wave', 'img240', 'img640', 'img1600', 'embed', 'video', 'poster'] as const;
 
 /** Validate the derived files a derive run reports, checking each is in storage with its size. */
 export async function checkOutputs(media: R2Bucket, raw: unknown): Promise<DerivedOutput[]> {

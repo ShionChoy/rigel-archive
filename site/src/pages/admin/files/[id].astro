@@ -6,12 +6,15 @@ import PlacePicker from '../../../components/PlacePicker.astro';
 import { ChangeSet } from '../../../lib/changes';
 import {
   ARCHIVE_STATUS_LABELS, FILE_KIND_LABELS, FILE_STATE_LABELS, NAME_ENCODING_LABELS, RIGHTS, RIGHTS_LABELS,
-  ROLE_LABELS, SLOT_LABELS, isOneOf,
+  ROLE_LABELS, isOneOf,
 } from '../../../lib/constants';
 import { db, parseFormat, parseSuggestion, releaseOptions, type FileRow } from '../../../lib/db';
 import { applyInboxAction, checkFileName } from '../../../lib/inbox';
 import { INSIDE_ARCHIVE, Places, moveFiles, sealArchives } from '../../../lib/locations';
 import { taggedSource } from '../../../lib/tags';
+import { embeddedFor, pictureUrl, readNow } from '../../../lib/embedded';
+import { tagLabel } from '../../../lib/tagging/names';
+import { tagOrder } from '../../../lib/tagging/model';
 import { KEEP_REASON_TEXT, deleteFiles, keepReason, keptMessage, originalGone } from '../../../lib/deletion';
 import { codecName, formatBytes, formatDuration, formatTime, percent, withParams } from '../../../lib/format';
 import { N_, errorText, summary, summaryText, translateHtml, UserError } from '../../../lib/i18n';
@@ -122,6 +125,8 @@ const specLine = [
 const TAG_LABELS: Record<string, string> = {
   title: N_('标题'), artist: N_('艺术家'), album: N_('专辑'), album_artist: N_('专辑艺术家'), track: N_('音轨号'), disc: N_('碟号'), date: N_('日期'), genre: N_('流派'),
 };
+/** ID3 / FLAC picture types. */
+const PICTURE_TYPES: Record<number, string> = { 0: N_('其他图片'), 3: N_('正面封面'), 4: N_('背面封面'), 5: N_('内页'), 6: N_('介质（碟面）'), 8: N_('艺术家'), 18: N_('插画') };
 type Version = Pick<FileRow, 'id' | 'name' | 'replaces' | 'created_at' | 'uploaded_by' | 'size'>;
 type Task = { task: string; state: string; attempts: number; error: string | null; updated_at: string; version: number };
 type Recording = Copy & { score: number; matched_ms: number; offset_ms: number; mine_first: number; other_duration: number | null };
@@ -189,6 +194,13 @@ const labels = new Map(options.map((o) => [o.id, o.label]));
 const places = await Places.load();
 const placeKey = places.keyOf(file);
 const tagged = await taggedSource(file);
+// 文件原值: what the file carries itself (read now if it has not been read yet).
+if (file.kind === 'audio' && sha) await readNow(database, env.MEDIA, [sha], 8000).catch(() => 0);
+const own = file.kind === 'audio' && sha ? (await embeddedFor([sha])).get(sha) ?? null : null;
+const tagText = (name: string) => {
+  const l = tagLabel(name);
+  return l.role !== undefined ? t(l.text, { role: l.role }) : t(l.text);
+};
 const isArchive = !!fmt.archive || file.kind === 'archive' || file.kind === 'disc_image';
 const memberQuery = (Astro.url.searchParams.get('mq') ?? '').trim();
 const members = isArchive
@@ -270,7 +282,34 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
       {specLine && (<><label>{t('规格')}</label><span>{specLine}</span></>)}
       {fmt.probe_error && (<><label>{t('规格')}</label><span class="muted">{t('读取失败：{error}', { error: fmt.probe_error })}</span></>)}
       {
-        fmt.tags && (
+        own ? (
+          <>
+            <label>{t('文件自带的标签')}</label>
+            <span>
+              {own.error ? <span class="muted">{t('读取失败：{error}', { error: own.error })}</span> : Object.keys(own.tags).length === 0 ? <span class="muted">{t('没有标签')}</span> : (
+                <table class="kv-table">
+                  {tagOrder(Object.keys(own.tags)).map((k) => <tr><th>{tagText(k)}</th><td>{own.tags[k].map((v) => <div class="pre">{v}</div>)}</td></tr>)}
+                </table>
+              )}
+              {own.pictures.length > 0 && (
+                <div class="own-pictures">
+                  {own.pictures.map((p) => (
+                    <a href={pictureUrl(p.sha256)} target="_blank" rel="noopener" title={p.description}>
+                      <img src={pictureUrl(p.sha256)} alt="" loading="lazy" />
+                      <span class="muted">{PICTURE_TYPES[p.type] ? t(PICTURE_TYPES[p.type]) : t('图片 {n}', { n: p.type })}{p.width ? ` · ${p.width}×${p.height}` : ''} · {formatBytes(p.size)}</span>
+                    </a>
+                  ))}
+                </div>
+              )}
+              {own.native.length > 0 && (
+                <details class="native">
+                  <summary>{t('按文件格式原样列出（{format}，{n} 项）', { format: own.format ?? '', n: own.native.length })}</summary>
+                  <table class="kv-table mono">{own.native.map(([k, v]) => <tr><th>{k}</th><td class="pre">{v}</td></tr>)}</table>
+                </details>
+              )}
+            </span>
+          </>
+        ) : fmt.tags && (
           <>
             <label>{t('内嵌标签')}</label>
             <span>{Object.entries(fmt.tags).map(([k, v]) => <div><span class="muted">{t(TAG_LABELS[k] ?? k)}：</span>{v}</div>)}</span>
@@ -454,8 +493,9 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
             <button type="submit" title={t('包内文件不再单独整理，只在下面列出清单；可随时展开')}>{file.sealed ? t('展开（包内文件回到整理台）') : t('整体收藏（不单独整理包内文件）')}</button>
           </form>
         )}
-        {tagged && <a class="button" href={`/admin/download/${file.id}?tagged=1`}>{t('下载整理版')}</a>}
-        {file.blob_key && <a class="button" href={`/admin/download/${file.id}`}>{t('下载原件')}</a>}
+        {tagged && <a class="button primary" href={`/admin/download/${file.id}?tagged=1`}>{t('下载（带标签）')}</a>}
+        {tagged && ['wav', 'aif', 'aiff'].includes(file.ext.toLowerCase()) && <a class="button" href={`/admin/download/${file.id}?tagged=1&as=flac`}>{t('下载为 FLAC（采样相同）')}</a>}
+        {file.blob_key && <a class={tagged ? 'secondary-link' : 'button'} href={`/admin/download/${file.id}`}>{t('下载原件')}</a>}
       </div>
     )}
   </div>
@@ -468,7 +508,7 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
         {suggestion.state === 'ignored' && ` ${t('忽略')}`}
         {suggestion.release_id && ` ${labels.get(suggestion.release_id) ?? suggestion.release_id}`}
         {!suggestion.release_id && suggestion.era_id && ` ${places.eras.get(suggestion.era_id)?.name ?? suggestion.era_id}`}
-        {suggestion.slot && ` · ${t(SLOT_LABELS[suggestion.slot])}${suggestion.edition ? ` · ${suggestion.edition}` : ''}`}
+        {suggestion.slot && ` · ${places.types.editionLabel({ slot: suggestion.slot, name: suggestion.edition ?? '' }, t)}`}
         {suggestion.folder && ` / ${suggestion.folder.split('/').join(' / ')}`}
         {suggestion.seal && ` · ${t('整体收藏')}`}
         {suggestion.readme && ` · ${t('设为文件夹的说明文件')}`}

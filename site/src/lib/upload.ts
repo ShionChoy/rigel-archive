@@ -3,7 +3,7 @@
 
 import { SHA256_HEX, blobKey } from './api';
 import { ChangeSet } from './changes';
-import { SLOTS, UPLOAD_ROOT, isOneOf, kindFor } from './constants';
+import { UPLOAD_ROOT, kindFor } from './constants';
 import { N_, summary, UserError } from './i18n';
 import { newId } from './ids';
 
@@ -49,9 +49,9 @@ export function parseUpload(body: Record<string, unknown>): UploadInput {
   const mtime = text(body.mtime, 40);
   if (mtime && Number.isNaN(Date.parse(mtime))) throw new UserError('修改时间无效');
   const slot = text(body.slot, 20);
-  if (slot && !isOneOf(SLOTS, slot)) throw new UserError('未知的版本栏位');
+  if (slot && !/^[\w-]{1,40}$/.test(slot)) throw new UserError('未知的版本类型');
   const release = text(body.release, 100);
-  if (slot && !release) throw new UserError('选择版本栏位前要先选作品');
+  if (slot && !release) throw new UserError('选择版本类型前要先选作品');
   const place = text(body.place, 80);
   if (place && !/^((era|rel|ed|fd):[\w-]{1,80}|top)$/.test(place)) throw new UserError('找不到这个位置');
   return {

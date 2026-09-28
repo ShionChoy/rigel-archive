@@ -5,7 +5,7 @@ import { serveObject } from '../../../lib/api';
 /** Stored content for admin previews: /admin/media/blobs/<sha256>[?download=<name>]. */
 const handler: APIRoute = async ({ request, params, url }) => {
   const key = params.key ?? '';
-  if (!/^(blobs|derived)\/[\w./-]+$/.test(key) || key.includes('..')) return new Response('找不到文件', { status: 404 });
+  if (!/^(blobs|derived|pictures)\/[\w./-]+$/.test(key) || key.includes('..')) return new Response('找不到文件', { status: 404 });
   return serveObject(env.MEDIA, key, request, url.searchParams.get('download') ?? undefined);
 };
 

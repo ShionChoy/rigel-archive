@@ -1,22 +1,22 @@
 ---
 // Import editions from MusicBrainz: every release of the matching release group(s), each to be made a
 // new edition, merged into an existing one, or skipped. The chosen releases' track lists become the
-// editions' track orders (see applyMeta).
-import { env } from 'cloudflare:workers';
+// editions' track lists (see importOnline in lib/lookup.ts).
 import Admin from '../../../../layouts/Admin.astro';
-import { SLOTS, SLOT_LABELS, isOneOf, type Slot } from '../../../../lib/constants';
 import { ChangeSet, batchSince } from '../../../../lib/changes';
 import { db, type EditionRow, type ReleaseRow } from '../../../../lib/db';
-import { addEditionFolder, loadEditionTracks, loadEditions, parseIds } from '../../../../lib/editions';
+import { addEditionFolder, loadEditions, parseIds } from '../../../../lib/editions';
 import { withParams } from '../../../../lib/format';
 import { errorText, summary, UserError } from '../../../../lib/i18n';
 import { newId } from '../../../../lib/ids';
-import { MBID, applyMeta, editionFor, mbCandidates, mbRelease, scoreCandidate, type MbCandidate } from '../../../../lib/metadata';
-import { syncSlots } from '../../../../lib/releases';
+import { MBID, editionFor, mbCandidates, scoreCandidate, type MbCandidate } from '../../../../lib/metadata';
+import { importOnline, mbFull } from '../../../../lib/lookup';
+import { loadTypes } from '../../../../lib/types';
 
 const { id } = Astro.params;
 const { t } = Astro.locals;
 const database = db();
+const types = await loadTypes(database);
 const release = await database.prepare('SELECT * FROM releases WHERE id = ?').bind(id).first<ReleaseRow>();
 if (!release) return new Response(t('找不到作品'), { status: 404 });
 
@@ -30,15 +30,15 @@ if (Astro.request.method === 'POST') {
     let done = 0;
     for (const mbid of chosen) {
       const target = String(form.get(`target_${mbid}`) ?? 'new');
-      const meta = await mbRelease(mbid);
+      const online = await mbFull(mbid);
       const editions = await loadEditions(release.id);
       let edition: EditionRow | undefined = editions.find((e) => e.id === target);
       if (!edition) {
         const slot = String(form.get(`slot_${mbid}`) ?? 'digital');
-        if (!isOneOf(SLOTS, slot)) throw new UserError('未知的版本类型');
+        if (!types.has(slot)) throw new UserError('未知的版本类型');
         const name = String(form.get(`name_${mbid}`) ?? '').trim().slice(0, 100);
         if (editions.some((e) => e.slot === slot && e.name === name)) {
-          throw new UserError('这个作品已经有同类型、同名的版本：{name}', { name: name || t(SLOT_LABELS[slot as Slot]) });
+          throw new UserError('这个作品已经有同类型、同名的版本：{name}', { name: types.editionLabel({ slot, name }, t) });
         }
         const editionId = newId('e');
         const cs = new ChangeSet(database, actor, summary('作品 {release}：从 MusicBrainz 新建版本 {edition}', { release: release.catalog_no ?? release.title, edition: name || slot }));
@@ -48,21 +48,12 @@ if (Astro.request.method === 'POST') {
         };
         cs.create('edition', row);
         await addEditionFolder(cs, editionId, release.id, row);
-        await syncSlots(cs, release.id, [...editions, row]);
         await cs.commit();
         edition = (await database.prepare('SELECT * FROM editions WHERE id = ?').bind(editionId).first<EditionRow>())!;
       }
-      const rows = await loadEditionTracks(edition.id);
-      await applyMeta(actor, env.MEDIA, release, edition, meta, {
-        fields: new Set(['album_title', 'release_date', 'catalog_no', 'track_count']),
-        ids: true,
-        artists: true,
-        titles: rows.length === 0,
-        // An edition that already has a track order keeps it: its rows only get ids and lengths where
-        // the titles agree (titles are compared and taken on the edition's 「查找元数据」 page).
-        rows: new Set(meta.tracks.map((_, i) => i).filter((i) => !rows.length || rows.some((r) => r.disc === meta.tracks[i].disc && r.position === meta.tracks[i].position))),
-        cover: form.get(`cover_${mbid}`) === '1',
-      });
+      // An edition that already has a track list keeps it: its rows only get the ids where the titles
+      // agree (titles are compared and taken on the edition's 「查找元数据」).
+      await importOnline(actor, release, edition, online, form.get(`cover_${mbid}`) === '1');
       done += 1;
     }
     // Each release is its own batch (undone one by one in 修改记录); the button undoes the last one.
@@ -164,10 +155,10 @@ const groups = [...new Set(candidates.map((c) => c.releaseGroup?.title ?? ''))];
                       <td>
                         <select name={`target_${c.id}`}>
                           <option value="new" selected={!match}>{t('新建版本')}</option>
-                          {editions.map((e) => <option value={e.id} selected={match?.id === e.id}>{t('并入：{edition}', { edition: `${t(SLOT_LABELS[e.slot])}${e.name ? ` · ${e.name}` : ''}` })}{audioCount.get(e.id) ? t('（{n} 曲）', { n: audioCount.get(e.id)! }) : ''}</option>)}
+                          {editions.map((e) => <option value={e.id} selected={match?.id === e.id}>{t('并入：{edition}', { edition: types.editionLabel(e, t) })}{audioCount.get(e.id) ? t('（{n} 曲）', { n: audioCount.get(e.id)! }) : ''}</option>)}
                         </select>
                         <div class="new-edition">
-                          <select name={`slot_${c.id}`} aria-label={t('类型')}>{SLOTS.map((s) => <option value={s} selected={proposal.slot === s}>{t(SLOT_LABELS[s])}</option>)}</select>
+                          <select name={`slot_${c.id}`} aria-label={t('类型')}>{types.options(t).map((o) => <option value={o.id} selected={proposal.slot === o.id}>{o.label}</option>)}</select>
                           <input type="text" name={`name_${c.id}`} value={proposal.name} placeholder={t('名称')} size="12" />
                         </div>
                         {score !== null && <span class="muted">{t('匹配度 {p}', { p: `${Math.round(score * 100)}%` })}</span>}

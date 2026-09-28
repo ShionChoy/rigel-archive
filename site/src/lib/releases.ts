@@ -1,8 +1,6 @@
 import { ChangeSet } from './changes';
-import {
-  NEW_RELEASE_SLOTS, RELEASE_KINDS, SLOTS, SLOT_LABELS, SLOT_STATUSES, isOneOf, type ReleaseKind,
-} from './constants';
-import { db, type ReleaseRow, type SlotRow } from './db';
+import { RELEASE_KINDS, isOneOf } from './constants';
+import { db, type ReleaseRow } from './db';
 import { N_, summary, UserError } from './i18n';
 import { newId } from './ids';
 
@@ -122,21 +120,6 @@ export async function saveInfo(actor: string, release: ReleaseRow, form: FormDat
   return cs.commit();
 }
 
-export async function saveSlots(actor: string, release: ReleaseRow, current: SlotRow[], form: FormData): Promise<number> {
-  const cs = new ChangeSet(db(), actor, summary('作品 {release}：修改版本栏位', { release: release.catalog_no ?? release.title }));
-  for (const slot of SLOTS) {
-    const status = text(form, `status_${slot}`);
-    if (!isOneOf(SLOT_STATUSES, status)) throw new UserError('{slot}：请选择状态', { slot: SLOT_LABELS[slot] });
-    const planned = date(form, `planned_${slot}`, N_('{slot}的预定日期格式应为 YYYY、YYYY-MM 或 YYYY-MM-DD'), { slot: SLOT_LABELS[slot] });
-    if (status === 'planned' && !planned) throw new UserError('{slot}：「预定」需要填写日期', { slot: SLOT_LABELS[slot] });
-    const patch = { status, planned_date: status === 'planned' ? planned : null, note: text(form, `note_${slot}`) };
-    const row = current.find((r) => r.slot === slot);
-    if (row) cs.updateKnown('release_slot', { release_id: release.id, slot }, row as unknown as Record<string, unknown>, patch);
-    else cs.create('release_slot', { release_id: release.id, slot, ...patch });
-  }
-  return cs.commit();
-}
-
 export const TRANSLATED_FIELDS = ['title', 'description'] as const;
 export const LANGS = ['zh', 'ja', 'en'] as const;
 
@@ -172,68 +155,7 @@ export async function createRelease(actor: string, form: FormData): Promise<stri
   }
   const cs = new ChangeSet(database, actor, summary('新建作品 {release}', { release: String(patch.catalog_no ?? patch.title) }));
   cs.create('release', { id, ...patch });
-  // Every slot gets a status right away, so the public page shows placeholders for what is missing.
-  const defaults = NEW_RELEASE_SLOTS[patch.kind as ReleaseKind];
-  for (const slot of SLOTS) cs.create('release_slot', { release_id: id, slot, status: defaults[slot], planned_date: null, note: null });
   await placeReleaseFolder(cs, id, String(patch.era_id));
   await cs.commit();
   return id;
-}
-
-export async function saveCover(actor: string, release: ReleaseRow, form: FormData): Promise<number> {
-  const fileId = text(form, 'cover_file_id');
-  if (fileId) {
-    const file = await db()
-      .prepare("SELECT 1 FROM files WHERE id = ? AND release_id = ? AND kind = 'image'")
-      .bind(fileId, release.id)
-      .first();
-    if (!file) throw new UserError('封面要从这个作品的图片文件里选');
-  }
-  const cs = new ChangeSet(db(), actor, summary(fileId ? N_('作品 {release}：设置封面') : N_('作品 {release}：取消封面'), { release: release.catalog_no ?? release.title }));
-  await cs.update('release', { id: release.id }, { cover_file_id: fileId });
-  return cs.commit();
-}
-
-/**
- * Filing files under a slot whose status is 「缺档」 or 「待确认」 means the slot now has content: mark it
- * 「已收录」 in the same batch (「部分缺档」 and the other statuses are left to the admins).
- */
-export async function markCollected(cs: ChangeSet, pairs: Iterable<readonly [string | null | undefined, string | null | undefined]>) {
-  const keys = [...new Set([...pairs].filter(([r, s]) => r && s).map(([r, s]) => `${r}/${s}`))];
-  if (keys.length === 0) return;
-  const { results } = await db()
-    .prepare(
-      `SELECT release_id, slot, status FROM release_slots
-       WHERE status IN ('missing', 'unknown') AND release_id || '/' || slot IN (SELECT value FROM json_each(?))`,
-    )
-    .bind(JSON.stringify(keys))
-    .all<{ release_id: string; slot: string; status: string }>();
-  for (const row of results) cs.updateKnown('release_slot', { release_id: row.release_id, slot: row.slot }, row, { status: 'collected' });
-}
-
-/**
- * A slot's status once it has editions: collected when every edition is, partial when some are and some
- * are missing, missing when none is; planned / unknown editions leave it as it is.
- */
-export function derivedSlotStatus(statuses: string[]): SlotRow['status'] | null {
-  if (statuses.length === 0) return null;
-  const have = statuses.filter((s) => s === 'collected').length;
-  const partial = statuses.some((s) => s === 'partial');
-  const missing = statuses.filter((s) => s === 'missing').length;
-  if (have && !partial && !missing) return 'collected';
-  if (have || partial) return missing || partial ? 'partial' : 'collected';
-  if (missing) return 'missing';
-  return null;
-}
-
-/** Bring the slots of a release in line with its editions (in the same batch). */
-export async function syncSlots(cs: ChangeSet, releaseId: string, editions: { slot: string; status: string }[]) {
-  const { results } = await db().prepare('SELECT * FROM release_slots WHERE release_id = ?').bind(releaseId).all<SlotRow>();
-  for (const slot of SLOTS) {
-    const status = derivedSlotStatus(editions.filter((e) => e.slot === slot).map((e) => e.status));
-    if (!status) continue;
-    const row = results.find((r) => r.slot === slot);
-    if (row) cs.updateKnown('release_slot', { release_id: releaseId, slot }, row as unknown as Record<string, unknown>, { status, planned_date: null });
-    else cs.create('release_slot', { release_id: releaseId, slot, status, planned_date: null, note: null });
-  }
 }

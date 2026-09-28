@@ -9,11 +9,10 @@
 // without a place (未归档). The original path of a file (dir) never changes.
 
 import { ChangeSet } from './changes';
-import { SLOTS, SLOT_LABELS, type Slot } from './constants';
 import { db, type EditionRow, type FolderRow } from './db';
 import { N_, summary, UserError, type T } from './i18n';
 import { newId } from './ids';
-import { markCollected } from './releases';
+import { TypeList, type EditionType } from './types';
 
 export const FOLDER_TYPES = ['plain', 'era', 'release', 'edition'] as const;
 export type FolderType = (typeof FOLDER_TYPES)[number];
@@ -41,7 +40,7 @@ export interface ReleaseInfo {
   state: string;
 }
 export type EditionInfo = Pick<EditionRow, 'id' | 'release_id' | 'slot' | 'name' | 'catalog_no' | 'release_date' | 'status' | 'sort' | 'is_default'>;
-export type FolderInfo = Pick<FolderRow, 'id' | 'parent_id' | 'type' | 'era_id' | 'release_id' | 'edition_id' | 'name' | 'description' | 'readme_file_id' | 'color' | 'sort'>;
+export type FolderInfo = Pick<FolderRow, 'id' | 'parent_id' | 'type' | 'era_id' | 'release_id' | 'edition_id' | 'name' | 'description' | 'readme_file_id' | 'color' | 'sort' | 'extras'>;
 
 /** The era, release and edition a folder belongs to (its own entity included). */
 export interface Context {
@@ -55,7 +54,7 @@ export interface Place {
   release_id: string | null;
   edition_id: string | null;
   folder_id: string | null;
-  slot: Slot | null;
+  slot: string | null;
 }
 
 export const TOP = 'top';
@@ -72,7 +71,9 @@ export const IS_ARCHIVE = "(files.kind IN ('archive', 'disc_image') OR json_extr
 
 const MAX_DEPTH = 64;
 const collator = new Intl.Collator('ja', { numeric: true });
-const slotIndex = (s: string) => SLOTS.indexOf(s as Slot);
+
+/** The default name of an edition's attachments folder (the admins may rename it). */
+export const EXTRAS_NAME = '附件';
 
 export function split(key: string): [string, string] {
   const at = key.indexOf(':');
@@ -87,19 +88,22 @@ export class Places {
   readonly releases = new Map<string, ReleaseInfo>();
   readonly editions = new Map<string, EditionInfo>();
   readonly folders = new Map<string, FolderInfo>();
+  types = new TypeList([]);
   private readonly kids = new Map<string | null, string[]>();
   private readonly byEra = new Map<string, string>();
   private readonly byRelease = new Map<string, string>();
   private readonly byEdition = new Map<string, string>();
 
   static async load(database: D1Database = db()): Promise<Places> {
-    const [eras, releases, editions, folders] = await database.batch([
+    const [eras, releases, editions, folders, types] = await database.batch([
       database.prepare('SELECT id, name, sort FROM eras ORDER BY sort'),
       database.prepare('SELECT id, era_id, catalog_no, title, release_date, kind, state FROM releases'),
       database.prepare('SELECT id, release_id, slot, name, catalog_no, release_date, status, sort, is_default FROM editions'),
-      database.prepare('SELECT id, parent_id, type, era_id, release_id, edition_id, name, description, readme_file_id, color, sort FROM folders'),
+      database.prepare('SELECT id, parent_id, type, era_id, release_id, edition_id, name, description, readme_file_id, color, sort, extras FROM folders'),
+      database.prepare('SELECT id, name_zh, name_ja, name_en, sort, missing_board FROM slot_types'),
     ]);
     const p = new Places();
+    p.types = new TypeList(types.results as EditionType[]);
     for (const r of eras.results as EraInfo[]) p.eras.set(r.id, r);
     for (const r of releases.results as ReleaseInfo[]) p.releases.set(r.id, r);
     for (const r of editions.results as EditionInfo[]) p.editions.set(r.id, r);
@@ -217,7 +221,7 @@ export class Places {
       const x = this.editions.get(a.edition_id);
       const y = this.editions.get(b.edition_id);
       if (x && y) {
-        return slotIndex(x.slot) - slotIndex(y.slot) || x.sort - y.sort
+        return this.types.index(x.slot) - this.types.index(y.slot) || x.sort - y.sort
           || (x.release_date ?? '9999').localeCompare(y.release_date ?? '9999') || collator.compare(x.name, y.name);
       }
     }
@@ -295,8 +299,22 @@ export class Places {
   }
 
   editionLabel(e: Pick<EditionInfo, 'slot' | 'name'>, t: T): string {
-    const slot = t(SLOT_LABELS[e.slot]);
-    return e.name ? `${slot} · ${e.name}` : slot;
+    return this.types.editionLabel(e, t);
+  }
+
+  /** The attachments folder of an edition. */
+  extrasOf(editionId: string): FolderInfo | undefined {
+    const folder = this.editionFolder(editionId);
+    return folder ? this.children(folder.id).find((f) => f.extras) : undefined;
+  }
+
+  /** The edition whose attachments folder this is (or is inside), else null. */
+  extrasEdition(folderId: string | null): string | null {
+    for (const f of this.ancestors(folderId)) {
+      if (f.extras) return f.parent_id ? this.folders.get(f.parent_id)?.edition_id ?? null : null;
+      if (f.type !== 'plain') return null;
+    }
+    return null;
   }
 
   folderName(f: FolderInfo, t: T): string {
@@ -333,12 +351,12 @@ export class Places {
   }
 
   /** Every folder in tree order, for the 「移动到…」 picker and the page's scripts. */
-  options(t: T): { key: string; id: string; parent: string | null; path: string; name: string; kind: FolderType; depth: number }[] {
-    const out: { key: string; id: string; parent: string | null; path: string; name: string; kind: FolderType; depth: number }[] = [];
+  options(t: T): { key: string; id: string; parent: string | null; path: string; name: string; kind: FolderType; depth: number; extras: boolean }[] {
+    const out: { key: string; id: string; parent: string | null; path: string; name: string; kind: FolderType; depth: number; extras: boolean }[] = [];
     const walk = (f: FolderInfo, depth: number, prefix: string) => {
       const name = this.folderName(f, t);
       const path = prefix ? `${prefix} / ${name}` : name;
-      out.push({ key: folderKey(f.id), id: f.id, parent: f.parent_id, path, name, kind: f.type, depth });
+      out.push({ key: folderKey(f.id), id: f.id, parent: f.parent_id, path, name, kind: f.type, depth, extras: !!f.extras });
       if (depth < MAX_DEPTH) for (const c of this.children(f.id)) walk(c, depth + 1, path);
     };
     for (const f of this.children(null)) walk(f, 0, '');
@@ -369,6 +387,7 @@ export interface LocNode {
   color: string | null;
   status?: string; // editions: collected / missing …
   readme?: boolean;
+  extras?: boolean; // an edition's attachments folder
 }
 
 /** The folder tree with file counts (visible files). */
@@ -391,6 +410,7 @@ export async function folderTree(places: Places, t: T): Promise<LocNode[]> {
       color: f.color,
       status: f.edition_id ? places.editions.get(f.edition_id)?.status : undefined,
       readme: !!f.readme_file_id,
+      extras: !!f.extras,
     };
   };
   return places.children(null).map((f) => build(f, 0));
@@ -422,8 +442,29 @@ export function parentIdOf(places: Places, key: string): string | null {
   return f.id;
 }
 
-export function plainFolder(id: string, parentId: string | null, name: string, sort: number): FolderInfo {
-  return { id, parent_id: parentId, type: 'plain', era_id: null, release_id: null, edition_id: null, name, description: null, readme_file_id: null, color: null, sort };
+export function plainFolder(id: string, parentId: string | null, name: string, sort: number, extras = 0): FolderInfo {
+  return { id, parent_id: parentId, type: 'plain', era_id: null, release_id: null, edition_id: null, name, description: null, readme_file_id: null, color: null, sort, extras };
+}
+
+/**
+ * The attachments folder of the edition folder `folderId`, made in `cs` when it has none: a plain folder
+ * named 附件 there becomes it, else a new one is made. Returns its id.
+ */
+export function ensureExtras(cs: ChangeSet, places: Places, folderId: string, direct = false): string {
+  const kids = places.children(folderId);
+  const found = kids.find((f) => f.extras);
+  if (found) return found.id;
+  const named = kids.find((f) => f.type === 'plain' && f.name === EXTRAS_NAME);
+  if (named) {
+    cs.updateKnown('folder', { id: named.id }, { extras: 0 }, { extras: 1 });
+    places.updateFolder(named.id, { extras: 1 });
+    return named.id;
+  }
+  const row = plainFolder(newId('fd'), folderId, EXTRAS_NAME, 0, 1);
+  if (direct) cs.create('folder', { ...row });
+  else cs.queueCreate('folder', { ...row });
+  places.addFolder(row);
+  return row.id;
 }
 
 /**
@@ -457,7 +498,7 @@ export function ensureEntityFolder(cs: ChangeSet, places: Places, key: string, d
   if (found) return found.id;
   const [kind, id] = split(key);
   const make = (parentId: string | null, entity: Pick<FolderInfo, 'era_id' | 'release_id' | 'edition_id'>, type: FolderType): string => {
-    const row: FolderInfo = { id: newId('fd'), parent_id: parentId, type, name: '', description: null, readme_file_id: null, color: null, sort: 0, ...entity };
+    const row: FolderInfo = { id: newId('fd'), parent_id: parentId, type, name: '', description: null, readme_file_id: null, color: null, sort: 0, extras: 0, ...entity };
     // Queued rows are inserted before everything else in the batch; `direct` keeps the order of the calls,
     // for an entity made with cs.create just before.
     if (direct) cs.create('folder', { ...row });
@@ -472,7 +513,12 @@ export function ensureEntityFolder(cs: ChangeSet, places: Places, key: string, d
   }
   if (kind === 'ed') {
     const e = places.editions.get(id);
-    if (e) return make(ensureEntityFolder(cs, places, `rel:${e.release_id}`, direct), { era_id: null, release_id: null, edition_id: id }, 'edition');
+    if (e) {
+      // Every edition comes with its attachments folder.
+      const folder = make(ensureEntityFolder(cs, places, `rel:${e.release_id}`, direct), { era_id: null, release_id: null, edition_id: id }, 'edition');
+      ensureExtras(cs, places, folder, direct);
+      return folder;
+    }
   }
   throw new UserError('找不到这个位置');
 }
@@ -570,7 +616,6 @@ export async function moveFiles(actor: string, ids: string[], where: string, t: 
   if (patches.size === 0 && skipped) throw new UserError('这些文件都在整体收藏的压缩包里，不能单独移动');
   applyPatches(cs, patches);
   const placed = [...patches.values()];
-  await markCollected(cs, placed.map((p) => [p.release_id as string | null, p.slot as string | null] as const));
   markEditionsCollected(cs, places, placed.map((p) => p.edition_id as string | null));
   const changed = await cs.commit();
   return { summary: cs.summary, changed, skipped, batchId: cs.batchId };

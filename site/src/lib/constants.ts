@@ -1,41 +1,8 @@
 // Enumerations shared with migrations/0001_init.sql and tools/ra/src/ra/model.py. Labels are Chinese,
-// marked with N_ and translated where they are shown (t(SLOT_LABELS[slot])).
+// marked with N_ and translated where they are shown (t(RELEASE_KIND_LABELS[kind])). Edition types are
+// not here: the admins keep them in the database (lib/types.ts).
 
 import { N_ } from './i18n';
-
-export const SLOTS = ['cd', 'cd_rip', 'digital', 'streaming', 'bonus', 'scans', 'pv'] as const;
-export type Slot = (typeof SLOTS)[number];
-
-export const SLOT_LABELS: Record<Slot, string> = {
-  cd: N_('实体 CD'),
-  cd_rip: N_('CD 抓轨'),
-  digital: N_('官方数字版/母带'),
-  streaming: N_('流媒体'),
-  bonus: N_('DL 卡/特典'),
-  scans: N_('扫图'),
-  pv: 'PV',
-};
-
-export const SLOT_STATUSES = [
-  'collected',
-  'partial',
-  'missing',
-  'unreleased',
-  'planned',
-  'not_applicable',
-  'unknown',
-] as const;
-export type SlotStatus = (typeof SLOT_STATUSES)[number];
-
-export const SLOT_STATUS_LABELS: Record<SlotStatus, string> = {
-  collected: N_('已收录'),
-  partial: N_('部分缺档'),
-  missing: N_('缺档'),
-  unreleased: N_('未发行'),
-  planned: N_('预定'),
-  not_applicable: N_('不适用'),
-  unknown: N_('待确认'),
-};
 
 export const RELEASE_KINDS = ['album', 'single', 'dl_card', 'web', 'game_bgm', 'other'] as const;
 export type ReleaseKind = (typeof RELEASE_KINDS)[number];
@@ -47,35 +14,6 @@ export const RELEASE_KIND_LABELS: Record<ReleaseKind, string> = {
   web: N_('网络发表'),
   game_bgm: N_('游戏 BGM'),
   other: N_('其他'),
-};
-
-// Slots a newly created release starts with. Every slot always has a status, so the public page can
-// show a placeholder (e.g. a new album with only a physical CD shows 「未发行」 for the digital slot).
-export const NEW_RELEASE_SLOTS: Record<ReleaseKind, Record<Slot, SlotStatus>> = {
-  album: {
-    cd: 'collected', cd_rip: 'missing', digital: 'unreleased', streaming: 'unreleased',
-    bonus: 'not_applicable', scans: 'missing', pv: 'unreleased',
-  },
-  single: {
-    cd: 'not_applicable', cd_rip: 'not_applicable', digital: 'missing', streaming: 'unreleased',
-    bonus: 'not_applicable', scans: 'not_applicable', pv: 'unreleased',
-  },
-  dl_card: {
-    cd: 'not_applicable', cd_rip: 'not_applicable', digital: 'missing', streaming: 'not_applicable',
-    bonus: 'collected', scans: 'missing', pv: 'not_applicable',
-  },
-  web: {
-    cd: 'not_applicable', cd_rip: 'not_applicable', digital: 'missing', streaming: 'not_applicable',
-    bonus: 'not_applicable', scans: 'not_applicable', pv: 'not_applicable',
-  },
-  game_bgm: {
-    cd: 'not_applicable', cd_rip: 'not_applicable', digital: 'missing', streaming: 'not_applicable',
-    bonus: 'not_applicable', scans: 'not_applicable', pv: 'not_applicable',
-  },
-  other: {
-    cd: 'unknown', cd_rip: 'unknown', digital: 'unknown', streaming: 'unknown',
-    bonus: 'unknown', scans: 'unknown', pv: 'unknown',
-  },
 };
 
 export const RIGHTS = ['own', 'third_party', 'licensed', 'unknown'] as const;

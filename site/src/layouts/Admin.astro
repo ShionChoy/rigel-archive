@@ -5,9 +5,10 @@ import { HTML_LANG, LANGS, LANG_NAMES } from '../lib/i18n';
 interface Props {
   title: string;
   wide?: boolean;
+  heading?: boolean; // false: the page draws its own heading
 }
 
-const { title, wide = false } = Astro.props;
+const { title, wide = false, heading = true } = Astro.props;
 const { admin, t, lang } = Astro.locals;
 const path = Astro.url.pathname;
 const msg = Astro.url.searchParams.get('msg');
@@ -34,7 +35,7 @@ const ICONS = {
 const nav = [
   { href: '/admin/inbox', label: t('整理台'), icon: ICONS.inbox },
   { href: '/admin/upload', label: t('上传'), icon: ICONS.upload },
-  { href: '/admin/releases', label: t('作品'), icon: ICONS.release },
+  { href: '/admin/releases', label: t('作品'), icon: ICONS.release, also: ['/admin/types', '/admin/editions'] },
   { href: '/admin/songs', label: t('乐曲'), icon: ICONS.song },
   { href: '/admin/missing', label: t('缺档看板'), icon: ICONS.missing },
   { href: '/admin/history', label: t('修改记录'), icon: ICONS.history },
@@ -84,7 +85,7 @@ const nav = [
           {
             nav.map((item) => (
               <li>
-                <a href={item.href} aria-current={path.startsWith(item.href) ? 'page' : undefined} title={item.label}>
+                <a href={item.href} aria-current={[item.href, ...(item.also ?? [])].some((p) => path.startsWith(p)) ? 'page' : undefined} title={item.label}>
                   <svg viewBox="0 0 24 24" class="nav-icon" aria-hidden="true" set:html={item.icon} />
                   <span class="label">{item.label}</span>
                 </a>
@@ -108,7 +109,7 @@ const nav = [
         </div>
       </nav>
       <main class:list={['main', { wide }]}>
-        <h1>{title}</h1>
+        {heading && <h1>{title}</h1>}
         {
           msg && (
             <div class="flash ok">

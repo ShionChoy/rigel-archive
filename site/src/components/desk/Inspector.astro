@@ -4,18 +4,20 @@
 // sent to /admin/desk/folder as JSON.
 import FilePreview from '../FilePreview.astro';
 import FolderIcon from './FolderIcon.astro';
-import { FILE_KIND_LABELS, FILE_STATE_LABELS, RELEASE_KIND_LABELS, RIGHTS, RIGHTS_LABELS, ROLE_LABELS, SLOT_LABELS, type Slot } from '../../lib/constants';
+import { FILE_KIND_LABELS, FILE_STATE_LABELS, RELEASE_KIND_LABELS, RIGHTS, RIGHTS_LABELS, ROLE_LABELS } from '../../lib/constants';
 import { formatBytes, formatSpec, percent } from '../../lib/format';
 import { parseFormat } from '../../lib/db';
 import { EDITION_STATUS_LABELS } from '../../lib/editions';
 import { FOLDER_COLORS, FOLDER_COLOR_LABELS, FOLDER_TYPE_LABELS, type Places } from '../../lib/locations';
 import type { FilesSummary, FileView, FolderView } from '../../lib/desk';
 import type { Derived } from '../../lib/media';
-import type { TagEditView } from '../../lib/tagedit';
+import type { FileTagView } from '../../lib/tagedit';
+import { tagLabel } from '../../lib/tagging/names';
+import { tagOrder } from '../../lib/tagging/model';
 
 type Props =
   | { mode: 'folder'; places: Places; view: FolderView; selected?: boolean }
-  | { mode: 'file'; places: Places; file: FileView; derived: Derived; base: string; tags?: TagEditView | null }
+  | { mode: 'file'; places: Places; file: FileView; derived: Derived; base: string; tags?: FileTagView | null }
   | { mode: 'files'; places: Places; summary: FilesSummary; folders: number }
   | { mode: 'view'; title: string; hint?: string; count: number; bytes: number; link?: { href: string; label: string } | null; smart?: string | null; rules?: string[] }
   | { mode: 'empty' };
@@ -72,7 +74,7 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
             <section class="insp-sec">
               <h4>{t('版本')}</h4>
               <dl class="kv">
-                <dt>{t('来源')}</dt><dd>{t(SLOT_LABELS[v.edition.slot as Slot] ?? v.edition.slot)}</dd>
+                <dt>{t('类型')}</dt><dd>{v.edition.type}</dd>
                 <dt>{t('名称')}</dt><dd>{v.edition.name || '—'}</dd>
                 <dt>{t('编号')}</dt><dd>{v.edition.catalog_no ?? '—'}</dd>
                 <dt>{t('状态')}</dt><dd><span class={`chip ${v.edition.status}`}>{statusLabel(v.edition.status)}</span></dd>
@@ -86,13 +88,17 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
           )}
           {v.edition && (
             <section class="insp-sec">
-              <h4>{t('整理版封面')}</h4>
+              <h4>{t('封面')}</h4>
               <div class="insp-tags">
-                {v.edition.cover?.src ? <img class="insp-cover" src={v.edition.cover.src} alt="" loading="lazy" /> : null}
+                <div class="insp-covers">{v.edition.covers.map((c) => <img class="insp-cover" src={c.src} alt="" loading="lazy" title={c.chosen ? c.name : undefined} />)}</div>
                 <p class="small">
-                  {v.edition.cover
-                    ? (v.edition.cover.own ? t('这个版本的封面：{name}', { name: v.edition.cover.name }) : t('用作品的封面：{name}', { name: v.edition.cover.name }))
-                    : t('还没有封面：下载时保留各文件自带的封面。')}
+                  {v.edition.covers.length === 0
+                    ? t('没有封面：曲目都没有自带封面，版本里也没有图片。')
+                    : v.edition.covers[0].chosen
+                      ? t('手动指定：{name}', { name: v.edition.covers[0].name })
+                      : v.edition.covers[0].tracks !== null
+                        ? (v.edition.covers.length > 1 ? t('曲目自带（{n} 种不同的封面）', { n: v.edition.covers.length }) : t('曲目自带 · {n} 首', { n: v.edition.covers[0].tracks }))
+                        : t('版本里的图片：{name}', { name: v.edition.covers[0].name })}
                   <br /><span class="muted">{t('右键图片「设为封面」；右键音频「编辑标签与封面」（E）。')}</span>
                 </p>
               </div>
@@ -210,35 +216,29 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
           )}
           {f.kind === 'audio' && (
             <section class="insp-sec">
-              <h4>{t('标签与封面')} <span class="help" title={t('下载「整理版」时按这里写入标签和封面；原件不变。')}>?</span></h4>
-              {tv?.edition && tv.tags ? (
+              <h4>{t('标签与封面')} <span class="help" title={t('下载时写入文件的标签和封面：文件自带的，加上曲目表里改过的；原件不变。')}>?</span></h4>
+              {tv ? (
                 <>
                   <div class="insp-tags">
-                    {tv.cover.src ? <img class="insp-cover" src={tv.cover.src} alt="" loading="lazy" /> : null}
+                    {tv.cover ? <img class="insp-cover" src={tv.cover.src} alt="" loading="lazy" title={tv.cover.chosen ? t('手动指定') : t('曲目自带')} /> : null}
                     <dl class="kv small">
-                      <dt>{t('标题')}</dt><dd>{tv.tags.title}</dd>
-                      <dt>{t('艺术家')}</dt><dd>{tv.tags.artist}</dd>
-                      <dt>{t('专辑')}</dt><dd>{tv.tags.album}</dd>
-                      {tv.tags.track && <><dt>{t('序号')}</dt><dd>{tv.tags.track}</dd></>}
-                      <dt>{t('封面')}</dt>
-                      <dd>{tv.cover.from === 'edition' ? t('版本的封面') : tv.cover.from === 'release' ? t('作品的封面') : tv.cover.from === 'file' ? t('文件自带') : t('无')}</dd>
+                      {tagOrder(Object.keys(tv.tags)).filter((k) => !['totaltracks', 'totaldiscs', 'discnumber'].includes(k)).slice(0, 8).map((k) => {
+                        const l = tagLabel(k);
+                        return <><dt>{l.role !== undefined ? t(l.text, { role: l.role }) : t(l.text)}</dt><dd>{tv.tags[k].join('; ')}</dd></>;
+                      })}
                     </dl>
                   </div>
-                  {!tv.row && <p class="muted small">{t('还没对应到曲目：保存标签时会加进这个版本的曲目表。')}</p>}
+                  {!tv.read && <p class="muted small">{t('文件自带的标签还没读取完。')}</p>}
+                  {tv.file.edition_id && !tv.row && <p class="muted small">{t('还没对应到曲目表里的一行：在「编辑标签」里可以为它新建一行。')}</p>}
+                  {tv.row && tv.changed > 0 && <p class="muted small">{t('曲目表改了 {n} 个标签（下载时写入）。', { n: tv.changed })}</p>}
                   <div class="insp-actions">
-                    <button type="button" data-act="edit-tags" data-file={f.id} title="E">{t('编辑标签与封面…')}</button>
-                    {tv.file.taggable && <a class="button" href={`/admin/download/${f.id}?tagged=1`}>{t('下载整理版')}</a>}
+                    {tv.file.edition_id ? <button type="button" data-act="edit-tags" data-file={f.id} title="E">{t('编辑标签与封面…')}</button> : null}
+                    {tv.file.edition_id && <a class="button" href={`/admin/editions/${tv.file.edition_id}${tv.row ? `#row=${tv.row.id}` : ''}`}>{t('在版本页编辑')}</a>}
+                    {tv.row && <a class="button" href={`/admin/download/${f.id}?tagged=1`}>{t('下载（带标签）')}</a>}
                   </div>
+                  {!tv.file.edition_id && <p class="muted small">{t('把文件放进某个版本后，就能在版本的曲目表里编辑它的标签。')}</p>}
                 </>
-              ) : (
-                <p class="muted small">{t('整理版标签来自版本的曲目表：把文件放进某个版本后就能编辑。')}</p>
-              )}
-              {tags.length > 0 && (
-                <details>
-                  <summary class="muted small">{t('文件自带的标签')}{fmt.cover ? ` · ${t('有内嵌封面')}` : ''}</summary>
-                  <dl class="kv small">{tags.map(([k, v]) => <><dt>{k}</dt><dd>{String(v)}</dd></>)}</dl>
-                </details>
-              )}
+              ) : null}
             </section>
           )}
           {f.kind !== 'audio' && tags.length > 0 && (
@@ -247,13 +247,13 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
               <dl class="kv small">{tags.map(([k, v]) => <><dt>{k}</dt><dd>{String(v)}</dd></>)}</dl>
             </section>
           )}
-          {f.kind === 'image' && f.release_id && (
+          {f.kind === 'image' && f.edition_id && (
             <section class="insp-sec">
               <h4>{t('封面')}</h4>
               {f.cover_of ? (
-                <p><span class="chip collected">{f.cover_of === 'edition' ? t('是这个版本的封面') : t('是作品的封面')}</span></p>
+                <p><span class="chip collected">{t('是这个版本的封面')}</span></p>
               ) : /^(jpe?g|png)$/i.test(f.ext) && f.size < 12000000 ? (
-                <button type="button" data-act="set-cover" data-file={f.id}>{f.edition_id ? t('设为这个版本的封面') : t('设为作品的封面')}</button>
+                <button type="button" data-act="set-cover" data-file={f.id}>{t('设为这个版本的封面')}</button>
               ) : (
                 <p class="muted small">{t('整理版只能嵌入 12 MB 以内的 JPEG 或 PNG 图片。')}</p>
               )}

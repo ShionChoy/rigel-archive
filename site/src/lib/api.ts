@@ -55,6 +55,8 @@ export async function serveObject(media: R2Bucket, key: string, request: Request
   const headers = new Headers();
   object.writeHttpMetadata(headers);
   headers.set('etag', object.httpEtag);
+  // Stored by content: a key never holds anything else.
+  if (/^(blobs|pictures)\//.test(key)) headers.set('cache-control', 'private, max-age=31536000, immutable');
   headers.set('accept-ranges', 'bytes');
   if (download) headers.set('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(download)}`);
   protect(headers);

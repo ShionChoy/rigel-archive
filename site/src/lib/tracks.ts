@@ -4,7 +4,6 @@
 
 import { ChangeSet } from './changes';
 import { summary, UserError } from './i18n';
-import { SLOT_LABELS, isOneOf, SLOTS } from './constants';
 import { db, parseFormat, type ReleaseRow, type TrackRow } from './db';
 import { newId } from './ids';
 
@@ -184,34 +183,6 @@ export function titleFromFile(file: { name: string; format: string | null }): st
   // «Rigel Theatre - Phantom Swing.wav»: the circle's name in front is not part of the title.
   const title = stem.replace(/^Rig[eë]l Theatre\s+-\s+/i, '');
   return title.replace(/^(?:\d[-.])?\d{1,3}\s*[-._)\]]*\s*/, '').trim() || title;
-}
-
-/** Build the track list from the audio files of one slot (only while the release has no tracks). */
-export async function generateTracks(actor: string, release: ReleaseRow, slotRaw: string): Promise<number> {
-  if (!isOneOf(SLOTS, slotRaw)) throw new UserError('请选择从哪个栏位的文件生成');
-  if ((await loadTracks(release.id)).length) throw new UserError('已经有曲目表了；要重新生成，先删除现有曲目');
-  const files = await audioFiles(release.id, slotRaw);
-  if (files.length === 0) throw new UserError('「{slot}」栏位里没有音频文件', { slot: SLOT_LABELS[slotRaw] });
-  const ordered = files
-    .map((f) => ({ f, n: trackNumber(f) }))
-    .sort((a, b) => a.n.disc - b.n.disc || (a.n.track ?? 999) - (b.n.track ?? 999) || a.f.name.localeCompare(b.f.name, 'ja'));
-  const cs = new ChangeSet(db(), actor, summary('作品 {release}：从「{slot}」的 {n} 个文件生成曲目表', { release: label(release), slot: SLOT_LABELS[slotRaw], n: files.length }));
-  const counters = new Map<number, number>();
-  for (const { f, n } of ordered) {
-    const position = (counters.get(n.disc) ?? 0) + 1;
-    counters.set(n.disc, position);
-    const title = titleFromFile(f);
-    const songId = newId('s');
-    const trackId = newId('t');
-    const seconds = parseFormat(f.format).duration;
-    cs.create('song', { id: songId, title, note: null });
-    cs.create('track', {
-      id: trackId, release_id: release.id, disc: n.disc, position, title, song_id: songId, version_label: null,
-      duration_ms: seconds ? Math.round(seconds * 1000) : null, credits: null, note: null,
-    });
-    cs.updateFiles([f.id], { track_id: trackId });
-  }
-  return cs.commit();
 }
 
 /** Link each audio file without a track to the track with its disc and number. Returns the count. */

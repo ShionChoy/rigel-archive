@@ -1,6 +1,7 @@
 ---
 import Admin from '../../../layouts/Admin.astro';
-import { FILE_KIND_LABELS, RIGHTS_LABELS, SLOT_LABELS } from '../../../lib/constants';
+import { FILE_KIND_LABELS, RIGHTS_LABELS } from '../../../lib/constants';
+import { loadTypes } from '../../../lib/types';
 import { db, parseFormat, releaseLabels, type FileRow } from '../../../lib/db';
 import { formatDuration, formatSpec, withParams } from '../../../lib/format';
 import { UserError, errorText } from '../../../lib/i18n';
@@ -12,6 +13,7 @@ import { mimeFor } from '../../../lib/constants';
 
 const { id } = Astro.params;
 const { t } = Astro.locals;
+const types = await loadTypes();
 const database = db();
 const song = await database.prepare('SELECT id, title, note FROM songs WHERE id = ?').bind(id).first<{ id: string; title: string; note: string | null }>();
 if (!song) return new Response(t('找不到乐曲'), { status: 404 });
@@ -111,7 +113,7 @@ const sameRecording = others.filter((s) => heard.some((h) => h.id === s.id));
                 const sources = audioSources(mediaSrc(f, ''), f.sha256 ? derived.get(f.sha256) : undefined, mimeFor(f.ext));
                 return (
                   <div>
-                    <span class="muted">{f.slot ? t(SLOT_LABELS[f.slot]) : ''} · {formatSpec(parseFormat(f.format))}</span>
+                    <span class="muted">{f.slot ? types.label(f.slot, t) : ''} · {formatSpec(parseFormat(f.format))}</span>
                     {sources.length ? (
                       <audio controls preload="none" style="width:260px;display:block">
                         {sources.map((s) => <source src={s.src} type={s.type} />)}

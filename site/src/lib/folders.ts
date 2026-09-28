@@ -3,15 +3,15 @@
 // and can be undone as a whole. The tree itself is described in locations.ts.
 
 import { ChangeSet } from './changes';
-import { NEW_RELEASE_SLOTS, RELEASE_KINDS, SLOTS, isOneOf, type ReleaseKind, type Slot } from './constants';
+import { RELEASE_KINDS, isOneOf } from './constants';
 import { db } from './db';
 import { summary, UserError, type Params, type T } from './i18n';
 import { newId } from './ids';
 import {
-  FOLDER_COLORS, Places, TOP, UNPLACED, checkFolderName, ensureFolder, folderKey, markEditionsCollected,
+  FOLDER_COLORS, Places, TOP, UNPLACED, checkFolderName, ensureExtras, ensureFolder, folderKey, markEditionsCollected,
   nextSort, type Context, type FolderInfo, type FolderType,
 } from './locations';
-import { markCollected, syncSlots } from './releases';
+import { NEW_TYPE, addType } from './types';
 
 /** A move would put two folders of the same name side by side: the admin chooses to merge or keep both. */
 export class ConflictError extends UserError {
@@ -125,22 +125,12 @@ function refile(cs: ChangeSet, places: Places, folderIds: string[], before: Cont
   cs.updateFilesWhere(where, [list], contextPatch(places, after, before.release_id !== after.release_id));
 }
 
-/** Once files are in an edition, its (and its slot's) 缺档 / 待确认 status becomes 已收录. */
+/** Once files are in an edition, its 缺档 / 待确认 status becomes 已收录. */
 async function markFilled(cs: ChangeSet, places: Places, folderIds: string[], ctx: Context) {
   if (!ctx.edition_id || folderIds.length === 0) return;
   const any = await db().prepare('SELECT 1 FROM files WHERE folder_id IN (SELECT value FROM json_each(?)) LIMIT 1').bind(JSON.stringify(folderIds)).first();
   if (!any) return;
-  const edition = places.editions.get(ctx.edition_id);
-  await markCollected(cs, [[ctx.release_id, edition?.slot]]);
   markEditionsCollected(cs, places, [ctx.edition_id]);
-}
-
-async function resync(cs: ChangeSet, places: Places, releaseIds: Iterable<string | null>) {
-  for (const id of new Set(releaseIds)) {
-    if (!id || !places.releases.has(id)) continue;
-    const editions = [...places.editions.values()].filter((e) => e.release_id === id);
-    await syncSlots(cs, id, editions);
-  }
 }
 
 /**
@@ -169,13 +159,11 @@ async function relocate(cs: ChangeSet, places: Places, id: string, parentId: str
   }
   if (f.type === 'edition' && f.edition_id && before.release_id !== after.release_id && after.release_id) {
     const e = places.editions.get(f.edition_id)!;
-    const old = e.release_id;
     const current = await db().prepare('SELECT release_id, based_on, is_default FROM editions WHERE id = ?').bind(e.id).first<Record<string, unknown>>();
-    cs.updateKnown('edition', { id: e.id }, current ?? { release_id: old }, { release_id: after.release_id, based_on: null, is_default: 0 });
+    cs.updateKnown('edition', { id: e.id }, current ?? { release_id: e.release_id }, { release_id: after.release_id, based_on: null, is_default: 0 });
     e.release_id = after.release_id;
     cs.deleteWhere('edition_track', 't.edition_id = ?1', [e.id]);
     cs.updateFilesWhere('edition_id = ?', [e.id], { release_id: after.release_id, track_id: null });
-    await resync(cs, places, [old, after.release_id]);
   }
   if (f.type === 'plain') {
     const free = freeFolders(places, id);
@@ -306,6 +294,7 @@ export async function moveFolders(actor: string, ids: string[], under: string, m
   const list = roots(places, ids).filter((id) => places.folders.get(id)!.parent_id !== parentId);
   if (list.length === 0) return { summary: summary('没有改动'), changed: 0, batchId: null };
   for (const id of list) {
+    if (places.folders.get(id)!.extras) throw new UserError('附件文件夹不能移出所在的版本');
     const problem = placeProblem(places, id, parentId);
     if (problem) throw problem;
   }
@@ -341,6 +330,7 @@ export async function mergeFolder(actor: string, id: string, into: string, t: T)
   const target = places.folderOf(into);
   if (!target) throw new UserError('找不到这个位置');
   if (from.type !== 'plain') throw new UserError('只有普通文件夹可以合并到别的文件夹');
+  if (from.extras) throw new UserError('附件文件夹不能移出所在的版本');
   if (target.id === id || places.subtree(id).includes(target.id)) throw new UserError('不能把文件夹合并到它自己里面');
   for (const c of places.children(id)) {
     const problem = placeProblem(places, c.id, target.id);
@@ -380,6 +370,7 @@ export async function deleteFolders(actor: string, ids: string[], confirmed: boo
   for (const id of list) {
     const f = places.folders.get(id)!;
     const name = places.folderName(f, t);
+    if (f.extras) throw new UserError('附件文件夹不能单独删除，删除版本时会一起删除（可以删除它里面的文件夹）');
     if (f.type === 'plain' && places.hasBelow(id, ['era', 'release', 'edition'])) throw new UserError('「{name}」里有作品，先移走或删除作品', { name });
     if (f.type === 'era' && places.hasBelow(id, ['release'])) throw new UserError('名义「{name}」里还有作品，不能删除', { name });
     if (f.release_id && places.releases.get(f.release_id)?.state === 'published') throw new UserError('作品「{name}」已发布，先改回草稿再删除', { name });
@@ -404,7 +395,6 @@ export async function deleteFolders(actor: string, ids: string[], confirmed: boo
   const cs = new ChangeSet(database, actor, list.length === 1
     ? summary('删除文件夹 {path}', { path: places.path(folderKey(list[0]), t) })
     : summary('删除 {n} 个文件夹', { n: list.length }));
-  const releases = new Set<string>();
   for (const id of list) {
     const f = places.folders.get(id)!;
     const sub = places.subtree(id);
@@ -417,20 +407,15 @@ export async function deleteFolders(actor: string, ids: string[], confirmed: boo
     cs.deleteWhere('folder', 't.id IN (SELECT value FROM json_each(?1))', [JSON.stringify([...sub].reverse())],
       '(SELECT j.key FROM json_each(?1) j WHERE j.value = t.id)');
     if (editions.length) cs.deleteWhere('edition', 't.id IN (SELECT value FROM json_each(?1))', [JSON.stringify(editions)]);
-    for (const e of editions) {
-      const rel = places.editions.get(e)?.release_id;
-      if (rel && rel !== f.release_id) releases.add(rel);
-      places.editions.delete(e);
-    }
+    for (const e of editions) places.editions.delete(e);
     if (f.release_id) await deleteRelease(cs, f.release_id);
     if (f.era_id) await cs.delete('era', { id: f.era_id });
     for (const k of sub) places.removeFolder(k);
   }
-  await resync(cs, places, releases);
   return done(cs, { parent });
 }
 
-/** The rows only a release has (slots, translations), then the release itself. Its files and folders are handled by the caller. */
+/** The rows only a release has (its retired slots, translations), then the release itself. Its files and folders are handled by the caller. */
 async function deleteRelease(cs: ChangeSet, releaseId: string) {
   const database = db();
   const [slots, translations] = await database.batch([
@@ -450,7 +435,8 @@ export interface TypeOptions {
   kind?: string; // release: album / single …
   catalog_no?: string | null;
   title?: string | null;
-  slot?: string; // edition
+  slot?: string; // edition: a type id, or NEW_TYPE with new_type
+  new_type?: string | null;
   name?: string | null; // edition
 }
 
@@ -483,6 +469,7 @@ export async function setFolderType(actor: string, id: string, type: FolderType,
   const database = db();
   const f = mustFolder(places, id);
   if (f.type === type) return { summary: summary('没有改动'), changed: 0, batchId: null, id };
+  if (f.extras) throw new UserError('附件文件夹不能设为其他类型');
   if (f.type !== 'plain' && type !== 'plain') throw new UserError('先改回普通文件夹，再设为其他类型');
   const label = places.folderName(f, t);
   const cs = new ChangeSet(database, actor, summary('文件夹 {name} 设为{type}', { name: label, type: t(type === 'plain' ? '普通文件夹' : type === 'era' ? '名义' : type === 'release' ? '作品' : '版本') }));
@@ -511,8 +498,6 @@ export async function setFolderType(actor: string, id: string, type: FolderType,
     }
     const releaseId = await freeId('releases', slug(catalog ?? title), 'r');
     cs.create('release', { id: releaseId, catalog_no: catalog, era_id: ctx.era_id, kind, title, aliases: '[]', links: '{}', state: 'draft' });
-    const defaults = NEW_RELEASE_SLOTS[kind as ReleaseKind];
-    for (const slot of SLOTS) cs.create('release_slot', { release_id: releaseId, slot, status: defaults[slot], planned_date: null, note: null });
     cs.updateKnown('folder', { id }, row(f), { type: 'release', release_id: releaseId });
     places.addRelease({ id: releaseId, era_id: ctx.era_id, catalog_no: catalog, title, release_date: null, kind, state: 'draft' });
     places.updateFolder(id, { type: 'release', release_id: releaseId });
@@ -520,22 +505,22 @@ export async function setFolderType(actor: string, id: string, type: FolderType,
   } else if (type === 'edition') {
     const parent = f.parent_id ? places.folders.get(f.parent_id) : undefined;
     if (parent?.type !== 'release' || !parent.release_id) throw new UserError('版本只能放在作品的下一层');
-    const slot = opts.slot ?? '';
-    if (!isOneOf(SLOTS, slot)) throw new UserError('请选择版本类型');
+    const slot = opts.slot === NEW_TYPE ? addType(cs, places.types, opts.new_type ?? '') : opts.slot ?? '';
+    if (!places.types.has(slot)) throw new UserError('请选择版本类型');
     const name = (opts.name ?? f.name).trim();
     if (name.length > 100) throw new UserError('内容过长');
     const siblings = [...places.editions.values()].filter((e) => e.release_id === parent.release_id);
     if (siblings.some((e) => e.slot === slot && e.name === name)) throw new UserError('这个作品已经有同类型、同名的版本');
     const editionId = newId('e');
-    const edition = { id: editionId, release_id: parent.release_id, slot: slot as Slot, name, catalog_no: null, release_date: null, status: 'collected' as const, sort: siblings.length, is_default: 0 };
+    const edition = { id: editionId, release_id: parent.release_id, slot, name, catalog_no: null, release_date: null, status: 'collected' as const, sort: siblings.length, is_default: 0 };
     cs.create('edition', { ...edition, external_ids: '{}' });
     cs.updateKnown('folder', { id }, row(f), { type: 'edition', edition_id: editionId });
     places.addEdition(edition);
     places.updateFolder(id, { type: 'edition', edition_id: editionId });
+    ensureExtras(cs, places, id, true);
     const after = places.context(id);
     refile(cs, places, free, before, after);
     await markFilled(cs, places, free, after);
-    await resync(cs, places, [parent.release_id]);
   } else {
     // Back to a plain folder, named as it was shown.
     const sub = places.subtree(id);
@@ -554,6 +539,8 @@ export async function setFolderType(actor: string, id: string, type: FolderType,
     for (const x of typed) {
       cs.updateKnown('folder', { id: x.id }, row(x), { type: 'plain', era_id: null, release_id: null, edition_id: null, name: places.folderName(x, t) });
     }
+    // The editions' attachments folders become ordinary folders.
+    for (const x of sub.map((k) => places.folders.get(k)!).filter((x) => x.extras)) cs.updateKnown('folder', { id: x.id }, row(x), { extras: 0 });
     const editions = typed.map((x) => x.edition_id).filter((e): e is string => !!e);
     if (editions.length) {
       cs.deleteWhere('edition_track', 't.edition_id IN (SELECT value FROM json_each(?1))', [JSON.stringify(editions)]);
@@ -561,11 +548,7 @@ export async function setFolderType(actor: string, id: string, type: FolderType,
     }
     if (f.release_id) await deleteRelease(cs, f.release_id);
     if (f.era_id) await cs.delete('era', { id: f.era_id });
-    if (f.edition_id) {
-      const rel = places.editions.get(f.edition_id)?.release_id;
-      for (const e of editions) places.editions.delete(e);
-      await resync(cs, places, [rel ?? null]);
-    }
+    if (f.edition_id) for (const e of editions) places.editions.delete(e);
   }
   return done(cs, { id });
 }

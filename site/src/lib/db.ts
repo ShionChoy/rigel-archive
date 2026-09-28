@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import type { FileState, ReleaseKind, Rights, Slot, SlotStatus } from './constants';
+import type { FileState, ReleaseKind, Rights } from './constants';
 
 export const db = (): D1Database => env.DB;
 
@@ -43,7 +43,7 @@ export type EditionStatus = 'collected' | 'partial' | 'missing' | 'planned' | 'u
 export interface EditionRow {
   id: string;
   release_id: string;
-  slot: Slot;
+  slot: string; // the edition's type (slot_types.id)
   name: string;
   catalog_no: string | null;
   release_date: string | null;
@@ -68,6 +68,8 @@ export interface EditionTrackRow {
   title: string | null;
   duration_ms: number | null;
   external_ids: string;
+  tags: string; // JSON: the row's tags over the file's own (lib/tagging/model.ts)
+  cover: string | null; // JSON: the row's chosen cover (lib/tags.ts parseCover)
 }
 
 export interface FolderRow {
@@ -82,21 +84,14 @@ export interface FolderRow {
   readme_file_id: string | null;
   color: string | null;
   sort: number;
-}
-
-export interface SlotRow {
-  release_id: string;
-  slot: Slot;
-  status: SlotStatus;
-  planned_date: string | null;
-  note: string | null;
+  extras: number; // an edition's attachments folder (附件)
 }
 
 export interface Suggestion {
   rule: string;
   confidence: number;
   release_id?: string;
-  slot?: Slot;
+  slot?: string; // an edition type
   place?: string; // a place chosen when uploading (a fd: key, or era:/rel:/ed: of the entity's folder); folder then goes below it
   edition?: string; // name of the release's edition of this slot (made when missing)
   edition_catalog?: string;
@@ -129,7 +124,7 @@ export interface FileRow {
   rights: Rights;
   state: FileState;
   release_id: string | null;
-  slot: Slot | null;
+  slot: string | null;
   track_id: string | null;
   role: string | null;
   dup_of: string | null;

@@ -1,112 +1,120 @@
 ---
+// 缺档看板: the editions known to exist but not (fully) collected, and the releases with nothing collected
+// yet. Editions of types switched off on the 版本类型 page are left out unless that type is chosen.
 import Admin from '../../layouts/Admin.astro';
-import { SLOTS, SLOT_LABELS, SLOT_STATUSES, SLOT_STATUS_LABELS, isOneOf, type Slot, type SlotStatus } from '../../lib/constants';
-import { db } from '../../lib/db';
-import { EDITION_STATUS_LABELS } from '../../lib/editions';
+import { isOneOf } from '../../lib/constants';
+import { db, type EditionStatus } from '../../lib/db';
+import { EDITION_STATUSES, EDITION_STATUS_LABELS } from '../../lib/editions';
 import { withParams } from '../../lib/format';
+import { loadTypes } from '../../lib/types';
 
 const url = Astro.url;
 const { t } = Astro.locals;
-const chosen = url.searchParams.getAll('status').filter((s): s is SlotStatus => isOneOf(SLOT_STATUSES, s));
-const statuses: SlotStatus[] = chosen.length ? chosen : ['missing', 'partial'];
-const slotFilter = url.searchParams.get('slot');
-const slot = isOneOf(SLOTS, slotFilter) ? slotFilter : null;
+const WAITING: EditionStatus[] = ['missing', 'partial', 'unknown'];
+const statusParam = url.searchParams.getAll('status');
+const all = statusParam.includes('all');
+const chosen = statusParam.filter((s): s is EditionStatus => isOneOf(EDITION_STATUSES, s));
+const statuses: EditionStatus[] = all ? [...EDITION_STATUSES] : chosen.length ? chosen : WAITING;
+const types = await loadTypes();
+const typeParam = url.searchParams.get('type');
+const type = typeParam && types.has(typeParam) ? typeParam : null;
+const shown = type ? [type] : types.list.filter((x) => x.missing_board).map((x) => x.id);
 
 const database = db();
-const [summary, rows] = await Promise.all([
-  database.prepare('SELECT slot, status, count(*) AS n FROM release_slots GROUP BY slot, status').all<{ slot: Slot; status: SlotStatus; n: number }>(),
+const [counts, rows, empty] = await Promise.all([
+  database.prepare('SELECT slot, status, count(*) AS n FROM editions GROUP BY slot, status').all<{ slot: string; status: EditionStatus; n: number }>(),
   database
     .prepare(
-      `SELECT s.release_id, s.slot, s.status, s.planned_date, s.note, r.catalog_no, r.title, r.release_date
-       FROM release_slots s JOIN releases r ON r.id = s.release_id JOIN eras e ON e.id = r.era_id
-       WHERE s.status IN (${statuses.map(() => '?').join(', ')}) ${slot ? 'AND s.slot = ?' : ''}
-       ORDER BY e.sort, r.release_date DESC NULLS LAST, r.catalog_no`,
+      `SELECT e.id, e.slot, e.name, e.catalog_no, e.release_date, e.status, e.note, r.id AS release_id, r.catalog_no AS release_catalog, r.title,
+              r.release_date AS release_released
+       FROM editions e JOIN releases r ON r.id = e.release_id JOIN eras er ON er.id = r.era_id
+       WHERE e.status IN (SELECT value FROM json_each(?1)) AND e.slot IN (SELECT value FROM json_each(?2))
+       ORDER BY er.sort, r.release_date DESC NULLS LAST, r.catalog_no, e.slot`,
     )
-    .bind(...statuses, ...(slot ? [slot] : []))
-    .all<{ release_id: string; slot: Slot; status: SlotStatus; planned_date: string | null; note: string | null; catalog_no: string | null; title: string; release_date: string | null }>(),
+    .bind(JSON.stringify(statuses), JSON.stringify(shown))
+    .all<{ id: string; slot: string; name: string; catalog_no: string | null; release_date: string | null; status: EditionStatus; note: string | null;
+      release_id: string; release_catalog: string | null; title: string; release_released: string | null }>(),
+  // Releases with nothing collected: no edition that is collected or partly collected.
+  database
+    .prepare(
+      `SELECT r.id, r.catalog_no, r.title, r.release_date, (SELECT count(*) FROM editions e WHERE e.release_id = r.id) AS editions
+       FROM releases r JOIN eras er ON er.id = r.era_id
+       WHERE NOT EXISTS (SELECT 1 FROM editions e WHERE e.release_id = r.id AND e.status IN ('collected', 'partial'))
+       ORDER BY er.sort, r.release_date DESC NULLS LAST, r.catalog_no`,
+    )
+    .all<{ id: string; catalog_no: string | null; title: string; release_date: string | null; editions: number }>(),
 ]);
-
-// Editions known to exist but not (fully) collected: the concrete versions to look for.
-const { results: missingEditions } = await database
-  .prepare(
-    `SELECT e.id, e.slot, e.name, e.catalog_no, e.release_date, e.status, e.note, r.id AS release_id, r.catalog_no AS release_catalog, r.title
-     FROM editions e JOIN releases r ON r.id = e.release_id JOIN eras er ON er.id = r.era_id
-     WHERE e.status IN ('missing', 'partial', 'planned') ORDER BY er.sort, r.release_date DESC NULLS LAST, e.slot`,
-  )
-  .all<{ id: string; slot: Slot; name: string; catalog_no: string | null; release_date: string | null; status: 'missing' | 'partial' | 'planned'; note: string | null; release_id: string; release_catalog: string | null; title: string }>();
-const count = (s: Slot, st: SlotStatus) => summary.results.find((r) => r.slot === s && r.status === st)?.n ?? 0;
-const statusLink = (st: SlotStatus) => {
+const count = (slot: string, status: EditionStatus) => counts.results.find((r) => r.slot === slot && r.status === status)?.n ?? 0;
+const link = (params: Record<string, string | null>) => {
   const next = new URL(url);
-  next.searchParams.delete('status');
-  next.searchParams.append('status', st);
+  for (const [k, v] of Object.entries(params)) {
+    next.searchParams.delete(k);
+    if (v) next.searchParams.append(k, v);
+  }
   return next.pathname + next.search;
 };
+const boardTypes = types.list.filter((x) => x.missing_board || x.id === type);
 ---
 
 <Admin title={t('缺档看板')}>
-  <p class="muted">{t('每个作品固定 7 个版本栏位。这里汇总各栏位的状态；默认列出「缺档」与「部分缺档」，也就是补档待办。点数字可以只看那一格。')}</p>
+  <p class="muted">
+    {t('列出知道存在、还没收齐的版本（缺档、部分缺档、待确认），以及还没有任何已收录版本的作品。要记下一个还没收到的版本，就在作品页新建一个状态为「缺档」的版本。')}
+    <a href="/admin/types">{t('哪些类型出现在这里 ›')}</a>
+  </p>
 
   <table class="grid">
     <thead>
-      <tr><th>{t('状态')}</th>{SLOTS.map((s) => <th class="num">{t(SLOT_LABELS[s])}</th>)}</tr>
+      <tr><th>{t('状态')}</th>{boardTypes.map((x) => <th class="num"><a href={link({ type: x.id })}>{types.label(x.id, t)}</a></th>)}</tr>
     </thead>
     <tbody>
-      {
-        SLOT_STATUSES.map((st) => (
-          <tr>
-            <td><a href={statusLink(st)}><span class={`chip ${st}`}>{t(SLOT_STATUS_LABELS[st])}</span></a></td>
-            {SLOTS.map((s) => (
-              <td class="num">
-                {count(s, st) ? <a href={withParams(new URL(statusLink(st), url), { slot: s })}>{count(s, st)}</a> : <span class="muted">0</span>}
-              </td>
-            ))}
-          </tr>
-        ))
-      }
+      {EDITION_STATUSES.map((st) => (
+        <tr>
+          <td><a href={link({ status: st })}><span class={`chip ${st}`}>{t(EDITION_STATUS_LABELS[st])}</span></a></td>
+          {boardTypes.map((x) => (
+            <td class="num">{count(x.id, st) ? <a href={withParams(new URL(link({ status: st }), url), { type: x.id })}>{count(x.id, st)}</a> : <span class="muted">0</span>}</td>
+          ))}
+        </tr>
+      ))}
     </tbody>
   </table>
 
-  {
-    missingEditions.length > 0 && (
-      <>
-        <h2>{t('缺档的版本：{n} 个', { n: missingEditions.length })}</h2>
-        <table class="grid">
-          <thead><tr><th>{t('作品')}</th><th>{t('版本')}</th><th>{t('状态')}</th><th>{t('说明')}</th></tr></thead>
-          <tbody>
-            {missingEditions.map((e) => (
-              <tr>
-                <td><a href={`/admin/releases/${e.release_id}`}>{e.release_catalog ? `${e.release_catalog} ` : ''}{e.title}</a></td>
-                <td><a href={`/admin/editions/${e.id}`}>{t(SLOT_LABELS[e.slot])}{e.name ? ` · ${e.name}` : ''}</a> <span class="muted">{[e.catalog_no, e.release_date].filter(Boolean).join(' · ')}</span></td>
-                <td><span class={`chip ${e.status}`}>{t(EDITION_STATUS_LABELS[e.status])}</span></td>
-                <td>{e.note ?? ''}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </>
-    )
-  }
-
   <h2>
-    {statuses.map((st) => t(SLOT_STATUS_LABELS[st])).join(t('、'))}{slot && ` · ${t(SLOT_LABELS[slot])}`}{t('：{n} 项', { n: rows.results.length })}
-    {(chosen.length > 0 || slot) && <a href="/admin/missing" style="font-size:13px;font-weight:400">{t('恢复默认')}</a>}
+    {all ? t('全部状态') : statuses.map((st) => t(EDITION_STATUS_LABELS[st])).join(t('、'))}{type && ` · ${types.label(type, t)}`}{t('：{n} 个版本', { n: rows.results.length })}
+    {(statusParam.length > 0 || type) && <a href="/admin/missing" style="font-size:13px;font-weight:400">{t('恢复默认')}</a>}
   </h2>
   <table class="grid">
-    <thead><tr><th>{t('作品')}</th><th>{t('栏位')}</th><th>{t('状态')}</th><th>{t('说明')}</th></tr></thead>
+    <thead><tr><th>{t('作品')}</th><th>{t('版本')}</th><th>{t('状态')}</th><th>{t('说明')}</th></tr></thead>
     <tbody>
-      {
-        rows.results.map((r) => (
-          <tr>
-            <td>
-              <a href={`/admin/releases/${r.release_id}`}>{r.catalog_no ? `${r.catalog_no} ` : ''}{r.title}</a>
-              <div class="muted">{r.release_date ?? ''}</div>
-            </td>
-            <td>{t(SLOT_LABELS[r.slot])}</td>
-            <td><span class={`chip ${r.status}`}>{t(SLOT_STATUS_LABELS[r.status])}</span>{r.planned_date && ` ${r.planned_date}`}</td>
-            <td>{r.note ?? ''}</td>
-          </tr>
-        ))
-      }
+      {rows.results.map((e) => (
+        <tr>
+          <td>
+            <a href={`/admin/releases/${e.release_id}`}>{e.release_catalog ? `${e.release_catalog} ` : ''}{e.title}</a>
+            <div class="muted">{e.release_released ?? ''}</div>
+          </td>
+          <td>
+            <a href={`/admin/editions/${e.id}`}>{types.editionLabel(e, t)}</a>
+            <span class="muted"> {[e.catalog_no, e.release_date].filter(Boolean).join(' · ')}</span>
+          </td>
+          <td><span class={`chip ${e.status}`}>{t(EDITION_STATUS_LABELS[e.status])}</span></td>
+          <td>{e.note ?? ''}</td>
+        </tr>
+      ))}
+      {rows.results.length === 0 && <tr><td colspan="4" class="muted">{t('没有这样的版本')}</td></tr>}
+    </tbody>
+  </table>
+
+  <h2>{t('还没有已收录版本的作品：{n} 个', { n: empty.results.length })}</h2>
+  <table class="grid">
+    <thead><tr><th>{t('作品')}</th><th>{t('发行')}</th><th class="num">{t('版本')}</th></tr></thead>
+    <tbody>
+      {empty.results.map((r) => (
+        <tr>
+          <td><a href={`/admin/releases/${r.id}`}>{r.catalog_no ? `${r.catalog_no} ` : ''}{r.title}</a></td>
+          <td class="mono">{r.release_date ?? '—'}</td>
+          <td class="num">{r.editions}</td>
+        </tr>
+      ))}
+      {empty.results.length === 0 && <tr><td colspan="3" class="muted">{t('每个作品都至少有一个已收录的版本')}</td></tr>}
     </tbody>
   </table>
 </Admin>

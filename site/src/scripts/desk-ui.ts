@@ -195,6 +195,9 @@ export async function typeBox(
     const type = radios.find((r) => r.checked)?.value;
     for (const box of d.querySelectorAll<HTMLElement>('[data-fields]')) box.hidden = box.dataset.fields !== type;
     (d.querySelector('[data-ok]') as HTMLButtonElement).disabled = !type;
+    // 「＋ 新类型…」 asks for the new type's name.
+    const fresh = input('slot').value === '__new__';
+    for (const el of d.querySelectorAll<HTMLElement>('[data-new-type]')) el.hidden = !fresh;
   };
   form.addEventListener('change', sync);
   sync();
@@ -204,7 +207,7 @@ export async function typeBox(
   if (r !== 'ok' || !type) return null;
   const v = (n: string) => input(n).value;
   if (type === 'release') return { type, options: { catalog_no: v('catalog_no'), title: v('title'), kind: v('kind') } };
-  if (type === 'edition') return { type, options: { slot: v('slot'), name: v('name') } };
+  if (type === 'edition') return { type, options: { slot: v('slot'), new_type: v('new_type'), name: v('name') } };
   return { type, options: {} };
 }
 
@@ -475,171 +478,3 @@ export async function renameBox(files: RenameFile[], save: (pairs: [string, stri
 }
 
 // ------------------------------------------------------------------------------------------ tags and covers
-
-type Credits = Partial<Record<'artist' | 'composer' | 'lyricist' | 'arranger', string>>;
-export interface TagView {
-  file: { id: string; name: string; trackId: string | null; taggable: boolean; embedded: Record<string, string>; embeddedCover: boolean };
-  edition: { id: string; label: string; album_title: string; album: string; release_title: string; artist: string; date: string; catalog: string } | null;
-  row: { id: string; disc: number; position: number; title: string; entry_title: string; track_id: string } | null;
-  credits: Credits;
-  entries: { id: string; title: string; inEdition: boolean; rowTitle: string; credits: Credits }[];
-  cover: { from: 'edition' | 'release' | 'file' | 'none'; id: string | null; src: string | null };
-  covers: { id: string; name: string; src: string | null; here: boolean }[];
-  editionCover: string | null;
-  releaseCover: { id: string; src: string | null } | null;
-  ownCover: string | null;
-}
-export interface TagInput {
-  title: string;
-  credits: Credits;
-  album_title: string;
-  entry: string;
-  cover?: string;
-}
-
-const CREDITS = ['artist', 'composer', 'lyricist', 'arranger'] as const;
-const loose = (s: string) => s.normalize('NFKC').toLowerCase().replace(/\s+/g, '');
-
-/**
- * 「标签与封面」 of one audio file: the tags its 整理版 download gets (the edition's track row, the track's
- * credits, the edition's album name and cover). `save` may refuse (returns why); `move` is offered when the
- * file is in no edition yet.
- */
-export async function tagsBox(view: TagView, actions: { save: (input: TagInput) => Promise<string | null>; move: () => void }): Promise<boolean> {
-  const d = document.querySelector<HTMLDialogElement>('#dlg-tags')!;
-  const form = d.querySelector('form')!;
-  const field = (name: string) => form.elements.namedItem(name) as unknown as HTMLInputElement;
-  const q = <E extends Element = HTMLElement>(sel: string) => d.querySelector<E>(sel)!;
-  const err = q('[data-err]');
-  const ok = q<HTMLButtonElement>('[data-ok]');
-  const ed = view.edition;
-  err.textContent = '';
-  q('[data-where]').textContent = ed ? `${view.file.name} · ${ed.label}` : view.file.name;
-  q('[data-nowhere]').hidden = !!ed;
-  q('[data-body]').hidden = !ed;
-  ok.hidden = !ed;
-  const link = q<HTMLAnchorElement>('[data-edition-link]');
-  link.hidden = !ed;
-  if (ed) link.href = `/admin/editions/${ed.id}#tracks`;
-  const onMove = () => {
-    d.close('cancel');
-    actions.move();
-  };
-  q('[data-move]').addEventListener('click', onMove);
-
-  // what the file itself carries
-  const embedded = Object.entries(view.file.embedded);
-  q('[data-embedded-box]').hidden = embedded.length === 0 && !view.ownCover;
-  const dl = q('[data-embedded]');
-  dl.replaceChildren();
-  for (const [k, v] of embedded) {
-    const dt = document.createElement('dt');
-    dt.textContent = k;
-    const dd = document.createElement('dd');
-    dd.textContent = v;
-    dl.appendChild(dt);
-    dl.appendChild(dd);
-  }
-  const own = q<HTMLImageElement>('[data-own-cover]');
-  own.hidden = !view.ownCover;
-  if (view.ownCover) own.src = view.ownCover;
-
-  if (ed) {
-    // the track: the file's own, else one with the same title, else a new one
-    const select = field('entry') as unknown as HTMLSelectElement;
-    select.replaceChildren();
-    const guess = view.file.trackId ?? view.entries.find((e) => view.file.embedded.title && loose(e.title) === loose(view.file.embedded.title))?.id ?? 'new';
-    for (const e of view.entries) select.add(new Option(e.inEdition ? e.title : t('{title}（不在这个版本的曲目表里）', { title: e.title }), e.id, false, e.id === guess));
-    select.add(new Option(t('新曲目条目'), 'new', false, guess === 'new'));
-    const fileTitle = view.file.embedded.title || view.file.name.replace(/\.[^.]+$/, '');
-    const fill = () => {
-      const e = view.entries.find((x) => x.id === select.value);
-      field('title').value = e ? e.rowTitle : '';
-      field('title').placeholder = e ? e.title : fileTitle;
-      for (const c of CREDITS) field(c).value = e?.credits[c] ?? '';
-      const row = e && view.row?.track_id === e.id ? view.row : null;
-      q('[data-track]').textContent = row
-        ? t('第 {disc} 碟 第 {n} 首（顺序在版本页调整）', { disc: row.disc, n: row.position })
-        : t('保存后加到这个版本曲目表的末尾');
-    };
-    select.onchange = fill;
-    fill();
-    field('artist').placeholder = ed.artist;
-    field('album_title').value = ed.album_title;
-    field('album_title').placeholder = ed.release_title;
-
-    // the cover: the default (the release's, else the file's own), or one of the release's pictures
-    const covers = q('[data-covers]');
-    covers.replaceChildren();
-    const choice = (value: string, src: string | null, label: string, checked: boolean) => {
-      const l = document.createElement('label');
-      l.className = 'cover-choice';
-      l.title = label;
-      const r = document.createElement('input');
-      r.type = 'radio';
-      r.name = 'cover';
-      r.value = value;
-      r.checked = checked;
-      const pic = document.createElement('span');
-      pic.className = 'cover-pic';
-      if (src) {
-        const img = document.createElement('img');
-        img.src = src;
-        img.alt = '';
-        img.loading = 'lazy';
-        pic.appendChild(img);
-      } else pic.textContent = value ? '?' : '—';
-      const small = document.createElement('small');
-      small.textContent = label;
-      for (const el of [r, pic, small]) l.appendChild(el);
-      covers.appendChild(l);
-    };
-    const fallback = view.releaseCover
-      ? { src: view.releaseCover.src, label: t('默认：作品的封面') }
-      : view.ownCover ? { src: view.ownCover, label: t('默认：文件自带的封面') } : { src: null, label: t('默认：不嵌入封面') };
-    choice('', fallback.src, fallback.label, !view.editionCover);
-    for (const c of view.covers) choice(c.id, c.src, c.name, c.id === view.editionCover);
-    if (view.editionCover && !view.covers.some((c) => c.id === view.editionCover)) choice(view.editionCover, null, t('（现在的封面）'), true);
-  }
-  const onFill = () => {
-    const e = view.file.embedded;
-    if (!field('title').value && e.title && e.title !== field('title').placeholder) field('title').value = e.title;
-    if (!field('artist').value && e.artist) field('artist').value = e.artist;
-  };
-  q('[data-fill]').addEventListener('click', onFill);
-
-  return new Promise((resolve) => {
-    const onSubmit = async (ev: SubmitEvent) => {
-      if ((ev.submitter as HTMLButtonElement | null)?.value !== 'ok' || !ed) return;
-      ev.preventDefault();
-      const entry = (field('entry') as unknown as HTMLSelectElement).value;
-      const cover = form.querySelector<HTMLInputElement>('input[name="cover"]:checked')?.value ?? '';
-      ok.disabled = true;
-      const problem = await actions.save({
-        title: field('title').value,
-        credits: Object.fromEntries(CREDITS.map((c) => [c, field(c).value])),
-        album_title: field('album_title').value,
-        entry: entry === view.file.trackId ? '' : entry,
-        cover: cover === (view.editionCover ?? '') ? undefined : cover,
-      });
-      ok.disabled = false;
-      if (problem) err.textContent = problem;
-      else d.close('ok');
-    };
-    const onClose = () => {
-      form.removeEventListener('submit', onSubmit);
-      q('[data-move]').removeEventListener('click', onMove);
-      q('[data-fill]').removeEventListener('click', onFill);
-      d.removeEventListener('close', onClose);
-      resolve(d.returnValue === 'ok');
-    };
-    form.addEventListener('submit', onSubmit);
-    d.addEventListener('close', onClose);
-    d.returnValue = '';
-    d.showModal();
-    if (ed) {
-      field('title').focus();
-      d.querySelector('.cover-choice:has(input:checked)')?.scrollIntoView({ block: 'nearest' });
-    }
-  });
-}

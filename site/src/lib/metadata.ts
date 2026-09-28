@@ -1,15 +1,10 @@
-// Looking up metadata outside the archive, Picard-style: MusicBrainz (with the Cover Art Archive) and
-// the circle's Bandcamp pages. Both give an AlbumMeta; the admin compares it with an edition field by
-// field and takes what is right (applyMeta, one revision batch). Requests go out from the Worker.
+// Looking up metadata outside the archive: MusicBrainz (with the Cover Art Archive) and the circle's
+// Bandcamp pages; requests go out from the Worker. lib/lookup.ts turns a release into tags and the edition
+// page compares them with its tracks.
 
-import { blobKey } from './api';
-import { ChangeSet } from './changes';
-import { UPLOAD_ROOT, type Slot } from './constants';
-import { db, type EditionRow, type ReleaseRow, type TrackRow } from './db';
-import { CREDIT_FIELDS, loadEditionTracks, parseCredits, parseIds, trackTitle, type ExternalIds } from './editions';
-import { summary, UserError } from './i18n';
-import { newId } from './ids';
-import { loadTracks, titleKey } from './tracks';
+import type { ReleaseRow } from './db';
+import { UserError } from './i18n';
+import { titleKey } from './tracks';
 
 export interface MetaTrack {
   disc: number;
@@ -50,6 +45,10 @@ export const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 let lastCall = 0;
 
 /** MusicBrainz allows one request a second per client. */
+export async function mbGet<R>(path: string): Promise<R> {
+  return mb<R>(path);
+}
+
 async function mb<R>(path: string): Promise<R> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const wait = lastCall + 1100 - Date.now();
@@ -86,7 +85,6 @@ interface MbRelease {
   'cover-art-archive'?: { front?: boolean };
 }
 
-const credit = (list?: MbArtistCredit[]) => (list?.length ? list.map((c) => c.name + (c.joinphrase ?? '')).join('').trim() : null);
 
 export interface MbCandidate {
   id: string;
@@ -141,27 +139,6 @@ export async function mbCandidates(release: Pick<ReleaseRow, 'catalog_no' | 'tit
     for (const r of browse.releases ?? []) out.set(r.id, candidate(r));
   }
   return [...out.values()].sort((a, b) => (a.releaseGroup?.id ?? '').localeCompare(b.releaseGroup?.id ?? '') || (a.date ?? '9999').localeCompare(b.date ?? '9999'));
-}
-
-export async function mbRelease(id: string): Promise<AlbumMeta> {
-  if (!MBID.test(id)) throw new UserError('MusicBrainz 发行 ID 格式不对');
-  const r = await mb<MbRelease>(`/release/${id}?inc=recordings+artist-credits+labels+release-groups+media`);
-  const c = candidate(r);
-  const tracks: MetaTrack[] = [];
-  for (const m of r.media ?? []) {
-    for (const t of m.tracks ?? []) {
-      tracks.push({
-        disc: m.position, position: t.position, title: t.title, duration_ms: t.length ?? t.recording.length ?? null,
-        artist: credit(t['artist-credit']), recording: t.recording.id, track: t.id,
-      });
-    }
-  }
-  return {
-    source: 'musicbrainz', id: r.id, url: `https://musicbrainz.org/release/${r.id}`, title: r.title, date: r.date ?? null,
-    catalog: c.catalogs[0] ?? null, label: (r['label-info'] ?? []).map((l) => l.label?.name).find(Boolean) ?? null,
-    artist: credit(r['artist-credit']), format: c.format, disambiguation: c.disambiguation, releaseGroup: c.releaseGroup?.id ?? null,
-    tracks, cover: r['cover-art-archive']?.front ? `https://coverartarchive.org/release/${r.id}/front-1200` : null,
-  };
 }
 
 // ------------------------------------------------------------------------------------------ Bandcamp
@@ -236,120 +213,8 @@ export function scoreCandidate(
   return c.durations ? 0.35 * lengths + 0.25 * count + 0.25 * catalog + 0.15 * title : 0.5 * count + 0.35 * catalog + 0.15 * title;
 }
 
-// ------------------------------------------------------------------------------------------ applying
-
-export interface MetaChoice {
-  fields: Set<'album_title' | 'release_date' | 'catalog_no' | 'track_count'>;
-  ids: boolean; // write the source's ids (MusicBrainz release, recordings; the Bandcamp URL)
-  /** Take the candidate's titles for rows the edition has. When false, such rows are only matched up
-   * (ids, lengths) where the titles agree; rows the edition lacks are still added. */
-  titles?: boolean;
-  rows: Set<number>; // indexes into meta.tracks to take (titles, lengths, ids)
-  artists: boolean; // track artists into the tracks' credits where empty
-  cover: boolean;
-}
-
-/** Fetch an image and keep it as a file of the edition (like an upload, checked by the processing program). */
-async function storeCover(cs: ChangeSet, media: R2Bucket, actor: string, release: ReleaseRow, edition: EditionRow, url: string, source: string): Promise<string> {
-  const response = await fetch(url, { headers: { 'user-agent': MB_UA } });
-  if (!response.ok) throw new UserError('封面下载失败（HTTP {status}）', { status: response.status });
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.length > 30 * 1024 * 1024) throw new UserError('封面太大');
-  const type = response.headers.get('content-type') ?? '';
-  const ext = type.includes('png') ? 'png' : type.includes('webp') ? 'webp' : 'jpg';
-  const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map((b) => b.toString(16).padStart(2, '0')).join('');
-  const key = blobKey(sha);
-  if (!(await media.head(key))) await media.put(key, bytes, { httpMetadata: { contentType: type || 'image/jpeg' } });
-  const existing = await db().prepare('SELECT id FROM files WHERE sha256 = ? AND edition_id = ?').bind(sha, edition.id).first<{ id: string }>();
-  if (existing) return existing.id;
-  const id = newId('f');
-  const name = `${(release.catalog_no ?? release.title).replace(/[\\/:*?"<>|]/g, '_')} ${edition.name || edition.slot} cover (${source}).${ext}`;
-  cs.create('file', {
-    id, origin: 'upload', dir: `${UPLOAD_ROOT}/封面`, name, ext, size: bytes.length, mtime: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
-    sha256: sha, blob_key: key, kind: 'image', rights: 'own', state: 'classified', release_id: release.id, edition_id: edition.id,
-    slot: edition.slot, role: 'cover', note: `${source}: ${url}`, uploaded_by: actor,
-  });
-  return id;
-}
-
-/** Take the chosen parts of a candidate into an edition, its track order and the release's tracks. */
-export async function applyMeta(
-  actor: string, media: R2Bucket, release: ReleaseRow, edition: EditionRow, meta: AlbumMeta, choice: MetaChoice,
-): Promise<number> {
-  const source = meta.source === 'musicbrainz' ? 'MusicBrainz' : 'Bandcamp';
-  const cs = new ChangeSet(db(), actor, summary('版本 {edition}：采用 {source} 的元数据', { edition: `${release.catalog_no ?? release.title} ${edition.name}`.trim(), source }));
-  const patch: Record<string, unknown> = {};
-  if (choice.fields.has('album_title')) patch.album_title = meta.title && meta.title !== release.title ? meta.title : null;
-  if (choice.fields.has('release_date') && meta.date) patch.release_date = meta.date;
-  if (choice.fields.has('catalog_no') && meta.catalog) patch.catalog_no = meta.catalog;
-  if (choice.fields.has('track_count') && meta.tracks.length) patch.track_count = meta.tracks.length;
-  if (choice.ids) {
-    const ids: ExternalIds = { ...parseIds(edition.external_ids) };
-    if (meta.source === 'musicbrainz') {
-      ids.musicbrainz_release = meta.id;
-      if (meta.releaseGroup) ids.musicbrainz_release_group = meta.releaseGroup;
-    } else ids.bandcamp = meta.id;
-    patch.external_ids = JSON.stringify(ids);
-  }
-
-  const [rows, entries] = await Promise.all([loadEditionTracks(edition.id), loadTracks(release.id)]);
-  const entryOf = new Map(entries.map((t) => [t.id, t]));
-  const byRecording = new Map(entries.map((t) => [parseIds(t.external_ids).musicbrainz_recording, t]).filter(([k]) => k) as [string, TrackRow][]);
-  const byTitle = new Map(entries.map((t) => [titleKey(t.title), t]));
-  const albumArtist = release.artist ?? meta.artist;
-  let nextPosition = entries.reduce((m, t) => Math.max(m, t.position), 0);
-  const trackIdsUpdates = new Map<string, Record<string, unknown>>();
-
-  for (const [i, m] of meta.tracks.entries()) {
-    if (!choice.rows.has(i)) continue;
-    const trackIds = choice.ids && m.recording ? { musicbrainz_track: m.track, musicbrainz_recording: m.recording } : {};
-    let row = rows.find((r) => r.disc === m.disc && r.position === m.position);
-    let entry: TrackRow | undefined = row ? entryOf.get(row.track_id) : (m.recording ? byRecording.get(m.recording) : undefined) ?? byTitle.get(titleKey(m.title));
-    if (!row) {
-      if (!entry) {
-        const id = newId('t');
-        const songId = newId('s');
-        nextPosition += 1;
-        cs.create('song', { id: songId, title: m.title, note: null });
-        entry = { id, release_id: release.id, disc: 1, position: nextPosition, title: m.title, song_id: songId, version_label: null, duration_ms: m.duration_ms, credits: null, note: null, external_ids: '{}' };
-        cs.create('track', { ...entry });
-        entryOf.set(id, entry);
-        byTitle.set(titleKey(m.title), entry);
-      }
-      cs.create('edition_track', {
-        id: newId('et'), edition_id: edition.id, disc: m.disc, position: m.position, track_id: entry.id,
-        title: m.title === entry.title ? null : m.title, duration_ms: m.duration_ms, external_ids: JSON.stringify(trackIds),
-      });
-    } else {
-      const current = trackTitle(row);
-      const agree = titleKey(current) === titleKey(m.title) || titleKey(row.entry_title) === titleKey(m.title);
-      if (choice.titles === false && !agree) continue;
-      const next: Record<string, unknown> = { duration_ms: m.duration_ms ?? row.duration_ms };
-      if (choice.titles !== false && m.title !== current) next.title = m.title === row.entry_title ? null : m.title;
-      if (choice.ids && m.recording) next.external_ids = JSON.stringify({ ...parseIds(row.external_ids), ...trackIds });
-      cs.updateKnown('edition_track', { id: row.id }, row as unknown as Record<string, unknown>, next);
-    }
-    if (!entry) continue;
-    const update: Record<string, unknown> = {};
-    const ids = parseIds(entry.external_ids);
-    if (choice.ids && m.recording && !ids.musicbrainz_recording) update.external_ids = JSON.stringify({ ...ids, musicbrainz_recording: m.recording });
-    const credits = parseCredits(entry.credits);
-    if (choice.artists && m.artist && m.artist !== albumArtist && !credits.artist) {
-      update.credits = JSON.stringify(Object.fromEntries(CREDIT_FIELDS.filter((f) => f === 'artist' || credits[f]).map((f) => [f, f === 'artist' ? m.artist : credits[f]])));
-    }
-    if (Object.keys(update).length) trackIdsUpdates.set(entry.id, { ...(trackIdsUpdates.get(entry.id) ?? {}), ...update });
-  }
-  for (const [id, update] of trackIdsUpdates) {
-    const entry = entryOf.get(id)!;
-    if (entries.includes(entry)) cs.updateKnown('track', { id }, entry as unknown as Record<string, unknown>, update);
-  }
-  if (choice.cover && meta.cover) patch.cover_file_id = await storeCover(cs, media, actor, release, edition, meta.cover, source);
-  cs.updateKnown('edition', { id: edition.id }, edition as unknown as Record<string, unknown>, patch);
-  return cs.commit();
-}
-
 /** A new edition's slot and name for a MusicBrainz release: CDs are rips, the rest digital. */
-export function editionFor(c: MbCandidate, all: MbCandidate[]): { slot: Slot; name: string } {
+export function editionFor(c: MbCandidate, all: MbCandidate[]): { slot: string; name: string } {
   const cd = (c.format ?? '').includes('CD');
   if (cd) {
     const cds = all.filter((x) => (x.format ?? '').includes('CD') && x.releaseGroup?.id === c.releaseGroup?.id);

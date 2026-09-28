@@ -12,7 +12,7 @@ import Inspector from '../../components/desk/Inspector.astro';
 import PlacePicker from '../../components/PlacePicker.astro';
 import {
   ARCHIVE_STATUS_LABELS, FILE_KIND_LABELS, FILE_STATES, FILE_STATE_LABELS, RELEASE_KINDS, RELEASE_KIND_LABELS, RIGHTS, RIGHTS_LABELS,
-  ROLE_LABELS, SLOTS, SLOT_LABELS,
+  ROLE_LABELS,
 } from '../../lib/constants';
 import { db, parseFormat, parseSuggestion, type FileRow, type Suggestion } from '../../lib/db';
 import { formatBytes, formatSpec, percent, withParams } from '../../lib/format';
@@ -28,6 +28,8 @@ import { ORIGINS, PRESETS, RULE_FIELDS, RULE_OPS, SUGGEST_KINDS, loadSmartFolder
 import { EDITION_PROBLEMS, editionProblems, type EditionProblem } from '../../lib/checks';
 import { folderView, trashBatches } from '../../lib/desk';
 import { derivedFor } from '../../lib/processing';
+import { audioThumbs } from '../../lib/covers';
+import { readNow } from '../../lib/embedded';
 import { imageSrc } from '../../lib/media';
 import { graceDays } from '../../lib/storage';
 
@@ -52,7 +54,9 @@ function resultMessage(r: ActionResult, deleting: boolean, tr: T): string {
   const skipped = r.skipped ? tr('，{n} 个没有可用建议或在整体收藏的包里，已跳过', { n: r.skipped }) : '';
   const low = r.lowConfidence ? tr('，{n} 个把握度低于 50% 已跳过（请逐个确认或手动移动）', { n: r.lowConfidence }) : '';
   const refused = r.refused?.length ? tr('；{names} 的包内已有文件归档，没有收起（先把它们退回待整理）', { names: r.refused.join('、') }) : '';
-  return `${head}${skipped}${low}${refused}${r.kept ? keptMessage(r.kept, tr) : ''}`;
+  const noType = r.noType ? tr('，{n} 个的建议用到的版本类型已被删除，已跳过（请手动移动）', { n: r.noType }) : '';
+  const created = r.created?.length ? tr('；按建议新建了 {n} 个版本：{names}（可以在作品页改名或删除）', { n: r.created.length, names: r.created.join('、') }) : '';
+  return `${head}${skipped}${low}${noType}${refused}${created}${r.kept ? keptMessage(r.kept, tr) : ''}`;
 }
 
 // ---------------------------------------------------------------- actions on files (JSON from the page's script, or a plain form)
@@ -129,10 +133,19 @@ const rows = rowsResult.results;
 const total = totals?.n ?? 0;
 const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-// Thumbnails for pictures and videos in the list (the processing program's WebP previews and posters).
+// Thumbnails for pictures and videos in the list (the processing program's WebP previews and posters), and
+// for audio the cover it carries.
 const media = rows.filter((r) => r.kind === 'image' || r.kind === 'video');
-const derived = media.length ? await derivedFor(database, media.map((r) => r.sha256)) : new Map();
+const audio = rows.filter((r) => r.kind === 'audio');
+const [derived, covers] = await Promise.all([
+  media.length ? derivedFor(database, media.map((r) => r.sha256)) : Promise.resolve(new Map()),
+  audio.length ? audioThumbs(audio.map((r) => r.sha256)) : Promise.resolve(new Map<string, string>()),
+]);
+// Audio whose pictures were not read yet is read after the page has gone out (covers show next time).
+const unreadAudio = audio.filter((r) => r.sha256 && !covers.has(r.sha256) && parseFormat(r.format).cover).map((r) => r.sha256);
+if (unreadAudio.length) Astro.locals.cfContext?.waitUntil(readNow(database, env.MEDIA, unreadAudio, 25_000).catch(() => 0));
 const thumbOf = (r: Row): string | null => {
+  if (r.kind === 'audio') return (r.sha256 && covers.get(r.sha256)) || null;
   const d = r.sha256 ? derived.get(r.sha256) : undefined;
   if (r.kind === 'image') return imageSrc(r.blob_key ? `/admin/media/${r.blob_key}` : null, d, 240);
   if (r.kind === 'video') {
@@ -237,7 +250,7 @@ const deskData = {
   layout,
   folders: places.options(t).map((o) => {
     const f = places.folders.get(o.id)!;
-    return { id: o.id, parent: o.parent, kind: o.kind, name: o.name, path: o.path, release: f.release_id ?? undefined, edition: f.edition_id ?? undefined };
+    return { id: o.id, parent: o.parent, kind: o.kind, name: o.name, path: o.path, release: f.release_id ?? undefined, edition: f.edition_id ?? undefined, extras: o.extras || undefined };
   }),
   quick,
   smart: smartFolders.map((s) => ({ id: s.id, name: s.name, rules: s.rules })),
@@ -250,7 +263,7 @@ const deskData = {
   origins: Object.entries(ORIGINS).map(([id, label]) => ({ id, label: t(label) })),
   suggestKinds: Object.entries(SUGGEST_KINDS).map(([id, label]) => ({ id, label: t(label) })),
   guess: Object.fromEntries([...places.folders.values()].filter((f) => f.type === 'plain').map((f) => [f.id, guessRelease(f.name)])),
-  slots: SLOTS.map((id) => ({ id, label: t(SLOT_LABELS[id]) })),
+  slots: places.types.options(t),
   releaseKinds: RELEASE_KINDS.map((id) => ({ id, label: t(RELEASE_KIND_LABELS[id]) })),
 };
 const statusText: Record<string, string> = { missing: '缺档', partial: '部分缺档', planned: '预定', unknown: '待确认' };
@@ -280,7 +293,7 @@ const done = overall.total - overall.left;
           {quickFolders.map((f) => (
             <li>
               <div class:list={['frow', 'quick-row', { current: q.loc === folderKey(f!.id) }]} data-folder={f!.id} data-kind={f!.type} data-drop="folder" data-quick draggable="true">
-                <FolderIcon kind={f!.type} color={f!.color} />
+                <FolderIcon kind={f!.extras ? 'extras' : f!.type} color={f!.color} />
                 <a class="fname" href={folderHref(folderKey(f!.id))} data-nav title={places.path(folderKey(f!.id), t)}>{places.folderName(f!, t)}</a>
                 <span class="n">{byKey.get(folderKey(f!.id))?.n || ''}</span>
               </div>
@@ -408,7 +421,7 @@ const done = overall.total - overall.left;
               const node = byKey.get(folderKey(f.id));
               return (
                 <div class:list={['tile', 'item-folder']} role="listitem" tabindex="-1" data-folder={f.id} data-kind={f.type} data-drop="folder" draggable="true">
-                  <FolderIcon kind={f.type} color={f.color} size={28} />
+                  <FolderIcon kind={f.extras ? 'extras' : f.type} color={f.color} size={28} />
                   <a class="tname" href={folderHref(folderKey(f.id))} data-nav tabindex="-1">{places.folderName(f, t)}</a>
                   <span class="muted small">
                     {t('{n} 个', { n: node?.n ?? 0 })}
@@ -587,7 +600,7 @@ const done = overall.total - overall.left;
   <div id="desk-menu" class="ctx-menu" role="menu" hidden></div>
   <div id="desk-drag" class="drag-label" hidden></div>
   <PlacePicker places={places} />
-  <Dialogs />
+  <Dialogs types={places.types} />
   <script type="application/json" id="desk-data" set:html={JSON.stringify(deskData).replace(/</g, '\\u003c')} />
 </Admin>
 

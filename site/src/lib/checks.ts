@@ -1,10 +1,10 @@
 // 检查清单: common organizing mistakes found by queries, each with a link to where it is fixed.
 
-import { SLOT_LABELS } from './constants';
 import { db, parseFormat } from './db';
 import { N_, type T } from './i18n';
 import { titleKey } from './tracks';
 import { VISIBLE } from './locations';
+import { loadTypes, type TypeList } from './types';
 
 export interface CheckItem {
   label: string;
@@ -27,10 +27,18 @@ function cap(items: CheckItem[]): { items: CheckItem[]; more: number } {
 }
 
 type EditionInfo = { id: string; slot: string; name: string; release_id: string; catalog_no: string | null; title: string };
-const editionLabel = (e: EditionInfo, t: T) => `${e.catalog_no ?? e.title} · ${t(SLOT_LABELS[e.slot as keyof typeof SLOT_LABELS])}${e.name ? ` · ${e.name}` : ''}`;
+const editionLabel = (e: EditionInfo, t: T, types: TypeList) => `${e.catalog_no ?? e.title} · ${types.editionLabel(e, t)}`;
+
+/** SQL (on `editions` e): has audio, but no cover: none of its audio carries a picture and none was chosen. */
+const NO_COVER = `e.cover_file_id IS NULL
+  AND EXISTS (SELECT 1 FROM files f WHERE f.edition_id = e.id AND f.kind = 'audio' AND f.sealed_in IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM files f LEFT JOIN embedded m ON m.sha256 = f.sha256
+                  WHERE f.edition_id = e.id AND f.kind = 'audio' AND f.sealed_in IS NULL
+                    AND (m.cover IS NOT NULL OR (m.sha256 IS NULL AND json_extract(f.format, '$.cover') = 1)))`;
 
 export async function runChecks(t: T): Promise<Check[]> {
   const database = db();
+  const types = await loadTypes(database);
   const [counts, noLog, dirs, unlinked, noCover, sure, tagRows, emptyFolders] = await database.batch([
     // Editions whose track order has another number of tracks than published.
     database.prepare(
@@ -59,12 +67,8 @@ export async function runChecks(t: T): Promise<Check[]> {
          AND NOT EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id)
        ORDER BY f.edition_id, f.name`,
     ),
-    // Editions with audio but no cover (neither their own nor the release's).
-    database.prepare(
-      `SELECT e.id, e.slot, e.name, e.release_id, r.catalog_no, r.title FROM editions e JOIN releases r ON r.id = e.release_id
-       WHERE e.cover_file_id IS NULL AND r.cover_file_id IS NULL
-         AND EXISTS (SELECT 1 FROM files f WHERE f.edition_id = e.id AND f.kind = 'audio' AND f.sealed_in IS NULL)`,
-    ),
+    // Editions with audio but no cover (no track carries one, none chosen).
+    database.prepare(`SELECT e.id, e.slot, e.name, e.release_id, r.catalog_no, r.title FROM editions e JOIN releases r ON r.id = e.release_id WHERE ${NO_COVER}`),
     // Unplaced files whose suggestion is sure (80% or more).
     database.prepare(
       `SELECT dir, count(*) AS n FROM files
@@ -86,7 +90,7 @@ export async function runChecks(t: T): Promise<Check[]> {
   ]);
 
   const checks: Check[] = [];
-  const edItem = (e: EditionInfo, detail?: string): CheckItem => ({ label: editionLabel(e, t), href: `/admin/editions/${e.id}`, detail });
+  const edItem = (e: EditionInfo, detail?: string): CheckItem => ({ label: editionLabel(e, t, types), href: `/admin/editions/${e.id}`, detail });
 
   checks.push({
     id: 'count', title: N_('版本曲数与声明不符'), hint: N_('核对曲目顺序：可能缺了文件、多了隐藏曲，或声明的曲数有误。'),
@@ -113,7 +117,7 @@ export async function runChecks(t: T): Promise<Check[]> {
     ...cap((unlinked.results as { id: string; name: string; edition_id: string }[]).map((f) => ({ label: f.name, href: `/admin/editions/${f.edition_id}#files` }))),
   });
   checks.push({
-    id: 'cover', title: N_('版本没有封面'), hint: N_('在版本页选一张图片，或用「查找元数据」从 MusicBrainz、Bandcamp 取回。'),
+    id: 'cover', title: N_('版本没有封面'), hint: N_('曲目都没有自带封面，也没有手动指定：在版本页选一张图片，或用「查找元数据」从 MusicBrainz、Bandcamp 取回。'),
     ...cap((noCover.results as EditionInfo[]).map((e) => edItem(e))),
   });
   checks.push({
@@ -206,11 +210,7 @@ export async function editionProblems(): Promise<Map<string, EditionProblem[]>> 
          AND EXISTS (SELECT 1 FROM files f WHERE f.edition_id = e.id AND f.kind = 'audio' AND f.sealed_in IS NULL)
          AND NOT EXISTS (SELECT 1 FROM files f WHERE f.edition_id = e.id AND lower(f.ext) = 'log')`,
     ),
-    database.prepare(
-      `SELECT e.id FROM editions e JOIN releases r ON r.id = e.release_id
-       WHERE e.cover_file_id IS NULL AND r.cover_file_id IS NULL
-         AND EXISTS (SELECT 1 FROM files f WHERE f.edition_id = e.id AND f.kind = 'audio' AND f.sealed_in IS NULL)`,
-    ),
+    database.prepare(`SELECT e.id FROM editions e WHERE ${NO_COVER}`),
   ]);
   const out = new Map<string, EditionProblem[]>();
   const add = (rows: unknown[], p: EditionProblem) => {

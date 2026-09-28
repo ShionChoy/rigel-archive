@@ -137,6 +137,21 @@ def test_images_get_webp_sizes_but_are_never_enlarged(tmp_path):
     assert out == {"img240": {"width": 100, "height": 60}}
 
 
+def test_large_pictures_also_get_a_jpeg_to_embed(tmp_path, monkeypatch):
+    """A picture of 12 MB or more (a booklet scan) is too large to embed into a download as the cover:
+    it also gets a 1600 px JPEG («embed»); smaller ones do not."""
+    from PIL import Image
+
+    scan = tmp_path / "scan.png"
+    Image.new("RGB", (3000, 2000), (20, 90, 200)).save(scan)
+    monkeypatch.setattr(derive, "EMBED_MIN_BYTES", scan.stat().st_size)
+    out = {o.kind: o for o in derive.derive(scan, {"sha256": "d" * 64, "kind": "image"}, tmp_path / "e")}
+    assert out["embed"].key == f"derived/img/{'d' * 64}/embed.jpg" and out["embed"].info == {"width": 1600, "height": 1067}
+    assert Image.open(out["embed"].path).format == "JPEG"
+    monkeypatch.setattr(derive, "EMBED_MIN_BYTES", scan.stat().st_size + 1)
+    assert "embed" not in {o.kind for o in derive.derive(scan, {"sha256": "d" * 64, "kind": "image"}, tmp_path / "f")}
+
+
 @needs_ffmpeg
 def test_browser_friendly_video_is_remuxed_and_others_transcoded(tmp_path):
     h264 = tmp_path / "a.mkv"
