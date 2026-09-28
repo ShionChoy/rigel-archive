@@ -1,6 +1,6 @@
 ---
-import { RELEASE_KINDS, RELEASE_KIND_LABELS } from '../lib/constants';
 import type { ReleaseRow } from '../lib/db';
+import { NEW_FORM, loadForms } from '../lib/forms';
 import { aliasesToText, linksToText, loadEras } from '../lib/releases';
 
 interface Props {
@@ -8,7 +8,8 @@ interface Props {
 }
 const r = Astro.props.release ?? {};
 const { t } = Astro.locals;
-const eras = await loadEras();
+const [eras, forms] = await Promise.all([loadEras(), loadForms()]);
+const current = r.form ?? (r.id ? '' : 'album');
 ---
 
 <div class="form-grid">
@@ -24,10 +25,16 @@ const eras = await loadEras();
   </select>
   <label for="artist">{t('艺术家（整理版标签）')}</label>
   <input id="artist" type="text" name="artist" value={r.artist ?? ''} placeholder={t('留空则用名义名称，如 Rigël Theatre')} />
-  <label for="kind">{t('形式')}</label>
-  <select id="kind" name="kind">
-    {RELEASE_KINDS.map((k) => <option value={k} selected={(r.kind ?? 'album') === k}>{t(RELEASE_KIND_LABELS[k])}</option>)}
-  </select>
+  <label for="form">{t('形式')}</label>
+  <span class="form-choice">
+    <select id="form" name="form" data-form-select required>
+      {!forms.has(current) && <option value="" selected>{t('（请选择）')}</option>}
+      {forms.options(t).map((o) => <option value={o.id} selected={o.id === current}>{o.label}</option>)}
+      <option value={NEW_FORM}>{t('＋ 新形式…')}</option>
+    </select>
+    <input type="text" name="new_form" maxlength="40" data-new-form hidden placeholder={t('新形式的名称，如「EP」「会场限定」')} />
+    <a class="small" href="/admin/types#forms">{t('管理形式')}</a>
+  </span>
   <label for="series">{t('系列')}</label>
   <input id="series" type="text" name="series" value={r.series ?? ''} placeholder="SOLROS/Lengsel、LYRA …" />
   <label for="release_date">{t('发行日期')}</label>
@@ -52,3 +59,18 @@ const eras = await loadEras();
     <option value="published" selected={r.state === 'published'}>{t('已发布')}</option>
   </select>
 </div>
+
+<script>
+  // 「＋ 新形式…」 asks for the new form's name.
+  for (const el of Array.from(document.querySelectorAll('[data-form-select]'))) {
+    const select = el as unknown as HTMLSelectElement;
+    const name = select.parentElement?.querySelector('[data-new-form]') as HTMLInputElement | null;
+    const sync = () => {
+      if (!name) return;
+      name.hidden = select.value !== '__new__';
+      name.required = !name.hidden;
+    };
+    select.addEventListener('change', sync);
+    sync();
+  }
+</script>

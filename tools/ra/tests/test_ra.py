@@ -224,6 +224,7 @@ def test_seed_skips_releases_deleted_in_the_admin_and_gives_new_ones_folders(tmp
         db.execute(statement)
     ids = {r[0] for r in db.execute("SELECT id FROM releases")}
     assert gone not in ids and len(ids) == len(releases) - 1
+    assert db.execute("SELECT count(*) FROM releases WHERE form IS NULL OR form != kind").fetchone()[0] == 0
     assert db.execute("SELECT count(*) FROM release_slots").fetchone()[0] == 0
     assert db.execute(
         "SELECT count(*) FROM folders f WHERE f.type = 'edition' AND NOT EXISTS (SELECT 1 FROM folders x WHERE x.parent_id = f.id AND x.extras = 1)"

@@ -1,6 +1,6 @@
 import { ChangeSet } from './changes';
-import { RELEASE_KINDS, isOneOf } from './constants';
 import { db, type ReleaseRow } from './db';
+import { chosenForm, kindOf, loadForms } from './forms';
 import { N_, summary, UserError } from './i18n';
 import { newId } from './ids';
 
@@ -46,11 +46,14 @@ export function aliasesToText(json: string): string {
   return (JSON.parse(json || '[]') as string[]).join('\n');
 }
 
-export function releaseInfoPatch(form: FormData): Record<string, unknown> {
+/**
+ * The release fields of the form. Its 形式 may be 「＋ 新形式…」: the new form is made in `cs`, before the
+ * release that uses it.
+ */
+export async function releaseInfoPatch(form: FormData, cs: ChangeSet): Promise<Record<string, unknown>> {
   const title = text(form, 'title');
   if (!title) throw new UserError('标题不能为空');
-  const kind = text(form, 'kind');
-  if (!isOneOf(RELEASE_KINDS, kind)) throw new UserError('未知的作品形式');
+  const releaseForm = chosenForm(cs, await loadForms(), text(form, 'form'), text(form, 'new_form'));
   const era = text(form, 'era_id');
   if (!era) throw new UserError('未知的名义');
   const trackCount = text(form, 'track_count');
@@ -62,7 +65,8 @@ export function releaseInfoPatch(form: FormData): Record<string, unknown> {
     title,
     title_reading: text(form, 'title_reading'),
     series: text(form, 'series'),
-    kind,
+    form: releaseForm,
+    kind: kindOf(releaseForm),
     era_id: era,
     release_date: date(form, 'release_date', N_('发行日期格式应为 YYYY、YYYY-MM 或 YYYY-MM-DD')),
     event: text(form, 'event'),
@@ -108,13 +112,13 @@ async function placeReleaseFolder(cs: ChangeSet, releaseId: string, eraId: strin
 }
 
 export async function saveInfo(actor: string, release: ReleaseRow, form: FormData): Promise<number> {
-  const patch = releaseInfoPatch(form);
+  const cs = new ChangeSet(db(), actor, summary('作品 {release}：修改基本信息', { release: release.catalog_no ?? release.title }));
+  const patch = await releaseInfoPatch(form, cs);
   await checkEra(patch.era_id);
   if (patch.catalog_no && patch.catalog_no !== release.catalog_no) {
     const clash = await db().prepare('SELECT id FROM releases WHERE catalog_no = ? AND id != ?').bind(patch.catalog_no, release.id).first();
     if (clash) throw new UserError('编号 {no} 已被其他作品使用', { no: String(patch.catalog_no) });
   }
-  const cs = new ChangeSet(db(), actor, summary('作品 {release}：修改基本信息', { release: release.catalog_no ?? release.title }));
   await cs.update('release', { id: release.id }, patch);
   if (patch.era_id !== release.era_id) await placeReleaseFolder(cs, release.id, String(patch.era_id));
   return cs.commit();
@@ -146,14 +150,15 @@ export async function saveTranslations(actor: string, release: ReleaseRow, form:
 export async function createRelease(actor: string, form: FormData): Promise<string> {
   const id = text(form, 'id');
   if (!id || !SLUG.test(id)) throw new UserError('ID 只能用小写字母、数字和连字符，例如 rtcd-014');
-  const patch = releaseInfoPatch(form);
-  await checkEra(patch.era_id);
   const database = db();
+  const cs = new ChangeSet(database, actor, '');
+  const patch = await releaseInfoPatch(form, cs);
+  await checkEra(patch.era_id);
   if (await database.prepare('SELECT 1 FROM releases WHERE id = ?').bind(id).first()) throw new UserError('ID {id} 已存在', { id });
   if (patch.catalog_no && (await database.prepare('SELECT 1 FROM releases WHERE catalog_no = ?').bind(patch.catalog_no).first())) {
     throw new UserError('编号 {no} 已存在', { no: String(patch.catalog_no) });
   }
-  const cs = new ChangeSet(database, actor, summary('新建作品 {release}', { release: String(patch.catalog_no ?? patch.title) }));
+  cs.setSummary(summary('新建作品 {release}', { release: String(patch.catalog_no ?? patch.title) }));
   cs.create('release', { id, ...patch });
   await placeReleaseFolder(cs, id, String(patch.era_id));
   await cs.commit();

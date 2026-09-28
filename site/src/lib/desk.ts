@@ -3,6 +3,7 @@
 
 import { editionCovers } from './covers';
 import { db, parseFormat, parseSuggestion, type FileRow, type Suggestion } from './db';
+import { formName } from './forms';
 import type { T } from './i18n';
 import { folderKey, type FolderInfo, type Places } from './locations';
 
@@ -18,7 +19,7 @@ export interface FolderView {
   key: string;
   name: string;
   stats: FolderStats;
-  release?: { id: string; catalog_no: string | null; title: string; kind: string; release_date: string | null; state: string; tracks: number };
+  release?: { id: string; catalog_no: string | null; title: string; form: string; release_date: string | null; state: string; tracks: number }; // form: its name
   edition?: {
     id: string; slot: string; type: string; name: string; status: string; catalog_no: string | null; release_date: string | null; tracks: number;
     covers: { src: string; name: string; chosen: boolean; tracks: number | null }[]; // chosen by hand, or what its tracks carry
@@ -26,6 +27,14 @@ export interface FolderView {
   texts: { id: string; name: string }[]; // text files directly in it (for 说明文件)
   readme: { id: string; name: string; blob_key: string | null } | null;
   pinned: boolean;
+}
+
+function releaseView(
+  r: (Omit<NonNullable<FolderView['release']>, 'form'> & { form: string | null; name_zh: string | null; name_ja: string | null }) | undefined, t: T,
+): FolderView['release'] {
+  if (!r) return undefined;
+  const { name_zh, name_ja, ...rest } = r;
+  return { ...rest, form: name_zh ? formName({ name_zh, name_ja: name_ja ?? '' }, t) : r.form || t('未设置') };
 }
 
 export async function folderView(places: Places, id: string, t: T, pinned: boolean): Promise<FolderView | null> {
@@ -42,7 +51,10 @@ export async function folderView(places: Places, id: string, t: T, pinned: boole
       .bind(id, JSON.stringify(sub)),
     database.prepare("SELECT id, name FROM files WHERE folder_id = ? AND kind = 'text' AND sealed_in IS NULL ORDER BY name LIMIT 200").bind(id),
     database
-      .prepare('SELECT id, catalog_no, title, kind, release_date, state, (SELECT count(*) FROM tracks WHERE release_id = r.id) AS tracks FROM releases r WHERE id = ?')
+      .prepare(
+        `SELECT r.id, r.catalog_no, r.title, r.form, f.name_zh, f.name_ja, r.release_date, r.state, (SELECT count(*) FROM tracks WHERE release_id = r.id) AS tracks
+         FROM releases r LEFT JOIN release_forms f ON f.id = r.form WHERE r.id = ?`,
+      )
       .bind(folder.release_id ?? ''),
     database
       .prepare(
@@ -67,7 +79,7 @@ export async function folderView(places: Places, id: string, t: T, pinned: boole
     key: folderKey(id),
     name: places.folderName(folder, t),
     stats: { own: s.own ?? 0, total: s.total, bytes: s.bytes, folders: sub.length - 1 },
-    release: release.results[0] as FolderView['release'],
+    release: releaseView(release.results[0] as (Omit<NonNullable<FolderView['release']>, 'form'> & { form: string | null; name_zh: string | null; name_ja: string | null }) | undefined, t),
     edition: editionView,
     texts: texts.results as { id: string; name: string }[],
     readme: (readme.results[0] as FolderView['readme']) ?? null,

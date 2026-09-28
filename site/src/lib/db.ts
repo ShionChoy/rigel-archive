@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import type { FileState, ReleaseKind, Rights } from './constants';
+import type { FileState, Rights } from './constants';
 
 export const db = (): D1Database => env.DB;
 
@@ -7,7 +7,8 @@ export interface ReleaseRow {
   id: string;
   catalog_no: string | null;
   era_id: string;
-  kind: ReleaseKind;
+  kind: string; // the nearest of the six original forms (CHECK-bound); the form itself is `form`
+  form: string | null; // a release_forms id (lib/forms.ts)
   series: string | null;
   title: string;
   title_reading: string | null;

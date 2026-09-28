@@ -2,14 +2,15 @@
 // The 整理台's dialogs, opened by scripts/desk.ts: set a folder's type, same-name conflicts, confirmations,
 // several folders at once, a smart folder's conditions, renaming several files, the keyboard shortcuts, a
 // large preview and the first-visit guide. (A file's tags open in scripts/tag-dialog.ts.)
-import { RELEASE_KINDS, RELEASE_KIND_LABELS } from '../../lib/constants';
+import type { FormList } from '../../lib/forms';
 import { N_ } from '../../lib/i18n';
 import type { TypeList } from '../../lib/types';
 
 interface Props {
   types: TypeList;
+  forms?: FormList; // for 「设为作品」 (pages without that dialog leave it out)
 }
-const { types } = Astro.props;
+const { types, forms } = Astro.props;
 const { t } = Astro.locals;
 const keys: [string, string][] = [
   ['↑ ↓ / J K', N_('上一个 / 下一个（Shift 连选）')],
@@ -74,7 +75,11 @@ const keys: [string, string][] = [
       <label>{t('编号')}</label><input type="text" name="catalog_no" maxlength="40" placeholder="RTCD-004" />
       <label>{t('标题')}</label><input type="text" name="title" maxlength="300" />
       <label>{t('形式')}</label>
-      <select name="kind">{RELEASE_KINDS.map((k) => <option value={k}>{t(RELEASE_KIND_LABELS[k])}</option>)}</select>
+      <select name="form">
+        {forms?.options(t).map((o) => <option value={o.id}>{o.label}</option>)}
+        <option value="__new__">{t('＋ 新形式…')}</option>
+      </select>
+      <label data-new-form hidden>{t('新形式名称')}</label><input data-new-form hidden type="text" name="new_form" maxlength="40" placeholder={t('如「EP」「会场限定」')} />
       <span class="full muted small">{t('文件夹里的文件归入这个作品；之后可以在作品页补全资料。')}</span>
     </div>
     <div data-fields="edition" class="form-grid" hidden>

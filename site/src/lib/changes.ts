@@ -27,7 +27,7 @@ export const ENTITIES = {
     key: ['id'],
     fields: [
       'catalog_no', 'era_id', 'kind', 'series', 'title', 'title_reading', 'release_date', 'event',
-      'track_count', 'price', 'aliases', 'links', 'description', 'note', 'cover_file_id', 'state', 'artist',
+      'track_count', 'price', 'aliases', 'links', 'description', 'note', 'cover_file_id', 'state', 'artist', 'form',
     ],
     touch: true,
   },
@@ -80,6 +80,11 @@ export const ENTITIES = {
     key: ['id'],
     fields: ['name_zh', 'name_ja', 'name_en', 'sort', 'missing_board'],
   },
+  release_form: {
+    table: 'release_forms',
+    key: ['id'],
+    fields: ['name_zh', 'name_ja', 'name_en', 'sort'],
+  },
   era: {
     table: 'eras',
     key: ['id'],
@@ -114,6 +119,7 @@ export const ENTITY_LABELS: Record<EntityName, string> = {
   folder: N_('文件夹'),
   era: N_('名义'),
   edition_type: N_('版本类型'),
+  release_form: N_('作品形式'),
 };
 
 /** A files column read from a JSON row; NOT NULL columns without a value get their default (rows
@@ -680,12 +686,13 @@ async function undoCreated(db: D1Database, cs: ChangeSet, batchId: string, entit
                  AND id NOT IN ${touched('folder')}) AS folders,
               (SELECT count(*) FROM editions WHERE (release_id IN ${made('release')} OR slot IN ${made('edition_type')})
                  AND id NOT IN ${touched('edition')}) AS editions,
-              (SELECT count(*) FROM releases WHERE era_id IN ${made('era')} AND id NOT IN ${touched('release')}) AS releases,
+              (SELECT count(*) FROM releases WHERE (era_id IN ${made('era')} OR form IN ${made('release_form')})
+                 AND id NOT IN ${touched('release')}) AS releases,
               (SELECT count(*) FROM (SELECT entity_id FROM revisions WHERE batch_id = ?1 AND action = 'create' AND entity IN (${entities.map((e) => `'${e}'`).join(', ')}))) AS n`,
     )
     .bind(batchId)
     .first<{ files: number; folders: number; editions: number; releases: number; n: number }>();
-  if (later?.files || later?.folders || later?.editions || later?.releases) return new UserError('这次新建的文件夹、作品、版本或类型后来又被用到了，不能自动撤销');
+  if (later?.files || later?.folders || later?.editions || later?.releases) return new UserError('这次新建的文件夹、作品、版本、类型或形式后来又被用到了，不能自动撤销');
   if (!later?.n) return null;
   for (const entity of entities) {
     const s = spec(entity);

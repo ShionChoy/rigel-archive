@@ -1,9 +1,9 @@
 ---
 import Admin from '../../../layouts/Admin.astro';
 import ReleaseFields from '../../../components/ReleaseFields.astro';
-import { RELEASE_KIND_LABELS } from '../../../lib/constants';
 import { batchSince } from '../../../lib/changes';
 import { editionCovers } from '../../../lib/covers';
+import { loadForms } from '../../../lib/forms';
 import { db, type ReleaseRow } from '../../../lib/db';
 import {
   EDITION_STATUSES, EDITION_STATUS_LABELS, RELATION_MARK, RELATION_TEXT, comparison, createEdition, loadEditions, mergeTracks, parseIds,
@@ -106,7 +106,7 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
 
 <Admin title={release.catalog_no ? `${release.catalog_no} ${release.title}` : release.title}>
   <p class="muted">
-    {t(RELEASE_KIND_LABELS[release.kind])} · {release.release_date ?? t('日期未知')} ·
+    {(await loadForms()).label(release.form, t)} · {release.release_date ?? t('日期未知')} ·
     <a href={`/admin/releases/${release.id}/preview`}>{t('预览公开页')}</a> ·
     <a href={`/admin/history?release=${release.id}`}>{t('这个作品的修改记录')}</a> ·
     <a href={`/admin/inbox?loc=rel:${release.id}`}>{t('在整理台打开这个作品的文件夹')}</a>

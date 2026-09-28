@@ -85,8 +85,13 @@ WHERE f.type = 'edition' AND NOT EXISTS (SELECT 1 FROM folders x WHERE x.parent_
 ]
 
 
+# A release's form (migration 0010) is kept in the admin's list of forms; the ones the import adds take
+# their catalog kind, unless the admins have deleted that form (the release then waits for one).
+SET_FORMS = "UPDATE releases SET form = kind WHERE form IS NULL AND kind IN (SELECT id FROM release_forms);"
+
+
 def release_statements(releases: list[Release]) -> list[str]:
-    """Releases the admin does not have yet, and the folders of new releases and editions.
+    """Releases the admin does not have yet (with their form), and the folders of new releases and editions.
 
     The catalog's per-slot statuses are no longer written: since migration 0008 a release has the editions
     the admins make, and the 缺档看板 lists editions (a known but missing one is an edition with status 缺档).
@@ -106,6 +111,7 @@ def release_statements(releases: list[Release]) -> list[str]:
             release_rows,
             RELEASE_WANTED,
         )
+        + [SET_FORMS]
         + ENSURE_FOLDERS
     )
 

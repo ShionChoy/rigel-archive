@@ -58,7 +58,8 @@ export const POST: APIRoute = async ({ request, url, locals }) => {
         if (!isOneOf(FOLDER_TYPES, type)) throw new UserError('未知的类型');
         const o = (body.options ?? {}) as Record<string, unknown>;
         r = await setFolderType(actor, str(body.id), type as FolderType, {
-          kind: o.kind === undefined ? undefined : str(o.kind),
+          form: o.form === undefined ? undefined : str(o.form),
+          new_form: o.new_form === undefined ? undefined : str(o.new_form),
           catalog_no: o.catalog_no === undefined ? undefined : str(o.catalog_no),
           title: o.title === undefined ? undefined : str(o.title),
           slot: o.slot === undefined ? undefined : str(o.slot),

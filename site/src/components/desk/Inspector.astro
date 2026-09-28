@@ -4,7 +4,7 @@
 // sent to /admin/desk/folder as JSON.
 import FilePreview from '../FilePreview.astro';
 import FolderIcon from './FolderIcon.astro';
-import { FILE_KIND_LABELS, FILE_STATE_LABELS, RELEASE_KIND_LABELS, RIGHTS, RIGHTS_LABELS, ROLE_LABELS } from '../../lib/constants';
+import { FILE_KIND_LABELS, FILE_STATE_LABELS, RIGHTS, RIGHTS_LABELS, ROLE_LABELS } from '../../lib/constants';
 import { formatBytes, formatSpec, percent } from '../../lib/format';
 import { parseFormat } from '../../lib/db';
 import { EDITION_STATUS_LABELS } from '../../lib/editions';
@@ -62,7 +62,7 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
               <dl class="kv">
                 <dt>{t('编号')}</dt><dd>{v.release.catalog_no ?? '—'}</dd>
                 <dt>{t('标题')}</dt><dd>{v.release.title}</dd>
-                <dt>{t('形式')}</dt><dd>{t(RELEASE_KIND_LABELS[v.release.kind as keyof typeof RELEASE_KIND_LABELS] ?? v.release.kind)}</dd>
+                <dt>{t('形式')}</dt><dd>{v.release.form}</dd>
                 <dt>{t('发行日期')}</dt><dd>{v.release.release_date ?? '—'}</dd>
                 <dt>{t('曲目表')}</dt><dd>{t('{n} 首', { n: v.release.tracks })}</dd>
                 <dt>{t('公开')}</dt><dd><span class:list={['chip', v.release.state === 'published' ? 'published' : 'inbox']}>{v.release.state === 'published' ? t('已发布') : t('草稿')}</span></dd>

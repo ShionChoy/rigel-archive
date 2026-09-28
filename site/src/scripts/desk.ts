@@ -33,7 +33,6 @@ interface DeskData {
   suggestKinds: { id: string; label: string }[];
   guess: Record<string, { catalog_no: string | null; title: string }>;
   slots: { id: string; label: string }[];
-  releaseKinds: { id: string; label: string }[];
 }
 
 // The Workers types clash with the DOM's ParentNode here; these take any element.

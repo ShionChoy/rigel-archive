@@ -1,20 +1,8 @@
 // Enumerations shared with migrations/0001_init.sql and tools/ra/src/ra/model.py. Labels are Chinese,
-// marked with N_ and translated where they are shown (t(RELEASE_KIND_LABELS[kind])). Edition types are
-// not here: the admins keep them in the database (lib/types.ts).
+// marked with N_ and translated where they are shown (t(RIGHTS_LABELS[rights])). Release forms and edition
+// types are not here: the admins keep them in the database (lib/forms.ts, lib/types.ts).
 
 import { N_ } from './i18n';
-
-export const RELEASE_KINDS = ['album', 'single', 'dl_card', 'web', 'game_bgm', 'other'] as const;
-export type ReleaseKind = (typeof RELEASE_KINDS)[number];
-
-export const RELEASE_KIND_LABELS: Record<ReleaseKind, string> = {
-  album: N_('专辑'),
-  single: N_('单曲'),
-  dl_card: N_('DEMO / DL 卡'),
-  web: N_('网络发表'),
-  game_bgm: N_('游戏 BGM'),
-  other: N_('其他'),
-};
 
 export const RIGHTS = ['own', 'third_party', 'licensed', 'unknown'] as const;
 export type Rights = (typeof RIGHTS)[number];

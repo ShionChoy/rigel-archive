@@ -11,7 +11,7 @@ import FolderTree from '../../components/desk/FolderTree.astro';
 import Inspector from '../../components/desk/Inspector.astro';
 import PlacePicker from '../../components/PlacePicker.astro';
 import {
-  ARCHIVE_STATUS_LABELS, FILE_KIND_LABELS, FILE_STATES, FILE_STATE_LABELS, RELEASE_KINDS, RELEASE_KIND_LABELS, RIGHTS, RIGHTS_LABELS,
+  ARCHIVE_STATUS_LABELS, FILE_KIND_LABELS, FILE_STATES, FILE_STATE_LABELS, RIGHTS, RIGHTS_LABELS,
   ROLE_LABELS,
 } from '../../lib/constants';
 import { db, parseFormat, parseSuggestion, type FileRow, type Suggestion } from '../../lib/db';
@@ -27,6 +27,7 @@ import { guessRelease, loadQuickAccess } from '../../lib/folders';
 import { ORIGINS, PRESETS, RULE_FIELDS, RULE_OPS, SUGGEST_KINDS, loadSmartFolders, presetOf, type RuleSet } from '../../lib/smart';
 import { EDITION_PROBLEMS, editionProblems, type EditionProblem } from '../../lib/checks';
 import { folderView, trashBatches } from '../../lib/desk';
+import { loadForms } from '../../lib/forms';
 import { derivedFor } from '../../lib/processing';
 import { audioThumbs } from '../../lib/covers';
 import { readNow } from '../../lib/embedded';
@@ -103,7 +104,7 @@ type Row = Pick<
   | 'sha256' | 'format' | 'origin' | 'dup_of' | 'sealed' | 'role' | 'blob_key' | 'created_at'
 > & { copies: number; same_audio: number; gone: number; old: number; recordings: number };
 
-const [totals, rowsResult, counts, tree, quick, problems, overall] = await Promise.all([
+const [totals, rowsResult, counts, tree, quick, problems, overall, forms] = await Promise.all([
   listsFiles
     ? database.prepare(`SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM files ${w.sql}`).bind(...w.binds).first<{ n: number; bytes: number }>()
     : Promise.resolve({ n: 0, bytes: 0 }),
@@ -128,6 +129,7 @@ const [totals, rowsResult, counts, tree, quick, problems, overall] = await Promi
   loadQuickAccess(actor),
   editionProblems(),
   progress(),
+  loadForms(),
 ]);
 const rows = rowsResult.results;
 const total = totals?.n ?? 0;
@@ -264,7 +266,6 @@ const deskData = {
   suggestKinds: Object.entries(SUGGEST_KINDS).map(([id, label]) => ({ id, label: t(label) })),
   guess: Object.fromEntries([...places.folders.values()].filter((f) => f.type === 'plain').map((f) => [f.id, guessRelease(f.name)])),
   slots: places.types.options(t),
-  releaseKinds: RELEASE_KINDS.map((id) => ({ id, label: t(RELEASE_KIND_LABELS[id]) })),
 };
 const statusText: Record<string, string> = { missing: '缺档', partial: '部分缺档', planned: '预定', unknown: '待确认' };
 const done = overall.total - overall.left;
@@ -600,7 +601,7 @@ const done = overall.total - overall.left;
   <div id="desk-menu" class="ctx-menu" role="menu" hidden></div>
   <div id="desk-drag" class="drag-label" hidden></div>
   <PlacePicker places={places} />
-  <Dialogs types={places.types} />
+  <Dialogs types={places.types} forms={forms} />
   <script type="application/json" id="desk-data" set:html={JSON.stringify(deskData).replace(/</g, '\\u003c')} />
 </Admin>
 

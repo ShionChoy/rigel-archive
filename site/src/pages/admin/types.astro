@@ -1,9 +1,11 @@
 ---
-// 版本类型: the list of edition types (new, rename in three languages, order, whether the 缺档看板 lists
-// them, delete). A type in use by an edition or by a pending suggestion cannot be deleted.
+// 作品形式与版本类型: the two lists the admins keep. Release forms (专辑, 单曲 …: new, rename in three
+// languages, order, delete one no release uses) and edition types (the same, plus whether the 缺档看板
+// lists them; a type in use by an edition or by a pending suggestion cannot be deleted).
 import Admin from '../../layouts/Admin.astro';
 import { batchSince } from '../../lib/changes';
 import { db } from '../../lib/db';
+import { createForm, deleteForm, formDeleteProblem, formUses, loadForms, reorderForms, saveForms } from '../../lib/forms';
 import { withParams } from '../../lib/format';
 import { errorText, UserError } from '../../lib/i18n';
 import { createType, deleteProblem, deleteType, loadTypes, reorderTypes, saveTypes, typeUses } from '../../lib/types';
@@ -32,23 +34,88 @@ if (Astro.request.method === 'POST') {
         await deleteType(actor, String(form.get('id') ?? ''), t);
         msg = t('已删除类型');
         break;
+      case 'form_save':
+        msg = saved(await saveForms(actor, form));
+        break;
+      case 'form_create':
+        await createForm(actor, String(form.get('name') ?? ''));
+        msg = t('已新建形式');
+        break;
+      case 'form_order':
+        msg = saved(await reorderForms(actor, String(form.get('order') ?? '').split(',').filter(Boolean)));
+        break;
+      case 'form_delete':
+        await deleteForm(actor, String(form.get('id') ?? ''), t);
+        msg = t('已删除形式');
+        break;
       default:
         throw new UserError('未知的表单');
     }
     const undo = await batchSince(db(), actor, started);
-    return Astro.redirect(withParams(Astro.url, { msg, err: null, undo }), 303);
+    const anchor = String(form.get('section')).startsWith('form_') ? '#forms' : '#types';
+    return Astro.redirect(withParams(Astro.url, { msg, err: null, undo }) + anchor, 303);
   } catch (e) {
     return Astro.redirect(withParams(Astro.url, { err: errorText(e, t), msg: null }), 303);
   }
 }
 
-const [types, uses] = await Promise.all([loadTypes(), typeUses()]);
+const [types, uses, forms, formUse] = await Promise.all([loadTypes(), typeUses(), loadForms(), formUses()]);
 ---
 
-<Admin title={t('版本类型')}>
+<Admin title={t('作品形式与版本类型')}>
+  <p class="muted"><a href="/admin/releases">{t('← 作品')}</a></p>
+
+  <h2 id="forms">{t('作品形式')}</h2>
+  <p class="muted">{t('作品的形式（专辑、单曲、网络发表……）显示在作品列表、作品页和公开页上，作品列表可以按形式筛选。在作品页的「形式」下拉里也可以直接「＋ 新形式…」。')}</p>
+  <form method="post" class="panel" id="forms-form">
+    <input type="hidden" name="section" value="form_save" />
+    <table class="grid types-table">
+      <thead>
+        <tr><th></th><th>{t('中文名')}</th><th>{t('日文名')}</th><th>{t('英文名')}</th><th class="num">{t('作品')}</th><th></th></tr>
+      </thead>
+      <tbody data-order="form-order">
+        {forms.list.map((f) => {
+          const n = formUse.get(f.id) ?? 0;
+          const problem = formDeleteProblem(n);
+          return (
+            <tr draggable="true" data-id={f.id}>
+              <td class="handle" title={t('拖动排序')}>⠿<input type="hidden" name="form_id" value={f.id} /></td>
+              <td><input type="text" name={`zh_${f.id}`} value={f.name_zh} maxlength="40" required /></td>
+              <td><input type="text" name={`ja_${f.id}`} value={f.name_ja} maxlength="40" /></td>
+              <td><input type="text" name={`en_${f.id}`} value={f.name_en} maxlength="40" /></td>
+              <td class="num">{n ? <a href={`/admin/releases?form=${f.id}`}>{n}</a> : 0}</td>
+              <td>
+                <button type="submit" form={`fdel-${f.id}`} class="danger small" disabled={!!problem} title={problem ? errorText(problem, t) : t('删除这个形式（可在修改记录里撤销）')}>{t('删除')}</button>
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+    <p>
+      <button class="primary" type="submit">{t('保存形式名称')}</button>
+      <span class="muted">{t('日文名、英文名留空时用中文名。拖动 ⠿ 调整顺序后自动保存。')}</span>
+    </p>
+  </form>
+  {forms.list.map((f) => (
+    <form method="post" id={`fdel-${f.id}`} hidden>
+      <input type="hidden" name="section" value="form_delete" />
+      <input type="hidden" name="id" value={f.id} />
+    </form>
+  ))}
+  <form method="post" id="form-order" hidden>
+    <input type="hidden" name="section" value="form_order" />
+    <input type="hidden" name="order" value="" />
+  </form>
+  <form method="post" class="panel inline-form">
+    <input type="hidden" name="section" value="form_create" />
+    <input type="text" name="name" maxlength="40" required placeholder={t('如「EP」「会场限定」')} />
+    <button type="submit">{t('新建形式')}</button>
+  </form>
+
+  <h2 id="types">{t('版本类型')}</h2>
   <p class="muted">
     {t('版本类型只用来给版本分类和排序（作品页与公开页里版本的先后、缺档看板的筛选）。每个作品有哪些版本、叫什么、有几个，都在作品页自己新建。')}
-    <a href="/admin/releases">{t('← 作品')}</a>
   </p>
 
   <form method="post" class="panel" id="types-form">
@@ -60,7 +127,7 @@ const [types, uses] = await Promise.all([loadTypes(), typeUses()]);
           <th class="num">{t('版本')}</th><th class="num">{t('待确认的建议')}</th><th></th>
         </tr>
       </thead>
-      <tbody id="types-body">
+      <tbody id="types-body" data-order="order-form">
         {types.list.map((type) => {
           const use = uses.get(type.id);
           const problem = deleteProblem(use);
@@ -97,39 +164,41 @@ const [types, uses] = await Promise.all([loadTypes(), typeUses()]);
     <input type="hidden" name="order" value="" />
   </form>
 
-  <h2>{t('新建类型')}</h2>
   <form method="post" class="panel inline-form">
     <input type="hidden" name="section" value="create" />
     <input type="text" name="name" maxlength="40" required placeholder={t('如「图片」「Bandcamp」「特典 DVD」')} />
-    <button type="submit">{t('新建')}</button>
+    <button type="submit">{t('新建类型')}</button>
     <span class="muted">{t('也可以在作品页新建版本时，从类型下拉的「＋ 新类型…」直接新建。')}</span>
   </form>
 </Admin>
 
 <script>
-  const body = document.querySelector<HTMLTableSectionElement>('#types-body');
-  let dragged: HTMLTableRowElement | null = null;
-  let before = '';
-  const order = () => Array.from(body?.rows ?? []).map((r) => r.dataset.id).join(',');
-  body?.addEventListener('dragstart', (e) => {
-    dragged = (e.target as HTMLElement).closest('tr');
-    before = order();
-    dragged?.classList.add('dragging');
-  });
-  body?.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    const over = (e.target as HTMLElement).closest('tr');
-    if (!dragged || !over || over === dragged) return;
-    const rect = over.getBoundingClientRect();
-    body.insertBefore(dragged, e.clientY > rect.top + rect.height / 2 ? over.nextSibling : over);
-  });
-  body?.addEventListener('dragend', () => {
-    dragged?.classList.remove('dragging');
-    dragged = null;
-    const now = order();
-    if (now === before) return;
-    const form = document.querySelector<HTMLFormElement>('#order-form')!;
-    (form.elements.namedItem('order') as HTMLInputElement).value = now;
-    form.submit();
-  });
+  // Drag ⠿ to reorder a list; the new order is saved at once (data-order names its hidden form).
+  for (const el of Array.from(document.querySelectorAll('tbody[data-order]'))) {
+    const body = el as unknown as HTMLTableSectionElement;
+    let dragged: HTMLTableRowElement | null = null;
+    let before = '';
+    const order = () => Array.from(body.rows).map((r) => r.dataset.id).join(',');
+    body.addEventListener('dragstart', (e) => {
+      dragged = (e.target as HTMLElement).closest('tr');
+      before = order();
+      dragged?.classList.add('dragging');
+    });
+    body.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      const over = (e.target as HTMLElement).closest('tr');
+      if (!dragged || !over || over === dragged || over.parentElement !== body) return;
+      const rect = over.getBoundingClientRect();
+      body.insertBefore(dragged, e.clientY > rect.top + rect.height / 2 ? over.nextSibling : over);
+    });
+    body.addEventListener('dragend', () => {
+      dragged?.classList.remove('dragging');
+      dragged = null;
+      const now = order();
+      if (now === before) return;
+      const form = document.getElementById(body.dataset.order!) as HTMLFormElement;
+      (form.elements.namedItem('order') as HTMLInputElement).value = now;
+      form.submit();
+    });
+  }
 </script>

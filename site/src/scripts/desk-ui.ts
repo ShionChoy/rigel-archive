@@ -195,9 +195,11 @@ export async function typeBox(
     const type = radios.find((r) => r.checked)?.value;
     for (const box of d.querySelectorAll<HTMLElement>('[data-fields]')) box.hidden = box.dataset.fields !== type;
     (d.querySelector('[data-ok]') as HTMLButtonElement).disabled = !type;
-    // 「＋ 新类型…」 asks for the new type's name.
+    // 「＋ 新类型…」 and 「＋ 新形式…」 ask for the new one's name.
     const fresh = input('slot').value === '__new__';
     for (const el of d.querySelectorAll<HTMLElement>('[data-new-type]')) el.hidden = !fresh;
+    const freshForm = input('form').value === '__new__';
+    for (const el of d.querySelectorAll<HTMLElement>('[data-new-form]')) el.hidden = !freshForm;
   };
   form.addEventListener('change', sync);
   sync();
@@ -206,7 +208,7 @@ export async function typeBox(
   const type = radios.find((x) => x.checked)?.value as TypeChoice['type'] | undefined;
   if (r !== 'ok' || !type) return null;
   const v = (n: string) => input(n).value;
-  if (type === 'release') return { type, options: { catalog_no: v('catalog_no'), title: v('title'), kind: v('kind') } };
+  if (type === 'release') return { type, options: { catalog_no: v('catalog_no'), title: v('title'), form: v('form'), new_form: v('new_form') } };
   if (type === 'edition') return { type, options: { slot: v('slot'), new_type: v('new_type'), name: v('name') } };
   return { type, options: {} };
 }

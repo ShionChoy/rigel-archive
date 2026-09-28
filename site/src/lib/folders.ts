@@ -3,8 +3,9 @@
 // and can be undone as a whole. The tree itself is described in locations.ts.
 
 import { ChangeSet } from './changes';
-import { RELEASE_KINDS, isOneOf } from './constants';
+import { isOneOf } from './constants';
 import { db } from './db';
+import { chosenForm, kindOf, loadForms } from './forms';
 import { summary, UserError, type Params, type T } from './i18n';
 import { newId } from './ids';
 import {
@@ -432,7 +433,8 @@ async function deleteRelease(cs: ChangeSet, releaseId: string) {
 // ------------------------------------------------------------------------------------------ types
 
 export interface TypeOptions {
-  kind?: string; // release: album / single …
+  form?: string; // release: a release_forms id, or NEW_FORM with new_form
+  new_form?: string | null;
   catalog_no?: string | null;
   title?: string | null;
   slot?: string; // edition: a type id, or NEW_TYPE with new_type
@@ -487,8 +489,8 @@ export async function setFolderType(actor: string, id: string, type: FolderType,
     const ctx = places.context(f.parent_id);
     if (!ctx.era_id) throw new UserError('作品要放在某个名义里（中间可以隔着普通文件夹）');
     if (ctx.release_id) throw new UserError('作品不能放进另一个作品或版本里');
-    const kind = opts.kind ?? 'album';
-    if (!isOneOf(RELEASE_KINDS, kind)) throw new UserError('未知的作品形式');
+    const form = chosenForm(cs, await loadForms(database), opts.form ?? 'album', opts.new_form);
+    const kind = kindOf(form);
     const guess = guessRelease(f.name);
     const title = (opts.title ?? '').trim() || guess.title;
     const catalog = opts.catalog_no === undefined ? guess.catalog_no : (opts.catalog_no ?? '').trim() || null;
@@ -497,7 +499,7 @@ export async function setFolderType(actor: string, id: string, type: FolderType,
       throw new UserError('编号 {no} 已被其他作品使用', { no: catalog });
     }
     const releaseId = await freeId('releases', slug(catalog ?? title), 'r');
-    cs.create('release', { id: releaseId, catalog_no: catalog, era_id: ctx.era_id, kind, title, aliases: '[]', links: '{}', state: 'draft' });
+    cs.create('release', { id: releaseId, catalog_no: catalog, era_id: ctx.era_id, kind, form, title, aliases: '[]', links: '{}', state: 'draft' });
     cs.updateKnown('folder', { id }, row(f), { type: 'release', release_id: releaseId });
     places.addRelease({ id: releaseId, era_id: ctx.era_id, catalog_no: catalog, title, release_date: null, kind, state: 'draft' });
     places.updateFolder(id, { type: 'release', release_id: releaseId });

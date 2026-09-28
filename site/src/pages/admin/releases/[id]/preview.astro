@@ -5,7 +5,8 @@
 // (scans, a PV) shows its information and a gallery. 「版本对照」 compares the editions track by track.
 // On a phone the editions become a row of buttons above the page.
 import { env } from 'cloudflare:workers';
-import { RELEASE_KIND_LABELS, mimeFor } from '../../../../lib/constants';
+import { mimeFor } from '../../../../lib/constants';
+import { loadForms } from '../../../../lib/forms';
 import { COVER_NAME } from '../../../../lib/covers';
 import { db, parseFormat, type EditionRow, type FileRow, type ReleaseRow } from '../../../../lib/db';
 import { RELATION_MARK, RELATION_TEXT, comparison, defaultEdition, loadEditions, parseIds } from '../../../../lib/editions';
@@ -315,7 +316,7 @@ const readable = (f: F) => ['text', 'playlist'].includes(f.kind) || /^(log|cue|t
       {release.state !== 'published' && ` · ${t('本作品还是草稿，不会公开')}`}
     </div>
     <main>
-      <div class="kicker">{release.era_name} · {t(RELEASE_KIND_LABELS[release.kind])}</div>
+      <div class="kicker">{release.era_name} · {(await loadForms()).label(release.form, t)}</div>
       <h1>{release.title}</h1>
       <div class="sub">{[subtitles[0], years.length ? years.length > 1 ? `${years[0]}–${years.at(-1)}` : years[0] : release.release_date, shown.length ? t('{n} 个版本', { n: shown.length }) : null].filter(Boolean).join(' · ')}</div>
 
