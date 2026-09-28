@@ -493,9 +493,9 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
             <button type="submit" title={t('包内文件不再单独整理，只在下面列出清单；可随时展开')}>{file.sealed ? t('展开（包内文件回到整理台）') : t('整体收藏（不单独整理包内文件）')}</button>
           </form>
         )}
-        {tagged && <a class="button primary" href={`/admin/download/${file.id}?tagged=1`}>{t('下载（带标签）')}</a>}
+        {tagged && <a class="button primary" href={`/admin/download/${file.id}?tagged=1`} title={t('下载为「{name}」', { name: tagged.name })}>{t('下载（带标签）')}</a>}
         {tagged && ['wav', 'aif', 'aiff'].includes(file.ext.toLowerCase()) && <a class="button" href={`/admin/download/${file.id}?tagged=1&as=flac`}>{t('下载为 FLAC（采样相同）')}</a>}
-        {file.blob_key && <a class={tagged ? 'secondary-link' : 'button'} href={`/admin/download/${file.id}`}>{t('下载原件')}</a>}
+        {file.blob_key && <a class={tagged ? 'secondary-link' : 'button'} href={`/admin/download/${file.id}`} title={t('下载为「{name}」（与收录时完全相同）', { name: file.download_name || file.name })}>{t('下载原件')}</a>}
       </div>
     )}
   </div>

@@ -3,8 +3,12 @@
 // chosen, the row's cover. FLAC, MP3, WAV (it stays WAV; its stream FLAC is offered too), M4A and Ogg keep
 // their audio byte for byte. The original is never changed and stays downloadable as it was collected.
 
+import { attachment } from './api';
 import { db, type EditionRow, type FileRow, type ReleaseRow } from './db';
 import { trackTitle, type EditionTrackView } from './editions';
+import { embeddedFor } from './embedded';
+import { UserError } from './i18n';
+import { DEFAULT_NAMING, namingProblem, namingTags, renderName, type NameParts } from './naming';
 import { concat } from './tagging/bytes';
 import { albumArtist, catalogTags, commonAlbumTags } from './rowtags';
 import { numberTags, parseTags, type Tags } from './tagging/model';
@@ -43,13 +47,48 @@ export interface Context {
   release: ReleaseRow & { era_name: string };
   edition: EditionRow;
   rows: TagRow[];
+  naming: string; // the team's template for tagged download names
+  originals: Map<string, Tags>; // content → the tags it carries (filled as needed, see preloadOriginals)
+}
+
+// ------------------------------------------------------------------------------------------ download names
+
+const NAMING_KEY = 'download_naming';
+
+/** The team's template for the names of tagged downloads (lib/naming.ts). */
+export async function loadNaming(): Promise<string> {
+  const row = await db().prepare('SELECT value FROM meta WHERE key = ?').bind(NAMING_KEY).first<{ value: string }>();
+  return row?.value && !namingProblem(row.value) ? row.value : DEFAULT_NAMING;
+}
+
+export async function saveNaming(template: string): Promise<void> {
+  const clean = template.trim();
+  const problem = namingProblem(clean);
+  if (problem) throw new UserError(problem);
+  await db().prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').bind(NAMING_KEY, clean).run();
+}
+
+/** Read the tags these contents carry in one go (a zip of a whole edition). */
+export async function preloadOriginals(ctx: Context, shas: (string | null)[]): Promise<void> {
+  const missing = shas.filter((s): s is string => !!s && !ctx.originals.has(s));
+  if (!missing.length) return;
+  const found = await embeddedFor(missing);
+  for (const sha of missing) ctx.originals.set(sha, found.get(sha)?.tags ?? {});
+}
+
+/** What a row's download is named from; the file's own tags must be loaded first (preloadOriginals). */
+export function nameParts(ctx: Context, row: TagRow, sha: string | null): NameParts {
+  return {
+    tags: namingTags(sha ? ctx.originals.get(sha) ?? {} : {}, parseTags(row.tags), trackTitle(row)),
+    position: row.position, disc: row.disc, discs: new Set(ctx.rows.map((r) => r.disc)).size,
+  };
 }
 
 export async function editionContext(editionId: string): Promise<Context | null> {
   const database = db();
   const edition = await database.prepare('SELECT * FROM editions WHERE id = ?').bind(editionId).first<EditionRow>();
   if (!edition) return null;
-  const [release, rows] = await Promise.all([
+  const [release, rows, naming] = await Promise.all([
     database.prepare('SELECT r.*, e.name AS era_name FROM releases r JOIN eras e ON e.id = r.era_id WHERE r.id = ?').bind(edition.release_id).first<ReleaseRow & { era_name: string }>(),
     database
       .prepare(
@@ -58,9 +97,10 @@ export async function editionContext(editionId: string): Promise<Context | null>
       )
       .bind(editionId)
       .all<TagRow>(),
+    loadNaming(),
   ]);
   if (!release) return null;
-  return { release, edition, rows: rows.results };
+  return { release, edition, rows: rows.results, naming, originals: new Map() };
 }
 
 /**
@@ -76,19 +116,6 @@ export function rowTags(ctx: Context, row: TagRow): Tags {
   const discs = new Set(ctx.rows.map((r) => r.disc));
   const onDisc = ctx.rows.filter((r) => r.disc === row.disc).length;
   return { ...parseTags(row.tags), ...numberTags(row.position, row.disc, discs.size, onDisc) };
-}
-
-/** The title a row shows and downloads as: its title tag, else the edition's or the track's title. */
-export function rowTitle(row: TagRow | EditionTrackView & { tags?: string }): string {
-  return parseTags(row.tags).title?.[0] ?? trackTitle(row);
-}
-
-const safe = (s: string) => s.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 150);
-
-/** «03 Title.flac», «2-03 Title.flac» on multi-disc editions. */
-export function trackFileName(title: string, position: number | null, disc: number | null, ext: string, fallback: string): string {
-  if (!position) return fallback;
-  return `${disc ? `${disc}-` : ''}${String(position).padStart(2, '0')} ${safe(title)}.${ext}`;
 }
 
 type FileForTags = Pick<FileRow, 'id' | 'name' | 'ext' | 'size' | 'mtime' | 'sha256' | 'kind' | 'blob_key' | 'edition_id' | 'track_id' | 'format'> & {
@@ -128,8 +155,13 @@ export async function taggedSource(file: FileForTags, ctx?: Context | null, as?:
   const row = file.track_id ? ctx.rows.find((r) => r.track_id === file.track_id) : undefined;
   const stem = (file.download_name || file.name).replace(/\.[^.]+$/, '');
   const tags = row ? rowTags(ctx, row) : albumTags(ctx);
-  const discs = new Set(ctx.rows.map((r) => r.disc));
-  const name = row ? trackFileName(rowTitle(row), row.position, discs.size > 1 ? row.disc : null, ext, `${stem}.${ext}`) : `${stem}.${ext}`;
+  let name = `${stem}.${ext}`;
+  if (row) {
+    // Named by the team's template from the tags it is written with (lib/naming.ts).
+    await preloadOriginals(ctx, [file.sha256]);
+    const named = renderName(ctx.naming, nameParts(ctx, row, file.sha256));
+    if (named) name = `${named}.${ext}`;
+  }
   return { file, ext, key, size, name, tags, cover: row ? parseCover(row.cover) : null };
 }
 
@@ -225,7 +257,7 @@ export async function taggedResponse(media: R2Bucket, src: TaggedSource): Promis
     headers: {
       'content-type': layout.mime,
       'content-length': String(total),
-      'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(src.name)}`,
+      'content-disposition': attachment(src.name),
       'x-content-type-options': 'nosniff',
     },
   });

@@ -45,8 +45,23 @@ function protect(headers: Headers) {
   if (ACTIVE_TYPES.test(headers.get('content-type') ?? '')) headers.set('content-security-policy', 'sandbox');
 }
 
-/** Serve an R2 object with Range support (audio/video seeking) and conditional requests. */
-export async function serveObject(media: R2Bucket, key: string, request: Request, download?: string): Promise<Response> {
+/**
+ * Content-Disposition for a download named `name`. encodeURIComponent leaves ' ( ) * ! as they are, but
+ * filename* must not contain them: with an apostrophe in the name browsers dropped the header and named the
+ * file after the URL (f_….wav). `filename` is the ASCII fallback for clients without filename*.
+ */
+export function attachment(name: string): string {
+  const encoded = encodeURIComponent(name).replace(/['()*!]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  const ascii = name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+/**
+ * Serve an R2 object with Range support (audio/video seeking) and conditional requests. With `download` it
+ * is saved under that name, as `type` when given (the stored type comes from whichever upload first had
+ * this content, possibly under another name).
+ */
+export async function serveObject(media: R2Bucket, key: string, request: Request, download?: string, type?: string): Promise<Response> {
   const head = request.method === 'HEAD';
   const object = head
     ? await media.head(key)
@@ -58,7 +73,10 @@ export async function serveObject(media: R2Bucket, key: string, request: Request
   // Stored by content: a key never holds anything else.
   if (/^(blobs|pictures)\//.test(key)) headers.set('cache-control', 'private, max-age=31536000, immutable');
   headers.set('accept-ranges', 'bytes');
-  if (download) headers.set('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(download)}`);
+  if (download) {
+    headers.set('content-disposition', attachment(download));
+    if (type) headers.set('content-type', type);
+  }
   protect(headers);
   if (head || !('body' in object)) {
     headers.set('content-length', String(object.size));

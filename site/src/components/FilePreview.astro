@@ -5,7 +5,7 @@ import { audioSources, imageSrc, mediaSrc, videoSources, waveSrc, type Derived }
 import { mimeFor } from '../lib/constants';
 
 interface Props {
-  file: Pick<FileRow, 'kind' | 'ext' | 'name' | 'source_path' | 'member_path' | 'sha256' | 'blob_key'>;
+  file: Pick<FileRow, 'id' | 'kind' | 'ext' | 'name' | 'download_name' | 'source_path' | 'member_path' | 'sha256' | 'blob_key'>;
   /** Base URL of `uv run ra serve` in local development (MEDIA_DEV_BASE); empty when deployed. */
   base: string;
   /** The content's derived files (stream FLAC, AAC, WebP, MP4, waveform), when made. */
@@ -77,7 +77,7 @@ const picture = file.kind === 'image' ? imageSrc(src, derived, 1600) : null;
       )}
       <p>
         <a href={src} target="_blank" rel="noopener">{t('打开原件')}</a>
-        {file.blob_key && <> · <a href={`${src}?download=${encodeURIComponent(file.name)}`}>{t('下载')}</a></>}
+        {file.blob_key && <> · <a href={`/admin/download/${file.id}`} title={t('下载为「{name}」（与收录时完全相同）', { name: file.download_name || file.name })}>{t('下载')}</a></>}
         {audio.length > 1 && <span class="muted"> · {t('播放的是推流版，下载的是原件')}</span>}
       </p>
     </div>

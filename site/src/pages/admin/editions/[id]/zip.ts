@@ -1,9 +1,10 @@
 import type { APIRoute } from 'astro';
 import { env } from 'cloudflare:workers';
+import { attachment } from '../../../../lib/api';
 import { loadTypes } from '../../../../lib/types';
 import { db, type FileRow } from '../../../../lib/db';
 import { Places } from '../../../../lib/locations';
-import { editionContext, taggedEntry, taggedSource } from '../../../../lib/tags';
+import { editionContext, preloadOriginals, taggedEntry, taggedSource } from '../../../../lib/tags';
 import { zipSize, zipStream, type ZipEntry } from '../../../../lib/tagging/zip';
 
 const safe = (s: string) => s.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 150);
@@ -24,7 +25,7 @@ export const GET: APIRoute = async ({ params, locals }) => {
     )
     .bind(ctx.edition.id)
     .all<FileRow>();
-  const places = await Places.load();
+  const [places] = await Promise.all([Places.load(), preloadOriginals(ctx, files.map((f) => f.sha256))]);
   const label = `${ctx.release.title} [${(await loadTypes()).editionLabel(ctx.edition, t).replace(' · ', ' ')}]`;
   const root = `${safe(label)}/`;
   // Folders below the edition's own folder become folders in the zip.
@@ -77,7 +78,7 @@ export const GET: APIRoute = async ({ params, locals }) => {
   const headers: Record<string, string> = {
     'content-type': 'application/zip',
     ...(skipped.length ? { 'x-skipped-files': encodeURIComponent(skipped.join(', ')).slice(0, 2000) } : {}),
-    'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(`${safe(label)}.zip`)}`,
+    'content-disposition': attachment(`${safe(label)}.zip`),
   };
   if (size !== null) {
     const { readable, writable } = new FixedLengthStream(size);

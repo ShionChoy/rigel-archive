@@ -85,7 +85,7 @@ export function initEditor(data: EditorData) {
     // default columns
   }
   const snapshot = () => JSON.stringify({ rows: rows.map((r) => [r.id, r.disc, r.tags, r.cover]), links: [...links] });
-  const initial = snapshot();
+  let initial = snapshot();
 
   const filesOf = (row: Row): string[] => {
     const own = (baseFiles.get(row.id) ?? (row.id.startsWith('new:') ? [row.id.slice(4)] : [])).filter((f) => (links.has(f) ? links.get(f) === row.id : true));
@@ -1136,12 +1136,40 @@ export function initEditor(data: EditorData) {
     }
   }
 
+  /** Open one track's three columns and bring it into view. */
+  function openRow(id: string) {
+    if (!rows.some((r) => r.id === id)) return;
+    expanded.add(id);
+    render();
+    tracks.querySelector(`[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'center' });
+  }
+
+  /**
+   * The files changed on the page (moved, renamed, deleted, a cover set): take the edition's data again.
+   * Only when nothing is unsaved (false otherwise: the list then shows the files as they were until saved).
+   */
+  async function reload(): Promise<boolean> {
+    if (changes() || busy) return false;
+    const res = await fetch(`/admin/editions/${data.edition.id}/data`).catch(() => null);
+    const fresh = (await res?.json().catch(() => null)) as { ok?: boolean; data?: EditorData } | null;
+    if (!fresh?.data || changes()) return false;
+    Object.assign(data, fresh.data);
+    rows = data.rows.map((r) => ({ id: r.id, disc: r.disc, tags: structuredClone(r.tags), cover: r.cover, entry: r.entry_title, duration: r.duration_ms }));
+    baseFiles.clear();
+    for (const r of data.rows) baseFiles.set(r.id, r.files);
+    links.clear();
+    for (const id of [...selected]) if (!rows.some((r) => r.id === id)) selected.delete(id);
+    initial = snapshot();
+    render();
+    return true;
+  }
+
   // #row=<id>: open one track (the 整理台's 「编辑标签」 comes here).
   const want = new URLSearchParams(location.hash.slice(1)).get('row');
   if (want && rows.some((r) => r.id === want)) expanded.add(want);
   render();
   if (want) tracks.querySelector(`[data-id="${CSS.escape(want)}"]`)?.scrollIntoView({ block: 'center' });
-  return { rows: () => rows, render, values, setValues, original, scope, coverKey };
+  return { rows: () => rows, render, values, setValues, original, scope, coverKey, changes, openRow, reload };
 }
 
 export type Editor = ReturnType<typeof initEditor>;

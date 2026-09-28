@@ -856,14 +856,41 @@ details.native summary { cursor: pointer; color: var(--muted); font-size: 12px; 
 .ed-notracks { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; border: 1px dashed var(--line); }
 .files-tree td.tree-name { padding-left: calc(8px + var(--depth, 0) * 18px); }
 .files-tree tr.folder-row td { background: var(--panel-2); font-weight: 500; }
+.files-tree tr.folder-row td.muted { font-weight: 400; }
 .files-tree td.downloads a { margin-right: 8px; }
+/* 版本页「文件」: a small file manager (scripts/edition-files.ts) */
+.files-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; }
+.files-head .naming { margin: 0 0 8px; color: var(--muted); }
+.files-head .naming code { color: var(--text); background: var(--panel-2); padding: 1px 6px; border-radius: 4px; }
+.files-bar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; min-height: 38px; margin: 0 0 8px; padding: 4px 0; background: var(--panel); }
+.files-bar > div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.files-bar form.inline { display: inline; margin: 0; }
+.files-bar .count { margin-right: 4px; }
+.files-tree th.sel, .files-tree td.sel { width: 28px; padding-right: 0; text-align: center; }
+.files-tree th.row-menu, .files-tree td.row-menu { width: 28px; padding-left: 0; text-align: center; }
+.files-tree td.row-menu button { visibility: hidden; padding: 0 6px; font-size: 16px; line-height: 1; color: var(--muted); }
+.files-tree tr:hover td.row-menu button, .files-tree tr.selected td.row-menu button, .files-tree td.row-menu button:focus { visibility: visible; }
+.files-tree tr[data-key] { cursor: default; }
+.files-tree tr[data-key]:focus { outline: none; }
+.files-tree tr[data-key]:focus-visible td { box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }
+.files-tree tr.selected td, .files-tree tr.folder-row.selected td { background: var(--sel); }
+.files-tree tr.drop-over td { background: var(--accent-soft); box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); }
+.files-tree .ficon { margin-right: 6px; }
+.files-tree .rename-box { display: inline-flex; width: min(420px, 100%); vertical-align: middle; }
+.ed-files.working .files-tree { opacity: .55; cursor: progress; transition: opacity .15s .1s; }
+.page-toast { position: fixed; bottom: 72px; z-index: 45; }
+.naming-presets { display: grid; gap: 6px; margin: 10px 0; }
+.naming-preset, .naming-custom { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.naming-preset code { background: var(--panel-2); padding: 1px 6px; border-radius: 4px; }
+.naming-custom input[type="text"] { flex: 1; min-width: 240px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.naming-preview ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
 .ficon-inline { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; background: var(--f-plain); }
 .ficon-inline.edition { background: var(--f-edition); }
 .ficon-inline.extras { background: none; border: 2px solid var(--f-edition); border-radius: 6px; width: 8px; height: 12px; }
 .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .gallery .shot { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--line); border-radius: 6px; padding: 6px; text-decoration: none; color: inherit; font-size: 13px; }
 .gallery .shot img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 4px; background: var(--panel-2); }
-.dlg-wide { width: min(920px, calc(100vw - 32px)); }
+dialog.dlg.dlg-wide, .dlg-wide { width: min(920px, calc(100vw - 32px)); }
 .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
 .tabs button { border-radius: 16px; padding: 3px 12px; }
 .tabs button.on { background: color-mix(in srgb, var(--accent) 14%, var(--panel)); border-color: var(--accent); color: var(--accent); }

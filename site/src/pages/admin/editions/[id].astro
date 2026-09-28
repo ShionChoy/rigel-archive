@@ -4,7 +4,9 @@
 // written into files), the track list with every track's tags (the file's own next to the row's), and all
 // its files. An edition without tracks (scans, a PV) shows its information, cover and files.
 import Admin from '../../../layouts/Admin.astro';
+import Dialogs from '../../../components/desk/Dialogs.astro';
 import FolderIcon from '../../../components/desk/FolderIcon.astro';
+import PlacePicker from '../../../components/PlacePicker.astro';
 import { FILE_KIND_LABELS } from '../../../lib/constants';
 import { editionCovers } from '../../../lib/covers';
 import { db, parseFormat, type EditionRow, type FileRow, type ReleaseRow } from '../../../lib/db';
@@ -19,6 +21,8 @@ import { Places, folderKey } from '../../../lib/locations';
 import { imageSrc } from '../../../lib/media';
 import { derivedFor } from '../../../lib/processing';
 import { COVER_SQL } from '../../../lib/tagedit';
+import { editionContext, nameParts, preloadOriginals, taggedSource } from '../../../lib/tags';
+import { NAMING_PRESETS } from '../../../lib/naming';
 import { NEW_TYPE } from '../../../lib/types';
 
 const { id } = Astro.params;
@@ -79,12 +83,16 @@ if (Astro.request.method === 'POST') {
 }
 
 const places = await Places.load();
-type F = Pick<FileRow, 'id' | 'name' | 'download_name' | 'ext' | 'size' | 'kind' | 'state' | 'dir' | 'folder_id' | 'track_id' | 'format' | 'sha256' | 'blob_key'> & { old: number };
+type F = Pick<
+  FileRow,
+  'id' | 'name' | 'download_name' | 'ext' | 'size' | 'kind' | 'state' | 'dir' | 'folder_id' | 'track_id' | 'format' | 'sha256' | 'blob_key' | 'origin' | 'mtime'
+  | 'edition_id'
+> & { old: number };
 const [siblings, filesResult, audio] = await Promise.all([
   loadEditions(release.id, places.types),
   database
     .prepare(
-      `SELECT id, name, download_name, ext, size, kind, state, dir, folder_id, track_id, format, sha256, blob_key,
+      `SELECT id, name, download_name, ext, size, kind, state, dir, folder_id, track_id, format, sha256, blob_key, origin, mtime, edition_id,
               EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id) AS old
        FROM files f WHERE edition_id = ? AND sealed_in IS NULL ORDER BY coalesce(download_name, name)`,
     )
@@ -100,23 +108,49 @@ const label = places.editionLabel(edition, t);
 const home = places.editionFolder(edition.id);
 const extras = places.extrasOf(edition.id);
 const totalBytes = files.reduce((n, f) => n + f.size, 0);
-// The files as a tree below the edition's folder.
-interface Node { id: string; name: string; extras: boolean; files: F[]; kids: Node[] }
+// The files as a tree below the edition's folder. scripts/edition-files.ts makes it a small file manager
+// (select, move, rename, ignore, delete, new folders, drag onto folders), with the 整理台's operations.
+interface Node { id: string; name: string; extras: boolean; files: F[]; kids: Node[]; count: number }
 const build = (folderId: string): Node => {
   const f = places.folders.get(folderId)!;
-  return {
-    id: folderId, name: places.folderName(f, t), extras: !!f.extras, files: files.filter((x) => x.folder_id === folderId),
-    kids: places.children(folderId).map((c) => build(c.id)),
-  };
+  const own = files.filter((x) => x.folder_id === folderId);
+  const kids = places.children(folderId).map((c) => build(c.id));
+  return { id: folderId, name: places.folderName(f, t), extras: !!f.extras, files: own, kids, count: own.length + kids.reduce((n, k) => n + k.count, 0) };
 };
 const tree = home ? build(home.id) : null;
-const flat: { depth: number; node?: Node; file?: F }[] = [];
-const walk = (node: Node, depth: number) => {
-  flat.push({ depth, node });
-  for (const f of node.files) flat.push({ depth: depth + 1, file: f });
-  for (const k of node.kids) walk(k, depth + 1);
+const flat: { depth: number; node?: Node; file?: F; parent: string | null }[] = [];
+const walk = (node: Node, depth: number, parent: string | null) => {
+  flat.push({ depth, node, parent });
+  for (const f of node.files) flat.push({ depth: depth + 1, file: f, parent: node.id });
+  for (const k of node.kids) walk(k, depth + 1, node.id);
 };
-if (tree) walk(tree, 0);
+if (tree) walk(tree, 0, null);
+const folderRole = (node: Node, depth: number) => (depth === 0 ? 'root' : node.extras ? 'extras' : 'plain');
+// What the tagged downloads are called (the team's template, lib/naming.ts), and a few rows to try templates on.
+const ctx = withTracks ? await editionContext(edition.id) : null;
+if (ctx) await preloadOriginals(ctx, files.map((f) => f.sha256));
+const taggedNames = new Map<string, string>();
+if (ctx) {
+  for (const f of files) {
+    if (f.kind !== 'audio' || !f.blob_key) continue;
+    const src = await taggedSource(f, ctx);
+    if (src) taggedNames.set(f.id, src.name);
+  }
+}
+const rowOfFile = new Map(editor.rows.flatMap((r) => r.files.map((fid) => [fid, r.id] as const)));
+const namingData = ctx
+  ? {
+    template: ctx.naming,
+    presets: NAMING_PRESETS,
+    samples: ctx.rows.flatMap((row) => {
+      const f = files.find((x) => x.track_id === row.track_id && x.kind === 'audio');
+      return f ? [{ parts: nameParts(ctx, row, f.sha256), ext: (taggedNames.get(f.id) ?? f.name).split('.').pop() ?? f.ext }] : [];
+    }).slice(0, 3),
+  }
+  : null;
+const firstTrackFile = ctx?.rows.map((r) => files.find((x) => x.track_id === r.track_id && x.kind === 'audio')).find((f) => !!f);
+const sampleName = firstTrackFile ? taggedNames.get(firstTrackFile.id) ?? null : null;
+const coverable = (f: F) => (f.kind === 'image' && /^(jpe?g|png)$/i.test(f.ext)) || f.kind === 'audio';
 const looseRoot = home ? files.filter((f) => f.folder_id === home.id && f.kind !== 'audio').length : 0;
 const rowOfTrack = new Map(editor.rows.map((r) => [r.track_id, r]));
 // Pictures for an edition without tracks: a gallery, and its cover.
@@ -126,7 +160,6 @@ const thumb = (f: F, size: 240 | 640 = 240) => imageSrc(f.blob_key ? `/admin/med
 const covers = withTracks ? [] : (await editionCovers([edition.id])).get(edition.id) ?? [];
 const coverChoices = images.filter((f) => /^(jpe?g|png)$/i.test(f.ext) && f.size < 12_000_000);
 const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
-const TAGGABLE = ['flac', 'mp3', 'wav', 'm4a', 'ogg', 'opus'];
 ---
 
 <Admin title={`${release.catalog_no ? `${release.catalog_no} ` : ''}${release.title} · ${label}`} wide heading={false}>
@@ -263,8 +296,16 @@ const TAGGABLE = ['flac', 'mp3', 'wav', 'm4a', 'ogg', 'opus'];
     </section>
   )}
 
-  <section class="panel ed-files" id="files">
-    <h2>{t('文件')} <small class="muted">{t('本版全部文件与文件夹 · {n} 个文件 · {size}', { n: files.length, size: formatBytes(totalBytes) })}</small></h2>
+  <section class="panel ed-files" id="files" data-home={home?.id ?? ''}>
+    <div class="files-head">
+      <h2>{t('文件')} <small class="muted">{t('本版全部文件与文件夹 · {n} 个文件 · {size}', { n: files.length, size: formatBytes(totalBytes) })}</small></h2>
+      {sampleName && (
+        <p class="naming small">
+          {t('带标签下载的文件名')}：<code data-naming-sample>{sampleName}</code>
+          <button type="button" class="link" data-files-act="naming">{t('更改格式…')}</button>
+        </p>
+      )}
+    </div>
     {!withTracks && images.length > 0 && (
       <div class="gallery">
         {images.map((f) => {
@@ -279,55 +320,121 @@ const TAGGABLE = ['flac', 'mp3', 'wav', 'm4a', 'ogg', 'opus'];
         })}
       </div>
     )}
+    {home && (
+      <div class="files-bar" data-files-bar>
+        <div class="files-bar-idle">
+          <button type="button" data-files-act="new-folder" title="Ctrl+Shift+N">{t('＋ 新建文件夹')}</button>
+          <a class="button" href={`/admin/upload?place=${folderKey(home.id)}`}>{t('上传到本版…')}</a>
+          {withTracks && extras && looseRoot > 0 && (
+            <form method="post" class="inline">
+              <input type="hidden" name="section" value="extras" />
+              <input type="hidden" name="anchor" value="files" />
+              <button type="submit" title={t('把本版根目录里的 {n} 个非音频文件（LOG、CUE、图片、说明等）一次移进「{name}」', { n: looseRoot, name: extras.name })}>{t('整理到附件')}</button>
+            </form>
+          )}
+          <span class="muted small">{t('勾选文件或文件夹后可以移动、重命名、忽略、删除；也可以右键，或把它们拖到文件夹上。')}</span>
+        </div>
+        <div class="files-bar-sel" hidden>
+          <span class="count" set:html={t('已选 {n} 个', { n: '<b data-count>0</b>' })} />
+          <button type="button" data-files-act="move" title="M">{t('移动到…')}</button>
+          <button type="button" data-files-act="rename" title="F2">{t('重命名')}</button>
+          <button type="button" data-files-act="ignore" title={t('忽略：这些文件不再整理，并移出本版（在整理台「已忽略」里可以找回）')}>{t('忽略')}</button>
+          <button type="button" data-files-act="delete" class="danger" title="Delete">{t('删除')}</button>
+          <button type="button" data-files-act="more">{t('更多…')}</button>
+          <button type="button" class="link" data-files-act="clear" title="Esc">{t('取消选择')}</button>
+        </div>
+      </div>
+    )}
     {flat.length > 0 && (
-      <table class="grid files-tree">
-        <thead><tr><th>{t('名称')}</th><th>{t('类型')}</th><th>{t('规格')}</th><th class="num">{t('大小')}</th><th>{t('下载')}</th></tr></thead>
+      <table class="grid files-tree" data-files-table>
+        <thead>
+          <tr>
+            <th class="sel"><input type="checkbox" data-sel-all aria-label={t('全选')} /></th>
+            <th>{t('名称')}</th><th>{t('类型')}</th><th>{t('规格')}</th><th class="num">{t('大小')}</th><th>{t('下载')}</th><th class="row-menu"></th>
+          </tr>
+        </thead>
         <tbody>
-          {flat.map(({ depth, node, file: f }) => node ? (
-            <tr class="folder-row">
+          {flat.map(({ depth, node, file: f, parent }) => node ? (
+            <tr
+              class="folder-row" data-key={`d:${node.id}`} data-role={folderRole(node, depth)} data-name={node.name} data-parent={parent ?? ''}
+              data-depth={depth} draggable={folderRole(node, depth) === 'plain' ? 'true' : undefined}
+            >
+              <td class="sel">{depth > 0 && <input type="checkbox" data-sel aria-label={t('选择 {name}', { name: node.name })} />}</td>
               <td style={`--depth:${depth}`} class="tree-name">
                 <FolderIcon kind={node.extras ? 'extras' : depth === 0 ? 'edition' : 'plain'} />
-                <a href={`/admin/inbox?loc=${folderKey(node.id)}`} title={t('在整理台中显示')}>{node.name}</a>
+                <a class="fname" href={`/admin/inbox?loc=${folderKey(node.id)}`} title={t('在整理台中显示')}>{node.name}</a>
                 {node.extras && <span class="muted small"> {t('（版本自带，可改名）')}</span>}
               </td>
-              <td colspan="4"></td>
+              <td colspan="4" class="muted small">{node.count ? t('{n} 个文件', { n: node.count }) : t('空文件夹')}</td>
+              <td class="row-menu"><button type="button" class="link" data-row-menu aria-label={t('更多操作')} title={t('更多操作')}>⋯</button></td>
             </tr>
           ) : f ? (
-            <tr class:list={{ muted: f.state === 'ignored' || !!f.old }}>
+            <tr
+              class:list={['file-row', { muted: f.state === 'ignored' || !!f.old }]} data-key={`f:${f.id}`} data-kind={f.kind} data-ext={f.ext}
+              data-name={f.download_name || f.name} data-orig={f.name} data-origin={f.origin} data-parent={parent ?? ''} data-state={f.state}
+              data-row={rowOfFile.get(f.id)} data-cover={coverable(f) ? '1' : undefined} data-tagged={taggedNames.has(f.id) ? '1' : undefined}
+              data-blob={f.blob_key ? '1' : undefined} draggable="true"
+            >
+              <td class="sel"><input type="checkbox" data-sel aria-label={t('选择 {name}', { name: f.download_name || f.name })} /></td>
               <td style={`--depth:${depth}`} class="tree-name">
-                <a href={`/admin/files/${f.id}`}>{f.download_name || f.name}</a>
+                <a class="fname" href={`/admin/files/${f.id}`} title={f.download_name && f.download_name !== f.name ? t('原文件名：{name}', { name: f.name }) : undefined}>{f.download_name || f.name}</a>
                 {f.track_id && rowOfTrack.get(f.track_id) && <span class="muted small"> → {t('第 {n} 首', { n: rowOfTrack.get(f.track_id)!.position })}</span>}
                 {f.old ? <span class="chip ignored">{t('旧版本')}</span> : null}
+                {f.state === 'ignored' && <span class="chip ignored">{t('已忽略')}</span>}
               </td>
               <td>{kindLabel(f.kind)}</td>
               <td class="spec">{formatSpec(parseFormat(f.format))}</td>
               <td class="num">{formatBytes(f.size)}</td>
               <td class="downloads">
-                {f.kind === 'audio' && TAGGABLE.includes(f.ext.toLowerCase()) && <a href={`/admin/download/${f.id}?tagged=1`}>{t('带标签')}</a>}
-                {f.blob_key && <a href={`/admin/download/${f.id}`}>{f.kind === 'audio' ? t('原件') : t('下载')}</a>}
+                {taggedNames.has(f.id) && <a href={`/admin/download/${f.id}?tagged=1`} title={t('下载为「{name}」', { name: taggedNames.get(f.id)! })}>{t('带标签')}</a>}
+                {f.blob_key && <a href={`/admin/download/${f.id}`} title={t('下载为「{name}」（与收录时完全相同）', { name: f.download_name || f.name })}>{f.kind === 'audio' ? t('原件') : t('下载')}</a>}
               </td>
+              <td class="row-menu"><button type="button" class="link" data-row-menu aria-label={t('更多操作')} title={t('更多操作')}>⋯</button></td>
             </tr>
           ) : null)}
         </tbody>
       </table>
     )}
-    {files.length === 0 && <p class="muted">{t('还没有文件放进这个版本。在整理台把文件「移动到…」这个版本。')}</p>}
-    {withTracks && extras && looseRoot > 0 && (
-      <form method="post" class="inline-form">
-        <input type="hidden" name="section" value="extras" />
-        <input type="hidden" name="anchor" value="files" />
-        <button type="submit">{t('整理到附件')}</button>
-        <span class="muted small">{t('把本版根目录里的 {n} 个非音频文件（LOG、CUE、图片、说明等）一次移进「{name}」', { n: looseRoot, name: extras.name })}</span>
-      </form>
-    )}
+    {files.length === 0 && <p class="muted">{t('还没有文件放进这个版本。在整理台把文件「移动到…」这个版本，或点「上传到本版…」。')}</p>}
   </section>
 
-  <form method="post" class="panel danger-zone">
+  <form method="post" class="panel danger-zone" id="ed-delete">
     <input type="hidden" name="section" value="delete" />
     <b>{t('删除版本')}</b>
     <p class="muted">{t('只能删除没有文件、没有文件夹的版本（空的附件文件夹一起删除）；它的曲目表一并删除，可在修改记录里撤销。')}</p>
     <button class="danger" type="submit" disabled={files.length > 0}>{t('删除这个版本')}</button>
   </form>
+
+  <div id="desk-menu" class="ctx-menu" role="menu" hidden></div>
+  <div id="desk-drag" class="drag-label" hidden></div>
+  <div id="desk-toast" class="desk-toast page-toast" role="status" aria-live="polite" hidden>
+    <span data-text></span>
+    <button type="button" data-act="undo-toast" hidden>{t('撤销')}</button>
+    <button type="button" class="link" data-act="close-toast" aria-label={t('关闭')}>×</button>
+  </div>
+  <PlacePicker places={places} />
+  <Dialogs types={places.types} />
+  {namingData && (
+    <dialog id="dlg-naming" class="dlg wide">
+      <form method="dialog">
+        <h3>{t('带标签下载的文件名')}</h3>
+        <p class="muted small">{t('整个管理组共用，所有版本的带标签下载和整版 zip 都按这个格式命名。下载原件时仍用文件自己的名字（在本页或整理台重命名文件即可改）。')}</p>
+        <div class="naming-presets" data-presets></div>
+        <label class="naming-custom">
+          <input type="radio" name="naming" value="custom" /> {t('自定义')}
+          <input type="text" data-custom maxlength="200" spellcheck="false" />
+        </label>
+        <p class="muted small">{t('字段：{tracknumber} 两位曲号 · {discnumber} 碟号（只有多碟的版本才有）· {title} 标题 · {artist} 艺术家 · {album} 专辑 · {albumartist} 专辑艺术家 · {date} 日期 · {catalognumber} 编号；其他标签写 Picard 的标签名。[ ] 里的内容只在其中的字段都有值时出现。')}</p>
+        <div class="naming-preview" data-preview></div>
+        <p class="err-line" data-err></p>
+        <div class="dlg-buttons">
+          <button value="cancel">{t('取消')}</button>
+          <button value="ok" class="primary" data-ok>{t('保存')}</button>
+        </div>
+      </form>
+      <script type="application/json" data-naming set:html={JSON.stringify(namingData).replace(/</g, '\\u003c')} />
+    </dialog>
+  )}
 
   {withTracks && (
     <>
@@ -402,6 +509,7 @@ const TAGGABLE = ['flac', 'mp3', 'wav', 'm4a', 'ogg', 'opus'];
 
 <script>
   import '../../../scripts/edition';
+  import '../../../scripts/edition-files';
   for (const el of Array.from(document.querySelectorAll('[data-type-select]'))) {
     const select = el as unknown as HTMLSelectElement;
     const extra = Array.from(select.form?.querySelectorAll('[data-new-type]') ?? []) as unknown as HTMLElement[];

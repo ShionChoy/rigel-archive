@@ -79,6 +79,14 @@ const places = await Places.load();
     placeText.textContent = t('不指定，在整理台再放');
     clearPlace.hidden = true;
   });
+  // ?place=fd:… (the edition page's 「上传到本版…」) chooses the place beforehand.
+  const given = new URLSearchParams(location.search).get('place');
+  if (given && placePath(given) !== given) {
+    placeInput.value = given;
+    placeInput.dataset.folder = '';
+    placeText.textContent = placePath(given);
+    clearPlace.hidden = false;
+  }
 
   const PARALLEL = 2;
   // Files the operating system writes by itself; the import ignores them too.
