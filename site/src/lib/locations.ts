@@ -477,6 +477,24 @@ export function ensureEntityFolder(cs: ChangeSet, places: Places, key: string, d
   throw new UserError('找不到这个位置');
 }
 
+/**
+ * A name for a new file in this folder that no file there shows yet (ignoring case, as renames check):
+ * `name` itself, else «cover (2).jpg», «cover (3).jpg» …
+ */
+export async function freeFileName(folderId: string | null, name: string): Promise<string> {
+  if (!folderId) return name;
+  const { results } = await db()
+    .prepare('SELECT coalesce(download_name, name) AS shown FROM files WHERE folder_id = ? AND sealed_in IS NULL')
+    .bind(folderId)
+    .all<{ shown: string }>();
+  const taken = new Set(results.map((r) => r.shown.toLowerCase()));
+  const dot = name.lastIndexOf('.');
+  const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ''];
+  let free = name;
+  for (let n = 2; taken.has(free.toLowerCase()); n += 1) free = `${stem} (${n})${ext}`;
+  return free;
+}
+
 // ------------------------------------------------------------------------------------------ moving files
 
 interface MoveRow {

@@ -14,7 +14,7 @@ import { formatSpec } from './format';
 import { summary, UserError, type T } from './i18n';
 import { newId } from './ids';
 import { imageSrc } from './media';
-import { Places, ensureEntityFolder, folderKey } from './locations';
+import { Places, ensureEntityFolder, folderKey, freeFileName } from './locations';
 import { derivedFor } from './processing';
 import { newRowTags } from './rowtags';
 import { COMMON_TAGS, TAG_DEFS, tagLabel } from './tagging/names';
@@ -364,12 +364,14 @@ export async function uploadPicture(actor: string, edition: EditionRow, file: Fi
   const key = `blobs/${sha}`;
   if (!(await env.MEDIA.head(key))) await env.MEDIA.put(key, bytes, { httpMetadata: { contentType: file.type } });
   const ext = file.type === 'image/png' ? 'png' : 'jpg';
-  const name = (file.name || `cover.${ext}`).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 150);
+  const places = await Places.load();
+  // An edition without a folder yet gets an empty one below, so only an existing folder can hold the name.
+  const name = await freeFileName(places.folderOf(`ed:${edition.id}`)?.id ?? null,
+    (file.name || `cover.${ext}`).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 150));
   const id = newId('f');
   const { imageSize } = await import('./tagging/bytes');
   const size = imageSize(bytes);
   const cs = new ChangeSet(db(), actor, summary('版本 {edition}：上传封面图片 {name}', { edition: edition.name || edition.id, name }));
-  const places = await Places.load();
   const place = places.place(folderKey(ensureEntityFolder(cs, places, `ed:${edition.id}`)));
   cs.createFiles([{
     id, origin: 'upload', source_path: null, dir: '后台上传', member_of: null, member_path: null, name, ext, size: file.size,

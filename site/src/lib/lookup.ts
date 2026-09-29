@@ -9,7 +9,7 @@ import { db, type EditionRow, type ReleaseRow } from './db';
 import { parseIds } from './editions';
 import { summary, UserError } from './i18n';
 import { newId } from './ids';
-import { Places, ensureEntityFolder, folderKey } from './locations';
+import { Places, ensureEntityFolder, folderKey, freeFileName } from './locations';
 import { MBID, MB_UA, bandcampAlbum, mbCandidates, mbGet, scoreCandidate, type MbCandidate } from './metadata';
 import type { Tags } from './tagging/model';
 import { concat, imageSize } from './tagging/bytes';
@@ -358,10 +358,10 @@ export async function storeOnlineCover(actor: string, edition: EditionRow, relea
   if (existing) return existing.id;
   const source = /coverartarchive|archive\.org/.test(url) ? 'Cover Art Archive' : 'Bandcamp';
   const id = newId('f');
-  const name = `cover (${source}).${ext}`;
   const cs = new ChangeSet(database, actor, summary('版本 {edition}：取回在线封面（{source}）', { edition: `${release.catalog_no ?? release.title} ${edition.name}`.trim(), source }));
   const places = await Places.load(database);
   const place = places.place(folderKey(ensureEntityFolder(cs, places, `ed:${edition.id}`)));
+  const name = await freeFileName(place.folder_id, `cover (${source}).${ext}`);
   cs.createFiles([{
     id, origin: 'upload', source_path: null, dir: '后台上传/封面', member_of: null, member_path: null, name, ext, size: bytes.length,
     mtime: new Date().toISOString(), sha256: sha, blob_key: key, kind: 'image', format: JSON.stringify({ width: size.width, height: size.height }),
