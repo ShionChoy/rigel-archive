@@ -427,6 +427,17 @@ function mark(el: HTMLElement, on: boolean) {
   if (box) box.checked = on;
 }
 
+/** The items under a group heading (up to the next heading). */
+function groupItems(box: HTMLInputElement): HTMLElement[] {
+  const items: HTMLElement[] = [];
+  let el = box.closest('.group')?.nextElementSibling as HTMLElement | null;
+  while (el && el.classList.contains('item')) {
+    items.push(el);
+    el = el.nextElementSibling as HTMLElement | null;
+  }
+  return items;
+}
+
 function focus(el: HTMLElement | undefined) {
   if (!el) return;
   el.focus({ preventScroll: true });
@@ -469,6 +480,16 @@ function selectionChanged(immediate = false) {
   const files = selectedFiles();
   const fds = selectedFolders();
   const n = files.length + fds.length;
+  // Group boxes follow their items (ticked when all are selected, dashed when some are); 「全部」
+  // goes off once an item on the page is left out, so an action no longer reaches files deselected here.
+  for (const box of $$<HTMLInputElement>('#desk-content input.pick-group')) {
+    const items = groupItems(box);
+    const on = items.filter((el) => el.classList.contains('selected')).length;
+    box.checked = on > 0 && on === items.length;
+    box.indeterminate = on > 0 && on < items.length;
+  }
+  const all = $<HTMLInputElement>('[data-scope-all]');
+  if (all?.checked && $$('#desk-content .item:not(.selected)').length) all.checked = false;
   $('#desk')?.classList.toggle('has-selection', n > 0);
   const bar = $('#desk-bar');
   if (bar) {
@@ -1151,7 +1172,8 @@ function initClicks() {
     // Items and tiles: a click selects (Ctrl / Shift for several), the checkbox toggles.
     const item = target.closest<HTMLElement>('#desk-content .item, #desk-content .tile[data-folder]');
     if (item && !(act && act.dataset.act !== 'menu') && !target.closest('.place-link, .chips a')) {
-      ev.preventDefault();
+      // A cancelled click puts a checkbox back the way it was after this handler, undoing mark().
+      if (!target.closest('input.pick')) ev.preventDefault();
       if (act?.dataset.act === 'menu') {
         if (!item.classList.contains('selected')) selectOnly(item);
         const r = act.getBoundingClientRect();
@@ -1170,11 +1192,7 @@ function initClicks() {
     }
     const group = target.closest<HTMLInputElement>('input.pick-group');
     if (group) {
-      let el = group.closest('.group')?.nextElementSibling as HTMLElement | null;
-      while (el && el.classList.contains('item')) {
-        mark(el, group.checked);
-        el = el.nextElementSibling as HTMLElement | null;
-      }
+      for (const el of groupItems(group)) mark(el, group.checked);
       selectionChanged();
       return;
     }
