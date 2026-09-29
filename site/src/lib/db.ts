@@ -85,7 +85,6 @@ export interface FolderRow {
   readme_file_id: string | null;
   color: string | null;
   sort: number;
-  extras: number; // an edition's attachments folder (附件)
 }
 
 export interface Suggestion {

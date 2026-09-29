@@ -172,7 +172,7 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
       <a class="button" href={`/admin/releases/${release.id}/musicbrainz`}>{t('从 MusicBrainz 导入版本…')}</a>
     </form>
     <p class="muted">
-      {t('版本的数量和名称不限，也可以没有曲目（如只放扫图的「图片」版本）。每个版本自带一个「附件」文件夹，放 LOG、CUE、扫图等。知道存在、还没收到的版本也可以建，状态选「缺档」：它只出现在后台和缺档看板。')}
+      {t('版本的数量和名称不限，也可以没有曲目（如只放扫图的「图片」版本）。版本里要不要建文件夹、建哪些（如放 LOG、CUE、扫图的「附件」），由整理者在版本页的「文件」里决定。知道存在、还没收到的版本也可以建，状态选「缺档」：它只出现在后台和缺档看板。')}
       <a href="/admin/types">{t('管理版本类型 ›')}</a>
     </p>
   </div>

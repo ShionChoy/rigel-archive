@@ -78,10 +78,6 @@ WHERE NOT EXISTS (SELECT 1 FROM folders f WHERE f.release_id = r.id);""",
     """INSERT INTO folders (id, parent_id, type, edition_id)
 SELECT 'fd_' || lower(hex(randomblob(8))), (SELECT f.id FROM folders f WHERE f.release_id = e.release_id), 'edition', e.id FROM editions e
 WHERE NOT EXISTS (SELECT 1 FROM folders f WHERE f.edition_id = e.id);""",
-    # Every edition has its attachments folder (附件, migration 0008).
-    """INSERT INTO folders (id, parent_id, type, name, extras)
-SELECT 'fd_' || lower(hex(randomblob(8))), f.id, 'plain', '附件', 1 FROM folders f
-WHERE f.type = 'edition' AND NOT EXISTS (SELECT 1 FROM folders x WHERE x.parent_id = f.id AND x.extras = 1);""",
 ]
 
 

@@ -1,4 +1,4 @@
-// The cover dialog's upload: a JPEG / PNG goes into the edition's 附件 and comes back as a choice.
+// The cover dialog's upload: a JPEG / PNG goes into the edition's folder and comes back as a choice.
 import type { APIRoute } from 'astro';
 import { fromAdminPage, json } from '../../../../lib/api';
 import { db, type EditionRow } from '../../../../lib/db';

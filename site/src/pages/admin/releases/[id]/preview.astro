@@ -182,7 +182,6 @@ const credits = chosen ? ([
   [t('来源'), chosen.source],
 ] as [string, string | null][]).filter(([, v]) => v) : [];
 // Attachments: the edition's files that are not its tracks, by folder (images as a gallery).
-const extras = chosen ? places.extrasOf(chosen.id) : undefined;
 const home = chosen ? places.editionFolder(chosen.id) : undefined;
 const folderPath = (folderId: string | null) => {
   if (!folderId || !home || folderId === home.id) return '';
@@ -192,15 +191,11 @@ const folderPath = (folderId: string | null) => {
 const others = mine.filter((f) => f.kind !== 'audio' || (rows.length > 0 && !lines.some((l) => l.row.track_id === f.track_id)));
 const gallery = others.filter((f) => f.kind === 'image');
 const docs = others.filter((f) => f.kind !== 'image' && f.kind !== 'audio');
-// Groups: the 附件 folder first (its subfolders by name), then the rest by folder (the edition's own folder «其他文件»).
-const extrasPath = extras ? folderPath(extras.id) : null;
-const groupOf = (f: F): string => {
-  const path = folderPath(f.folder_id);
-  if (extrasPath !== null && (path === extrasPath || path.startsWith(`${extrasPath} / `))) return path === extrasPath ? '' : path.slice(extrasPath.length + 3);
-  return `\u0000${path}`;
-};
-const groups = [...new Set(others.map(groupOf))].sort((a, b) => Number(a.startsWith('\u0000')) - Number(b.startsWith('\u0000')) || a.localeCompare(b));
-const groupLabel = (g: string) => (g.startsWith('\u0000') ? (g.length > 1 ? g.slice(1) : withTracks ? t('其他文件') : '') : g);
+// Groups: the files directly in the edition's folder first, then each folder below it by its path (as
+// the organizers made them). A single group needs no heading.
+const groupOf = (f: F): string => folderPath(f.folder_id);
+const groups = [...new Set(others.map(groupOf))].sort((a, b) => a.localeCompare(b, 'ja', { numeric: true }));
+const groupLabel = (g: string) => (groups.length > 1 ? g : '');
 const withTracks = lines.length > 0;
 const editionName = (e: EditionRow) => types.editionLabel(e, t);
 const navSub = (e: EditionRow) => {
@@ -431,7 +426,7 @@ const readable = (f: F) => ['text', 'playlist'].includes(f.kind) || /^(log|cue|t
 
                 {others.length > 0 && (
                   <section>
-                    <h2 class="sec">{withTracks ? (extras?.name ?? t('附件')) : t('文件')}</h2>
+                    <h2 class="sec">{withTracks ? t('附件') : t('文件')}</h2>
                     {groups.map((g) => {
                       const pics = gallery.filter((f) => groupOf(f) === g);
                       const texts = docs.filter((f) => groupOf(f) === g);

@@ -73,7 +73,7 @@ export const ENTITIES = {
   folder: {
     table: 'folders',
     key: ['id'],
-    fields: ['parent_id', 'type', 'era_id', 'release_id', 'edition_id', 'name', 'description', 'readme_file_id', 'color', 'sort', 'extras'],
+    fields: ['parent_id', 'type', 'era_id', 'release_id', 'edition_id', 'name', 'description', 'readme_file_id', 'color', 'sort'],
   },
   edition_type: {
     table: 'slot_types',
@@ -129,10 +129,14 @@ const fromJson = (source: string, defaults: Record<string, string> = FILE_DEFAUL
   c in defaults ? `coalesce(json_extract(${source}, '$.${c}'), ${defaults[c]})` : `json_extract(${source}, '$.${c}')`;
 /** The same for the other tables whose rows are deleted and restored set-based (folders made before 0007). */
 const ROW_DEFAULTS: Partial<Record<EntityName, Record<string, string>>> = {
-  folder: { type: "'plain'", name: "''", sort: '0', extras: '0' },
+  folder: { type: "'plain'", name: "''", sort: '0' },
   edition_type: { missing_board: '1' },
   edition_track: { tags: "'{}'" },
 };
+/** Columns since dropped (folders.extras, migration 0011): older revisions of them are left out of an undo. */
+const RETIRED: Partial<Record<EntityName, readonly string[]>> = { folder: ['extras'] };
+const withoutRetired = (entity: EntityName, row: Row | null): Row | null =>
+  row && Object.fromEntries(Object.entries(row).filter(([f]) => !RETIRED[entity]?.includes(f)));
 
 // Keeps each statement well under D1's 100 bound-parameter limit.
 const CHUNK = 60;
@@ -574,10 +578,11 @@ export async function undoBatch(db: D1Database, actor: string, batchId: string, 
     if (!isEntity(rev.entity)) return { ok: false, reason: new UserError('未知的记录类型 {entity}', { entity: rev.entity }) };
     const entity = rev.entity;
     const key = parseEntityId(entity, rev.entity_id);
-    const before = rev.before ? (JSON.parse(rev.before) as Row) : null;
-    const after = rev.after ? (JSON.parse(rev.after) as Row) : null;
+    const before = withoutRetired(entity, rev.before ? (JSON.parse(rev.before) as Row) : null);
+    const after = withoutRetired(entity, rev.after ? (JSON.parse(rev.after) as Row) : null);
 
     if (rev.action === 'update' && before && after) {
+      if (Object.keys(after).length === 0) continue;
       const current = await cs.read(entity, key, Object.keys(after));
       if (!current || Object.keys(after).some((f) => !same(current[f], after[f]))) {
         return { ok: false, reason: new UserError('{entity} {id} 之后又被修改过，不能自动撤销', { entity: ENTITY_LABELS[entity], id: rev.entity_id }) };

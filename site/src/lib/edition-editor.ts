@@ -14,7 +14,7 @@ import { formatSpec } from './format';
 import { summary, UserError, type T } from './i18n';
 import { newId } from './ids';
 import { imageSrc } from './media';
-import { Places } from './locations';
+import { Places, ensureEntityFolder, folderKey } from './locations';
 import { derivedFor } from './processing';
 import { newRowTags } from './rowtags';
 import { COMMON_TAGS, TAG_DEFS, tagLabel } from './tagging/names';
@@ -55,7 +55,7 @@ export interface EdPicture {
   key: string; // file:<id> or picture:<sha256>
   src: string;
   full: string;
-  label: string; // «附件/扫图/01 封面.jpg», or «曲目自带»
+  label: string; // «扫图/01 封面.jpg» (its folders below the edition), or «曲目自带»
   width: number | null;
   height: number | null;
   mime: string;
@@ -349,25 +349,12 @@ export async function saveEditionTags(actor: string, edition: EditionRow, releas
   return { changed, batchId: cs.batchId };
 }
 
-// ------------------------------------------------------------------------------------------ 整理到附件
+// ------------------------------------------------------------------------------------------ uploaded covers
 
-/** The non-audio files directly in the edition's folder go into its 附件. */
-export async function tidyIntoExtras(actor: string, edition: EditionRow, t: T): Promise<number> {
-  const { moveFiles } = await import('./locations');
-  const places = await Places.load();
-  const folder = places.editionFolder(edition.id);
-  const extras = places.extrasOf(edition.id);
-  if (!folder || !extras) throw new UserError('这个版本没有附件文件夹');
-  const { results } = await db()
-    .prepare("SELECT id FROM files WHERE folder_id = ? AND kind != 'audio' AND sealed_in IS NULL AND NOT (kind IN ('archive', 'disc_image') AND sealed = 1)")
-    .bind(folder.id)
-    .all<{ id: string }>();
-  if (results.length === 0) throw new UserError('版本根目录里没有要整理的非音频文件');
-  const r = await moveFiles(actor, results.map((x) => x.id), `fd:${extras.id}`, t);
-  return r.changed;
-}
-
-/** For the cover dialog's «upload»: an uploaded picture is stored and filed in the edition's 附件. */
+/**
+ * For the cover dialog's «upload»: an uploaded picture is stored and filed in the edition's own folder
+ * (the organizers move it where they like).
+ */
 export async function uploadPicture(actor: string, edition: EditionRow, file: File, t: T): Promise<string> {
   if (!/^image\/(jpeg|png)$/.test(file.type)) throw new UserError('只能上传 JPEG 或 PNG 图片');
   if (file.size > 30_000_000) throw new UserError('图片太大（最多 30 MB）');
@@ -376,16 +363,14 @@ export async function uploadPicture(actor: string, edition: EditionRow, file: Fi
   const sha = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
   const key = `blobs/${sha}`;
   if (!(await env.MEDIA.head(key))) await env.MEDIA.put(key, bytes, { httpMetadata: { contentType: file.type } });
-  const places = await Places.load();
-  const extras = places.extrasOf(edition.id);
-  if (!extras) throw new UserError('这个版本没有附件文件夹');
-  const place = places.place(`fd:${extras.id}`);
   const ext = file.type === 'image/png' ? 'png' : 'jpg';
   const name = (file.name || `cover.${ext}`).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 150);
   const id = newId('f');
   const { imageSize } = await import('./tagging/bytes');
   const size = imageSize(bytes);
   const cs = new ChangeSet(db(), actor, summary('版本 {edition}：上传封面图片 {name}', { edition: edition.name || edition.id, name }));
+  const places = await Places.load();
+  const place = places.place(folderKey(ensureEntityFolder(cs, places, `ed:${edition.id}`)));
   cs.createFiles([{
     id, origin: 'upload', source_path: null, dir: '后台上传', member_of: null, member_path: null, name, ext, size: file.size,
     mtime: new Date().toISOString(), sha256: sha, blob_key: key, kind: 'image',

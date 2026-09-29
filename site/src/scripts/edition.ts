@@ -478,7 +478,7 @@ export function initEditor(data: EditorData) {
             <b>${esc(p.kind === 'embedded' ? t('曲目自带（{n} 个文件）', { n: p.tracks }) : p.label)}</b>
             <span class="muted">${esc([p.width && p.height ? `${p.width}×${p.height}` : '', p.mime.replace('image/', '').toUpperCase(), p.size ? size(p.size) : ''].filter(Boolean).join(' · '))}</span>
           </button>`).join('')
-        : `<p class="muted">${esc(tab === 'file' ? t('这个版本里还没有图片。可以上传，或把扫图放进附件。') : t('曲目都没有自带封面。'))}</p>`;
+        : `<p class="muted">${esc(tab === 'file' ? t('这个版本里还没有图片。可以上传，或把扫图放进这个版本。') : t('曲目都没有自带封面。'))}</p>`;
       ($('[data-ok]', d) as HTMLButtonElement).disabled = !chosen;
     };
     const onClick = async (e: Event) => {
@@ -968,7 +968,7 @@ export function initEditor(data: EditorData) {
           <span class="muted">${esc(t('本地当前'))}：${local ? esc(picSpec(local)) : esc(t('没有封面'))}</span>
           ${text.verdict}
         </div>
-        <label class="inline-check small"><input type="checkbox" data-cmp-cover ${compare.cover ? 'checked' : ''} /> ${esc(t('同时采用在线封面（存进本版附件，替换全部曲目的正面封面）'))}</label>
+        <label class="inline-check small"><input type="checkbox" data-cmp-cover ${compare.cover ? 'checked' : ''} /> ${esc(t('同时采用在线封面（存进本版根目录，替换全部曲目的正面封面）'))}</label>
         <button type="button" class="linkish small" data-cmp="cover">${esc(t('现在就采用封面'))}</button>`;
       })() : ''}
       ${extraOnline.length ? `<div class="cmp-extra"><b>${esc(t('在线版多出的曲目（{n}）', { n: extraOnline.length }))}</b> ${extraOnline.map(([x, i]) =>

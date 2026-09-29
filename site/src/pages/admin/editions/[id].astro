@@ -13,7 +13,7 @@ import { db, parseFormat, type EditionRow, type FileRow, type ReleaseRow } from 
 import {
   EDITION_STATUSES, EDITION_STATUS_LABELS, deleteEdition, editionAudio, generateEditionTracks, loadEditions, matchEditionFiles, parseIds, saveEdition,
 } from '../../../lib/editions';
-import { editorData, tidyIntoExtras } from '../../../lib/edition-editor';
+import { editorData } from '../../../lib/edition-editor';
 import { formatBytes, formatSpec, withParams } from '../../../lib/format';
 import { ChangeSet, batchSince } from '../../../lib/changes';
 import { N_, errorText, summary, UserError } from '../../../lib/i18n';
@@ -57,9 +57,6 @@ if (Astro.request.method === 'POST') {
         msg = r.left ? t('已对应 {n} 个文件，{left} 个没找到对应曲目，请手动选择', { n: r.matched, left: r.left }) : t('已对应 {n} 个文件', { n: r.matched });
         break;
       }
-      case 'extras':
-        msg = t('已把 {n} 个文件移进附件', { n: await tidyIntoExtras(actor, edition, t) });
-        break;
       case 'cover': {
         // An edition without a track list: its cover is one of its pictures (or, unset, one named like a cover).
         const fileId = String(form.get('cover_file_id') ?? '') || null;
@@ -86,13 +83,13 @@ const places = await Places.load();
 type F = Pick<
   FileRow,
   'id' | 'name' | 'download_name' | 'ext' | 'size' | 'kind' | 'state' | 'dir' | 'folder_id' | 'track_id' | 'format' | 'sha256' | 'blob_key' | 'origin' | 'mtime'
-  | 'edition_id'
+  | 'edition_id' | 'sealed'
 > & { old: number };
 const [siblings, filesResult, audio] = await Promise.all([
   loadEditions(release.id, places.types),
   database
     .prepare(
-      `SELECT id, name, download_name, ext, size, kind, state, dir, folder_id, track_id, format, sha256, blob_key, origin, mtime, edition_id,
+      `SELECT id, name, download_name, ext, size, kind, state, dir, folder_id, track_id, format, sha256, blob_key, origin, mtime, edition_id, sealed,
               EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id) AS old
        FROM files f WHERE edition_id = ? AND sealed_in IS NULL ORDER BY coalesce(download_name, name)`,
     )
@@ -106,16 +103,15 @@ const withTracks = editor.rows.length > 0 || audio.length > 0;
 const ids = parseIds(edition.external_ids);
 const label = places.editionLabel(edition, t);
 const home = places.editionFolder(edition.id);
-const extras = places.extrasOf(edition.id);
 const totalBytes = files.reduce((n, f) => n + f.size, 0);
 // The files as a tree below the edition's folder. scripts/edition-files.ts makes it a small file manager
 // (select, move, rename, ignore, delete, new folders, drag onto folders), with the 整理台's operations.
-interface Node { id: string; name: string; extras: boolean; files: F[]; kids: Node[]; count: number }
+interface Node { id: string; name: string; files: F[]; kids: Node[]; count: number }
 const build = (folderId: string): Node => {
   const f = places.folders.get(folderId)!;
   const own = files.filter((x) => x.folder_id === folderId);
   const kids = places.children(folderId).map((c) => build(c.id));
-  return { id: folderId, name: places.folderName(f, t), extras: !!f.extras, files: own, kids, count: own.length + kids.reduce((n, k) => n + k.count, 0) };
+  return { id: folderId, name: places.folderName(f, t), files: own, kids, count: own.length + kids.reduce((n, k) => n + k.count, 0) };
 };
 const tree = home ? build(home.id) : null;
 const flat: { depth: number; node?: Node; file?: F; parent: string | null }[] = [];
@@ -125,7 +121,7 @@ const walk = (node: Node, depth: number, parent: string | null) => {
   for (const k of node.kids) walk(k, depth + 1, node.id);
 };
 if (tree) walk(tree, 0, null);
-const folderRole = (node: Node, depth: number) => (depth === 0 ? 'root' : node.extras ? 'extras' : 'plain');
+const folderRole = (depth: number) => (depth === 0 ? 'root' : 'plain');
 // What the tagged downloads are called (the team's template, lib/naming.ts), and a few rows to try templates on.
 const ctx = withTracks ? await editionContext(edition.id) : null;
 if (ctx) await preloadOriginals(ctx, files.map((f) => f.sha256));
@@ -151,7 +147,9 @@ const namingData = ctx
 const firstTrackFile = ctx?.rows.map((r) => files.find((x) => x.track_id === r.track_id && x.kind === 'audio')).find((f) => !!f);
 const sampleName = firstTrackFile ? taggedNames.get(firstTrackFile.id) ?? null : null;
 const coverable = (f: F) => (f.kind === 'image' && /^(jpe?g|png)$/i.test(f.ext)) || f.kind === 'audio';
-const looseRoot = home ? files.filter((f) => f.folder_id === home.id && f.kind !== 'audio').length : 0;
+// 「整理非音频文件…」 offers the files directly in the edition's folder that are not audio, nor an archive kept whole.
+const loose = (f: F) => f.folder_id === home?.id && f.kind !== 'audio' && !f.sealed;
+const looseRoot = files.filter(loose).length;
 const rowOfTrack = new Map(editor.rows.map((r) => [r.track_id, r]));
 // Pictures for an edition without tracks: a gallery, and its cover.
 const images = files.filter((f) => f.kind === 'image' && f.state !== 'ignored');
@@ -325,12 +323,10 @@ const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
         <div class="files-bar-idle">
           <button type="button" data-files-act="new-folder" title="Ctrl+Shift+N">{t('＋ 新建文件夹')}</button>
           <a class="button" href={`/admin/upload?place=${folderKey(home.id)}`}>{t('上传到本版…')}</a>
-          {withTracks && extras && looseRoot > 0 && (
-            <form method="post" class="inline">
-              <input type="hidden" name="section" value="extras" />
-              <input type="hidden" name="anchor" value="files" />
-              <button type="submit" title={t('把本版根目录里的 {n} 个非音频文件（LOG、CUE、图片、说明等）一次移进「{name}」', { n: looseRoot, name: extras.name })}>{t('整理到附件')}</button>
-            </form>
+          {withTracks && looseRoot > 0 && (
+            <button type="button" data-files-act="tidy" title={t('把本版根目录里的 {n} 个非音频文件（LOG、CUE、图片、说明等）一次移进一个文件夹：可以选已有的，也可以新建', { n: looseRoot })}>
+              {t('整理非音频文件…')}
+            </button>
           )}
           <span class="muted small">{t('勾选文件或文件夹后可以移动、重命名、忽略、删除；也可以右键，或把它们拖到文件夹上。')}</span>
         </div>
@@ -356,14 +352,13 @@ const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
         <tbody>
           {flat.map(({ depth, node, file: f, parent }) => node ? (
             <tr
-              class="folder-row" data-key={`d:${node.id}`} data-role={folderRole(node, depth)} data-name={node.name} data-parent={parent ?? ''}
-              data-depth={depth} draggable={folderRole(node, depth) === 'plain' ? 'true' : undefined}
+              class="folder-row" data-key={`d:${node.id}`} data-role={folderRole(depth)} data-name={node.name} data-parent={parent ?? ''}
+              data-depth={depth} draggable={folderRole(depth) === 'plain' ? 'true' : undefined}
             >
               <td class="sel">{depth > 0 && <input type="checkbox" data-sel aria-label={t('选择 {name}', { name: node.name })} />}</td>
               <td style={`--depth:${depth}`} class="tree-name">
-                <FolderIcon kind={node.extras ? 'extras' : depth === 0 ? 'edition' : 'plain'} />
+                <FolderIcon kind={depth === 0 ? 'edition' : 'plain'} />
                 <a class="fname" href={`/admin/inbox?loc=${folderKey(node.id)}`} title={t('在整理台中显示')}>{node.name}</a>
-                {node.extras && <span class="muted small"> {t('（版本自带，可改名）')}</span>}
               </td>
               <td colspan="4" class="muted small">{node.count ? t('{n} 个文件', { n: node.count }) : t('空文件夹')}</td>
               <td class="row-menu"><button type="button" class="link" data-row-menu aria-label={t('更多操作')} title={t('更多操作')}>⋯</button></td>
@@ -373,7 +368,7 @@ const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
               class:list={['file-row', { muted: f.state === 'ignored' || !!f.old }]} data-key={`f:${f.id}`} data-kind={f.kind} data-ext={f.ext}
               data-name={f.download_name || f.name} data-orig={f.name} data-origin={f.origin} data-parent={parent ?? ''} data-state={f.state}
               data-row={rowOfFile.get(f.id)} data-cover={coverable(f) ? '1' : undefined} data-tagged={taggedNames.has(f.id) ? '1' : undefined}
-              data-blob={f.blob_key ? '1' : undefined} draggable="true"
+              data-blob={f.blob_key ? '1' : undefined} data-loose={loose(f) ? kindLabel(f.kind) : undefined} draggable="true"
             >
               <td class="sel"><input type="checkbox" data-sel aria-label={t('选择 {name}', { name: f.download_name || f.name })} /></td>
               <td style={`--depth:${depth}`} class="tree-name">
@@ -401,7 +396,7 @@ const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
   <form method="post" class="panel danger-zone" id="ed-delete">
     <input type="hidden" name="section" value="delete" />
     <b>{t('删除版本')}</b>
-    <p class="muted">{t('只能删除没有文件、没有文件夹的版本（空的附件文件夹一起删除）；它的曲目表一并删除，可在修改记录里撤销。')}</p>
+    <p class="muted">{t('只能删除没有文件的版本（里面的空文件夹一起删除）；它的曲目表一并删除，可在修改记录里撤销。')}</p>
     <button class="danger" type="submit" disabled={files.length > 0}>{t('删除这个版本')}</button>
   </form>
 
@@ -414,6 +409,32 @@ const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
   </div>
   <PlacePicker places={places} />
   <Dialogs types={places.types} />
+  {home && (
+    <dialog id="dlg-tidy" class="dlg">
+      <form method="dialog">
+        <h3>{t('整理非音频文件')}</h3>
+        <p class="muted small">{t('把本版根目录里的非音频文件（LOG、CUE、图片、说明等）移进一个文件夹。勾选要移动的种类，再选放进哪个文件夹。')}</p>
+        <fieldset class="tidy-set">
+          <legend>{t('移动哪些')}</legend>
+          <div data-kinds></div>
+        </fieldset>
+        <fieldset class="tidy-set">
+          <legend>{t('放进')}</legend>
+          <div data-folders></div>
+          <label class="inline-check tidy-new">
+            <input type="radio" name="tidy-target" value="new" /> {t('新建文件夹')}
+            <input type="text" data-new maxlength="200" aria-label={t('新文件夹名称')} />
+          </label>
+          <p class="muted small">{t('新文件夹建在本版根目录；那里已有同名文件夹时，文件直接放进它。')}</p>
+        </fieldset>
+        <p class="err-line" data-err></p>
+        <div class="dlg-buttons">
+          <button value="cancel">{t('取消')}</button>
+          <button value="ok" class="primary" data-ok>{t('移动')}</button>
+        </div>
+      </form>
+    </dialog>
+  )}
   {namingData && (
     <dialog id="dlg-naming" class="dlg wide">
       <form method="dialog">
@@ -455,7 +476,7 @@ const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
           <div class="pick-grid" data-grid></div>
           <div class="upload-box" data-upload hidden>
             <input type="file" accept="image/jpeg,image/png" data-file />
-            <span class="muted small">{t('上传的图片放进本版的附件文件夹。')}</span>
+            <span class="muted small">{t('上传的图片放在本版根目录，之后可以在「文件」里移到别的文件夹。')}</span>
           </div>
           <div class="form-grid compact">
             <label>{t('用于')}</label>

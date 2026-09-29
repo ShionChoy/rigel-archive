@@ -2,7 +2,7 @@
 //   GET ?op=candidates[&q=<words>]   candidates, best first
 //   GET ?op=release&ref=<id or link>  one candidate in full (tags in Picard's names, per track)
 //   GET ?op=cover-info&url=<image>    an online cover's size in pixels and bytes
-//   POST {"op": "cover", "url": …, "fallback": …}  store an online cover in the edition's 附件 → {id}
+//   POST {"op": "cover", "url": …, "fallback": …}  store an online cover in the edition's folder → {id}
 import type { APIRoute } from 'astro';
 import { fromAdminPage, json, readJson } from '../../../../lib/api';
 import { db, type EditionRow, type ReleaseRow } from '../../../../lib/db';

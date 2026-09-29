@@ -123,7 +123,7 @@ export async function createEdition(actor: string, release: ReleaseRow, form: Fo
   return id;
 }
 
-/** The folder of an edition made in `cs` (in the 整理台 tree, under its release's folder), with its 附件. */
+/** The folder of an edition made in `cs` (in the 整理台 tree, under its release's folder). */
 export async function addEditionFolder(cs: ChangeSet, id: string, releaseId: string, row: Record<string, unknown>) {
   const places = await Places.load();
   places.addEdition({
@@ -151,16 +151,18 @@ export async function saveEdition(actor: string, release: ReleaseRow, edition: E
 export async function deleteEdition(actor: string, release: ReleaseRow, edition: EditionRow): Promise<void> {
   const database = db();
   const places = await Places.load(database);
+  // Its folder and the empty folders in it go with it (the undo brings them back); files have to be moved first.
   const folder = places.editionFolder(edition.id);
-  const extras = places.extrasOf(edition.id);
-  // Its folder and the empty 附件 go with it; anything else in it has to be moved first.
-  const others = folder ? places.subtree(folder.id).filter((id) => id !== folder.id && id !== extras?.id) : [];
-  const used = await database.prepare('SELECT count(*) AS files FROM files WHERE edition_id = ?1').bind(edition.id).first<{ files: number }>();
-  if (used?.files || others.length) throw new UserError('版本里还有文件或文件夹，先移走它们');
+  const folders = folder ? places.subtree(folder.id) : [];
+  const used = await database
+    .prepare('SELECT count(*) AS files FROM files WHERE edition_id = ?1 OR folder_id IN (SELECT value FROM json_each(?2))')
+    .bind(edition.id, JSON.stringify(folders))
+    .first<{ files: number }>();
+  if (used?.files) throw new UserError('版本里还有文件，先移走它们');
   const cs = new ChangeSet(database, actor, summary('作品 {release}：删除版本 {edition}', { release: label(release), edition: edition.name || places.types.get(edition.slot)?.name_zh || edition.slot }));
-  if (folder) {
-    const list = [extras?.id, folder.id].filter((id): id is string => !!id);
-    cs.deleteWhere('folder', 't.id IN (SELECT value FROM json_each(?1))', [JSON.stringify(list)], '(SELECT j.key FROM json_each(?1) j WHERE j.value = t.id)');
+  if (folders.length) {
+    // Children first (the undo restores them parents first).
+    cs.deleteWhere('folder', 't.id IN (SELECT value FROM json_each(?1))', [JSON.stringify([...folders].reverse())], '(SELECT j.key FROM json_each(?1) j WHERE j.value = t.id)');
   }
   const { results: rows } = await database.prepare('SELECT id FROM edition_tracks WHERE edition_id = ?').bind(edition.id).all<{ id: string }>();
   for (const r of rows) await cs.delete('edition_track', { id: r.id });

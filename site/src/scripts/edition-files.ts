@@ -322,7 +322,7 @@ function startRename(key: string) {
     const value = input.value.trim();
     box.remove();
     link.hidden = false;
-    row.draggable = row.dataset.role !== 'root' && row.dataset.role !== 'extras';
+    row.draggable = row.dataset.role !== 'root';
     if (save && value && value !== stem) {
       if (isFile(key)) await run(() => renameFiles([[idOf(key), value + ext]]), { keep: true });
       else await run(() => folderOp({ op: 'rename', id: idOf(key), name: value }), { keep: true });
@@ -471,7 +471,7 @@ function menuFor(sel: Sel): MenuEntry[] {
   }
   entries.push('-', {
     label: t('删除'), keys: 'Delete', danger: true, run: () => remove(sel),
-    disabled: role === 'root' ? t('版本在页面底部删除') : fixed ? t('附件文件夹随版本一起删除') : false,
+    disabled: fixed ? t('版本在页面底部删除') : false,
   });
   return entries;
 }
@@ -544,6 +544,93 @@ async function namingDialog() {
     if (!r.ok) toast(String(r.err ?? t('保存失败')), { error: true });
     else toast(String(r.msg ?? ''));
   }, { keep: true });
+}
+
+// ------------------------------------------------------------------------------------------ 整理非音频文件
+
+/**
+ * The non-audio files directly in the edition's folder (LOG, CUE, scans, notes; not archives kept whole),
+ * by kind, into a folder of the edition or a new one under its root: one move, undone as one.
+ */
+async function tidyDialog() {
+  const d = $<HTMLDialogElement>('#dlg-tidy');
+  if (!d || busy) return;
+  const loose = rows().filter((r) => isFile(r.dataset.key!) && r.dataset.parent === home() && r.dataset.loose);
+  if (!loose.length) return;
+  const form = $<HTMLFormElement>('form', d)!;
+  const ok = $<HTMLButtonElement>('[data-ok]', d)!;
+  const err = $('[data-err]', d)!;
+  const name = $<HTMLInputElement>('[data-new]', d)!;
+  // The kinds, with their files and extensions.
+  const kinds = new Map<string, { label: string; ids: string[]; exts: Set<string> }>();
+  for (const r of loose) {
+    const k = kinds.get(r.dataset.kind ?? '') ?? { label: r.dataset.loose!, ids: [], exts: new Set<string>() };
+    k.ids.push(idOf(r.dataset.key!));
+    if (r.dataset.ext) k.exts.add(r.dataset.ext.toLowerCase());
+    kinds.set(r.dataset.kind ?? '', k);
+  }
+  $('[data-kinds]', d)!.replaceChildren(...[...kinds].map(([kind, k]) => {
+    const label = document.createElement('label');
+    const box = Object.assign(document.createElement('input'), { type: 'checkbox', checked: true, value: kind });
+    box.dataset.kind = kind;
+    const exts = Object.assign(document.createElement('span'), { className: 'muted small', textContent: [...k.exts].sort().join(t('、')) });
+    for (const part of [box, document.createTextNode(` ${k.label} ${t('{n} 个', { n: k.ids.length })} `), exts]) label.appendChild(part);
+    return label;
+  }));
+  // The edition's folders, by their path below its root.
+  const folders = inEditionFolders().filter((f) => f.role === 'plain');
+  const pathOf = (id: string): string => {
+    const row = rowOf(`d:${id}`);
+    const parent = row?.dataset.parent ?? '';
+    const own = row?.dataset.name ?? '';
+    return parent && parent !== home() ? `${pathOf(parent)} / ${own}` : own;
+  };
+  $('[data-folders]', d)!.replaceChildren(...folders.map((f) => {
+    const label = document.createElement('label');
+    const radio = Object.assign(document.createElement('input'), { type: 'radio', name: 'tidy-target', value: f.id });
+    for (const part of [radio, document.createTextNode(` ${pathOf(f.id)}`)]) label.appendChild(part);
+    return label;
+  }));
+  // A folder named 附件 right under the root is the likely place; else a new one, named 附件 to start with.
+  const usual = t('附件');
+  const same = folders.find((f) => f.depth === 1 && f.name === usual);
+  name.value = usual;
+  for (const r of $$<HTMLInputElement>('input[name="tidy-target"]', form)) r.checked = r.value === (same?.id ?? 'new');
+  const chosen = () => $$<HTMLInputElement>('input[data-kind]', form).filter((b) => b.checked).flatMap((b) => kinds.get(b.value)?.ids ?? []);
+  const target = () => $<HTMLInputElement>('input[name="tidy-target"]:checked', form)?.value ?? 'new';
+  const render = () => {
+    const n = chosen().length;
+    const newName = name.value.trim();
+    const problem = !n
+      ? t('至少勾选一种')
+      : target() === 'new' && !newName ? t('文件夹名称不能为空')
+        : target() === 'new' && newName.includes('/') ? t('文件夹名称里不能有「/」') : '';
+    err.textContent = problem;
+    ok.disabled = !!problem;
+    ok.textContent = t('移动 {n} 个文件', { n });
+  };
+  const onInput = (e: Event) => {
+    if (e.target === name) $<HTMLInputElement>('input[name="tidy-target"][value="new"]', form)!.checked = true;
+    render();
+  };
+  form.addEventListener('input', onInput);
+  // Enter in the name moves (the form's first button is 取消).
+  name.onkeydown = (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (!ok.disabled) d.close('ok');
+  };
+  render();
+  const choice = await new Promise<string>((resolve) => {
+    d.returnValue = '';
+    d.addEventListener('close', () => resolve(d.returnValue), { once: true });
+    d.showModal();
+  });
+  form.removeEventListener('input', onInput);
+  if (choice !== 'ok' || !chosen().length) return;
+  const where = target();
+  if (where === 'new') await moveTo({ files: chosen(), folders: [] }, folderKey(home()), name.value.trim());
+  else await moveTo({ files: chosen(), folders: [] }, folderKey(where));
 }
 
 // ------------------------------------------------------------------------------------------ wiring
@@ -625,6 +712,7 @@ function init() {
         case 'delete': remove(sel); break;
         case 'clear': clearSelection(); break;
         case 'naming': namingDialog(); break;
+        case 'tidy': tidyDialog(); break;
         case 'more': {
           const r = el.getBoundingClientRect();
           openMenu(menuFor(sel), r.left, r.bottom + 4);

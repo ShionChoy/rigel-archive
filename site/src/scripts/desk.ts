@@ -12,7 +12,7 @@ import {
 } from './desk-ui';
 
 type Kind = 'plain' | 'era' | 'release' | 'edition';
-interface FolderOpt { id: string; parent: string | null; kind: Kind; name: string; path: string; release?: string; edition?: string; extras?: boolean }
+interface FolderOpt { id: string; parent: string | null; kind: Kind; name: string; path: string; release?: string; edition?: string }
 interface DeskData {
   loc: string;
   view: string;
@@ -108,7 +108,6 @@ function placeProblem(id: string, parent: string | null): string | null {
   const f = folders.get(id);
   if (!f) return t('找不到这个文件夹');
   if (parent && (parent === id || ancestorsOf(parent).some((a) => a.id === id))) return t('不能把文件夹移到它自己里面');
-  if (f.extras) return f.parent === parent ? null : t('附件文件夹不能移出所在的版本');
   if (f.kind === 'era') return parent ? t('名义只能放在最顶层') : null;
   if (f.kind === 'edition') return parent && folders.get(parent)?.kind === 'release' ? null : t('版本只能放在作品的下一层');
   if (f.kind === 'release' || below(id).some((x) => x.kind === 'release')) {
@@ -914,21 +913,21 @@ function folderMenu(id: string, inTree: boolean): MenuEntry[] {
     { label: t('新建子文件夹'), keys: 'Ctrl+Shift+N', run: () => newFolder(key) },
     { label: t('批量新建子文件夹…'), run: async () => { const text = await batchBox(f.path); if (text) await folderOp({ op: 'create_many', under: key, text }); } },
     { label: t('重命名'), keys: 'F2', run: () => startRename(id), disabled: many ? t('一次只能重命名一个') : false },
-    { label: t('移动到…'), run: () => pickAndMove(what), disabled: f.kind === 'era' ? t('名义只能放在最顶层') : f.extras ? t('附件文件夹不能移出所在的版本') : false },
-    { label: t('合并到…'), run: () => mergeInto(id), disabled: f.kind !== 'plain' ? t('只有普通文件夹可以合并到别的文件夹') : f.extras ? t('附件文件夹不能移出所在的版本') : many ? t('一次合并一个') : false },
-    { label: t('剪切'), keys: 'Ctrl+X', run: () => cut(what), disabled: f.extras ? t('附件文件夹不能移出所在的版本') : false },
+    { label: t('移动到…'), run: () => pickAndMove(what), disabled: f.kind === 'era' ? t('名义只能放在最顶层') : false },
+    { label: t('合并到…'), run: () => mergeInto(id), disabled: f.kind !== 'plain' ? t('只有普通文件夹可以合并到别的文件夹') : many ? t('一次合并一个') : false },
+    { label: t('剪切'), keys: 'Ctrl+X', run: () => cut(what) },
     ...(clipboard ? [{ label: t('粘贴到这里'), keys: 'Ctrl+V', run: async () => { const c = clipboard!; clipboard = null; await moveTo(c, key); } }] : []),
     { label: t('上移'), keys: 'Ctrl+[', run: () => shift(id, -1) },
     { label: t('下移'), keys: 'Ctrl+]', run: () => shift(id, 1) },
     { label: t('子文件夹按默认顺序排列'), run: () => folderOp({ op: 'reorder', under: key, order: null }, { quiet: true }) },
     '-',
-    { label: f.kind === 'plain' ? t('设为名义、作品或版本…') : t('改回普通文件夹…'), run: () => setType(id), disabled: f.extras ? t('附件文件夹不能设为其他类型') : false },
+    { label: f.kind === 'plain' ? t('设为名义、作品或版本…') : t('改回普通文件夹…'), run: () => setType(id) },
     { label: t('颜色'), swatches: colors.map((c) => ({ color: c, label: colorLabel[c], on: false, run: () => folderOp({ op: 'color', id, color: c }, { quiet: true }) })) },
     { label: pinned ? t('移出快速访问') : t('加入快速访问'), run: () => folderOp({ op: pinned ? 'unpin' : 'pin', id }, { quiet: true }) },
     ...(f.release ? [{ label: t('打开作品页'), run: () => (location.href = `/admin/releases/${f.release}`) }] : []),
     ...(f.edition ? [{ label: t('打开版本页'), run: () => (location.href = `/admin/editions/${f.edition}`) }] : []),
     '-',
-    { label: t('删除'), keys: 'Delete', danger: true, run: () => deleteSelection(inTree ? { files: [], folders: [id] } : what), disabled: f.extras ? t('附件文件夹随版本一起删除') : false },
+    { label: t('删除'), keys: 'Delete', danger: true, run: () => deleteSelection(inTree ? { files: [], folders: [id] } : what) },
   ];
 }
 

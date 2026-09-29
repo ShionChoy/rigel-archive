@@ -40,7 +40,7 @@ export interface ReleaseInfo {
   state: string;
 }
 export type EditionInfo = Pick<EditionRow, 'id' | 'release_id' | 'slot' | 'name' | 'catalog_no' | 'release_date' | 'status' | 'sort' | 'is_default'>;
-export type FolderInfo = Pick<FolderRow, 'id' | 'parent_id' | 'type' | 'era_id' | 'release_id' | 'edition_id' | 'name' | 'description' | 'readme_file_id' | 'color' | 'sort' | 'extras'>;
+export type FolderInfo = Pick<FolderRow, 'id' | 'parent_id' | 'type' | 'era_id' | 'release_id' | 'edition_id' | 'name' | 'description' | 'readme_file_id' | 'color' | 'sort'>;
 
 /** The era, release and edition a folder belongs to (its own entity included). */
 export interface Context {
@@ -72,9 +72,6 @@ export const IS_ARCHIVE = "(files.kind IN ('archive', 'disc_image') OR json_extr
 const MAX_DEPTH = 64;
 const collator = new Intl.Collator('ja', { numeric: true });
 
-/** The default name of an edition's attachments folder (the admins may rename it). */
-export const EXTRAS_NAME = '附件';
-
 export function split(key: string): [string, string] {
   const at = key.indexOf(':');
   return at < 0 ? [key, ''] : [key.slice(0, at), key.slice(at + 1)];
@@ -99,7 +96,7 @@ export class Places {
       database.prepare('SELECT id, name, sort FROM eras ORDER BY sort'),
       database.prepare('SELECT id, era_id, catalog_no, title, release_date, kind, state FROM releases'),
       database.prepare('SELECT id, release_id, slot, name, catalog_no, release_date, status, sort, is_default FROM editions'),
-      database.prepare('SELECT id, parent_id, type, era_id, release_id, edition_id, name, description, readme_file_id, color, sort, extras FROM folders'),
+      database.prepare('SELECT id, parent_id, type, era_id, release_id, edition_id, name, description, readme_file_id, color, sort FROM folders'),
       database.prepare('SELECT id, name_zh, name_ja, name_en, sort, missing_board FROM slot_types'),
     ]);
     const p = new Places();
@@ -302,21 +299,6 @@ export class Places {
     return this.types.editionLabel(e, t);
   }
 
-  /** The attachments folder of an edition. */
-  extrasOf(editionId: string): FolderInfo | undefined {
-    const folder = this.editionFolder(editionId);
-    return folder ? this.children(folder.id).find((f) => f.extras) : undefined;
-  }
-
-  /** The edition whose attachments folder this is (or is inside), else null. */
-  extrasEdition(folderId: string | null): string | null {
-    for (const f of this.ancestors(folderId)) {
-      if (f.extras) return f.parent_id ? this.folders.get(f.parent_id)?.edition_id ?? null : null;
-      if (f.type !== 'plain') return null;
-    }
-    return null;
-  }
-
   folderName(f: FolderInfo, t: T): string {
     if (f.era_id) return this.eras.get(f.era_id)?.name ?? f.era_id;
     if (f.release_id) return this.releaseLabel(f.release_id);
@@ -351,12 +333,12 @@ export class Places {
   }
 
   /** Every folder in tree order, for the 「移动到…」 picker and the page's scripts. */
-  options(t: T): { key: string; id: string; parent: string | null; path: string; name: string; kind: FolderType; depth: number; extras: boolean }[] {
-    const out: { key: string; id: string; parent: string | null; path: string; name: string; kind: FolderType; depth: number; extras: boolean }[] = [];
+  options(t: T): { key: string; id: string; parent: string | null; path: string; name: string; kind: FolderType; depth: number }[] {
+    const out: { key: string; id: string; parent: string | null; path: string; name: string; kind: FolderType; depth: number }[] = [];
     const walk = (f: FolderInfo, depth: number, prefix: string) => {
       const name = this.folderName(f, t);
       const path = prefix ? `${prefix} / ${name}` : name;
-      out.push({ key: folderKey(f.id), id: f.id, parent: f.parent_id, path, name, kind: f.type, depth, extras: !!f.extras });
+      out.push({ key: folderKey(f.id), id: f.id, parent: f.parent_id, path, name, kind: f.type, depth });
       if (depth < MAX_DEPTH) for (const c of this.children(f.id)) walk(c, depth + 1, path);
     };
     for (const f of this.children(null)) walk(f, 0, '');
@@ -387,7 +369,6 @@ export interface LocNode {
   color: string | null;
   status?: string; // editions: collected / missing …
   readme?: boolean;
-  extras?: boolean; // an edition's attachments folder
 }
 
 /** The folder tree with file counts (visible files). */
@@ -410,7 +391,6 @@ export async function folderTree(places: Places, t: T): Promise<LocNode[]> {
       color: f.color,
       status: f.edition_id ? places.editions.get(f.edition_id)?.status : undefined,
       readme: !!f.readme_file_id,
-      extras: !!f.extras,
     };
   };
   return places.children(null).map((f) => build(f, 0));
@@ -442,29 +422,8 @@ export function parentIdOf(places: Places, key: string): string | null {
   return f.id;
 }
 
-export function plainFolder(id: string, parentId: string | null, name: string, sort: number, extras = 0): FolderInfo {
-  return { id, parent_id: parentId, type: 'plain', era_id: null, release_id: null, edition_id: null, name, description: null, readme_file_id: null, color: null, sort, extras };
-}
-
-/**
- * The attachments folder of the edition folder `folderId`, made in `cs` when it has none: a plain folder
- * named 附件 there becomes it, else a new one is made. Returns its id.
- */
-export function ensureExtras(cs: ChangeSet, places: Places, folderId: string, direct = false): string {
-  const kids = places.children(folderId);
-  const found = kids.find((f) => f.extras);
-  if (found) return found.id;
-  const named = kids.find((f) => f.type === 'plain' && f.name === EXTRAS_NAME);
-  if (named) {
-    cs.updateKnown('folder', { id: named.id }, { extras: 0 }, { extras: 1 });
-    places.updateFolder(named.id, { extras: 1 });
-    return named.id;
-  }
-  const row = plainFolder(newId('fd'), folderId, EXTRAS_NAME, 0, 1);
-  if (direct) cs.create('folder', { ...row });
-  else cs.queueCreate('folder', { ...row });
-  places.addFolder(row);
-  return row.id;
+export function plainFolder(id: string, parentId: string | null, name: string, sort: number): FolderInfo {
+  return { id, parent_id: parentId, type: 'plain', era_id: null, release_id: null, edition_id: null, name, description: null, readme_file_id: null, color: null, sort };
 }
 
 /**
@@ -498,7 +457,7 @@ export function ensureEntityFolder(cs: ChangeSet, places: Places, key: string, d
   if (found) return found.id;
   const [kind, id] = split(key);
   const make = (parentId: string | null, entity: Pick<FolderInfo, 'era_id' | 'release_id' | 'edition_id'>, type: FolderType): string => {
-    const row: FolderInfo = { id: newId('fd'), parent_id: parentId, type, name: '', description: null, readme_file_id: null, color: null, sort: 0, extras: 0, ...entity };
+    const row: FolderInfo = { id: newId('fd'), parent_id: parentId, type, name: '', description: null, readme_file_id: null, color: null, sort: 0, ...entity };
     // Queued rows are inserted before everything else in the batch; `direct` keeps the order of the calls,
     // for an entity made with cs.create just before.
     if (direct) cs.create('folder', { ...row });
@@ -513,12 +472,7 @@ export function ensureEntityFolder(cs: ChangeSet, places: Places, key: string, d
   }
   if (kind === 'ed') {
     const e = places.editions.get(id);
-    if (e) {
-      // Every edition comes with its attachments folder.
-      const folder = make(ensureEntityFolder(cs, places, `rel:${e.release_id}`, direct), { era_id: null, release_id: null, edition_id: id }, 'edition');
-      ensureExtras(cs, places, folder, direct);
-      return folder;
-    }
+    if (e) return make(ensureEntityFolder(cs, places, `rel:${e.release_id}`, direct), { era_id: null, release_id: null, edition_id: id }, 'edition');
   }
   throw new UserError('找不到这个位置');
 }

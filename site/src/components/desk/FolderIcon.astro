@@ -1,6 +1,5 @@
 ---
-// The icon of a folder: its type (普通 / 名义 / 作品 / 版本, or an edition's 附件) as the shape, its colour
-// when one is set.
+// The icon of a folder: its type (普通 / 名义 / 作品 / 版本) as the shape, its colour when one is set.
 interface Props {
   kind: string;
   color?: string | null;
@@ -21,12 +20,6 @@ const { kind, color = null, size = 16 } = Astro.props;
     <>
       <rect x="1.5" y="4.5" width="10" height="10" rx="1.5" fill="currentColor" />
       <path d="M4.5 2h8a1.5 1.5 0 0 1 1.5 1.5v8" fill="none" stroke="currentColor" stroke-width="1.4" />
-    </>
-  )}
-  {kind === 'extras' && (
-    <>
-      <path d="M1.2 3.6c0-.6.5-1.1 1.1-1.1h3.9l1.6 1.7h5.9c.6 0 1.1.5 1.1 1.1v7.6c0 .6-.5 1.1-1.1 1.1H2.3c-.6 0-1.1-.5-1.1-1.1z" fill="currentColor" opacity="0.45" />
-      <path d="M10.3 6.2 6.4 10.1a1.3 1.3 0 0 0 1.8 1.8l4.3-4.3a2.3 2.3 0 0 0-3.2-3.2L5 8.7a3.3 3.3 0 0 0 4.7 4.7l3.4-3.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
     </>
   )}
   {kind === 'plain' && <path d="M1.2 3.6c0-.6.5-1.1 1.1-1.1h3.9l1.6 1.7h5.9c.6 0 1.1.5 1.1 1.1v7.6c0 .6-.5 1.1-1.1 1.1H2.3c-.6 0-1.1-.5-1.1-1.1z" fill="currentColor" />}

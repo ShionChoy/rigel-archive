@@ -9,7 +9,7 @@ import { chosenForm, kindOf, loadForms } from './forms';
 import { summary, UserError, type Params, type T } from './i18n';
 import { newId } from './ids';
 import {
-  FOLDER_COLORS, Places, TOP, UNPLACED, checkFolderName, ensureExtras, ensureFolder, folderKey, markEditionsCollected,
+  FOLDER_COLORS, Places, TOP, UNPLACED, checkFolderName, ensureFolder, folderKey, markEditionsCollected,
   nextSort, type Context, type FolderInfo, type FolderType,
 } from './locations';
 import { NEW_TYPE, addType } from './types';
@@ -295,7 +295,6 @@ export async function moveFolders(actor: string, ids: string[], under: string, m
   const list = roots(places, ids).filter((id) => places.folders.get(id)!.parent_id !== parentId);
   if (list.length === 0) return { summary: summary('没有改动'), changed: 0, batchId: null };
   for (const id of list) {
-    if (places.folders.get(id)!.extras) throw new UserError('附件文件夹不能移出所在的版本');
     const problem = placeProblem(places, id, parentId);
     if (problem) throw problem;
   }
@@ -331,7 +330,6 @@ export async function mergeFolder(actor: string, id: string, into: string, t: T)
   const target = places.folderOf(into);
   if (!target) throw new UserError('找不到这个位置');
   if (from.type !== 'plain') throw new UserError('只有普通文件夹可以合并到别的文件夹');
-  if (from.extras) throw new UserError('附件文件夹不能移出所在的版本');
   if (target.id === id || places.subtree(id).includes(target.id)) throw new UserError('不能把文件夹合并到它自己里面');
   for (const c of places.children(id)) {
     const problem = placeProblem(places, c.id, target.id);
@@ -371,7 +369,6 @@ export async function deleteFolders(actor: string, ids: string[], confirmed: boo
   for (const id of list) {
     const f = places.folders.get(id)!;
     const name = places.folderName(f, t);
-    if (f.extras) throw new UserError('附件文件夹不能单独删除，删除版本时会一起删除（可以删除它里面的文件夹）');
     if (f.type === 'plain' && places.hasBelow(id, ['era', 'release', 'edition'])) throw new UserError('「{name}」里有作品，先移走或删除作品', { name });
     if (f.type === 'era' && places.hasBelow(id, ['release'])) throw new UserError('名义「{name}」里还有作品，不能删除', { name });
     if (f.release_id && places.releases.get(f.release_id)?.state === 'published') throw new UserError('作品「{name}」已发布，先改回草稿再删除', { name });
@@ -471,7 +468,6 @@ export async function setFolderType(actor: string, id: string, type: FolderType,
   const database = db();
   const f = mustFolder(places, id);
   if (f.type === type) return { summary: summary('没有改动'), changed: 0, batchId: null, id };
-  if (f.extras) throw new UserError('附件文件夹不能设为其他类型');
   if (f.type !== 'plain' && type !== 'plain') throw new UserError('先改回普通文件夹，再设为其他类型');
   const label = places.folderName(f, t);
   const cs = new ChangeSet(database, actor, summary('文件夹 {name} 设为{type}', { name: label, type: t(type === 'plain' ? '普通文件夹' : type === 'era' ? '名义' : type === 'release' ? '作品' : '版本') }));
@@ -519,7 +515,6 @@ export async function setFolderType(actor: string, id: string, type: FolderType,
     cs.updateKnown('folder', { id }, row(f), { type: 'edition', edition_id: editionId });
     places.addEdition(edition);
     places.updateFolder(id, { type: 'edition', edition_id: editionId });
-    ensureExtras(cs, places, id, true);
     const after = places.context(id);
     refile(cs, places, free, before, after);
     await markFilled(cs, places, free, after);
@@ -541,8 +536,6 @@ export async function setFolderType(actor: string, id: string, type: FolderType,
     for (const x of typed) {
       cs.updateKnown('folder', { id: x.id }, row(x), { type: 'plain', era_id: null, release_id: null, edition_id: null, name: places.folderName(x, t) });
     }
-    // The editions' attachments folders become ordinary folders.
-    for (const x of sub.map((k) => places.folders.get(k)!).filter((x) => x.extras)) cs.updateKnown('folder', { id: x.id }, row(x), { extras: 0 });
     const editions = typed.map((x) => x.edition_id).filter((e): e is string => !!e);
     if (editions.length) {
       cs.deleteWhere('edition_track', 't.edition_id IN (SELECT value FROM json_each(?1))', [JSON.stringify(editions)]);

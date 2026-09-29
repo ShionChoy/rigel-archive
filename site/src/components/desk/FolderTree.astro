@@ -27,7 +27,7 @@ const statusText: Record<string, string> = { missing: '缺档', partial: '部分
         <li class:list={['fnode', { open: open.has(node.key), leaf: node.children.length === 0 }]} data-id={node.id} role="treeitem" aria-expanded={node.children.length ? (open.has(node.key) ? 'true' : 'false') : undefined}>
           <div class:list={['frow', { current: current === node.key, zero: node.n === 0 }]} data-folder={node.id} data-kind={node.kind} data-drop="folder" draggable="true" style={`--depth:${depth}`}>
             <button type="button" class:list={['twisty', { none: node.children.length === 0 }]} tabindex="-1" aria-label={t('展开或收起')} />
-            <FolderIcon kind={node.extras ? 'extras' : node.kind} color={node.color} />
+            <FolderIcon kind={node.kind} color={node.color} />
             <a class="fname" href={`/admin/inbox?loc=${node.key}`} data-nav>{node.name}</a>
             {node.status && statusText[node.status] && <span class={`chip ${node.status}`}>{t(statusText[node.status])}</span>}
             {issues.length > 0 && <span class="issue" title={issues.map((i) => t(i)).join(t('；'))}>!</span>}

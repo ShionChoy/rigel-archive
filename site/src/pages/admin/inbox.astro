@@ -252,7 +252,7 @@ const deskData = {
   layout,
   folders: places.options(t).map((o) => {
     const f = places.folders.get(o.id)!;
-    return { id: o.id, parent: o.parent, kind: o.kind, name: o.name, path: o.path, release: f.release_id ?? undefined, edition: f.edition_id ?? undefined, extras: o.extras || undefined };
+    return { id: o.id, parent: o.parent, kind: o.kind, name: o.name, path: o.path, release: f.release_id ?? undefined, edition: f.edition_id ?? undefined };
   }),
   quick,
   smart: smartFolders.map((s) => ({ id: s.id, name: s.name, rules: s.rules })),
@@ -294,7 +294,7 @@ const done = overall.total - overall.left;
           {quickFolders.map((f) => (
             <li>
               <div class:list={['frow', 'quick-row', { current: q.loc === folderKey(f!.id) }]} data-folder={f!.id} data-kind={f!.type} data-drop="folder" data-quick draggable="true">
-                <FolderIcon kind={f!.extras ? 'extras' : f!.type} color={f!.color} />
+                <FolderIcon kind={f!.type} color={f!.color} />
                 <a class="fname" href={folderHref(folderKey(f!.id))} data-nav title={places.path(folderKey(f!.id), t)}>{places.folderName(f!, t)}</a>
                 <span class="n">{byKey.get(folderKey(f!.id))?.n || ''}</span>
               </div>
@@ -422,7 +422,7 @@ const done = overall.total - overall.left;
               const node = byKey.get(folderKey(f.id));
               return (
                 <div class:list={['tile', 'item-folder']} role="listitem" tabindex="-1" data-folder={f.id} data-kind={f.type} data-drop="folder" draggable="true">
-                  <FolderIcon kind={f.extras ? 'extras' : f.type} color={f.color} size={28} />
+                  <FolderIcon kind={f.type} color={f.color} size={28} />
                   <a class="tname" href={folderHref(folderKey(f.id))} data-nav tabindex="-1">{places.folderName(f, t)}</a>
                   <span class="muted small">
                     {t('{n} 个', { n: node?.n ?? 0 })}

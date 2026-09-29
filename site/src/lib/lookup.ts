@@ -1,7 +1,7 @@
 // 「查找元数据」 on the edition page: candidates from MusicBrainz (and the release's Bandcamp page), and a
 // candidate's full data as tags in Picard's names, for the page to compare with the edition's tracks and
 // take item by item. Nothing here changes the catalog except storing an online cover (into the
-// edition's 附件, as the page's cover dialog would).
+// edition's own folder, as the page's cover dialog would).
 
 import { env } from 'cloudflare:workers';
 import { ChangeSet } from './changes';
@@ -9,7 +9,7 @@ import { db, type EditionRow, type ReleaseRow } from './db';
 import { parseIds } from './editions';
 import { summary, UserError } from './i18n';
 import { newId } from './ids';
-import { Places } from './locations';
+import { Places, ensureEntityFolder, folderKey } from './locations';
 import { MBID, MB_UA, bandcampAlbum, mbCandidates, mbGet, scoreCandidate, type MbCandidate } from './metadata';
 import type { Tags } from './tagging/model';
 import { concat, imageSize } from './tagging/bytes';
@@ -333,7 +333,7 @@ export async function coverInfo(url: string): Promise<CoverInfo> {
 }
 
 /**
- * Fetch an online cover and file it in the edition's 附件 (like an upload). Returns the picture file's id.
+ * Fetch an online cover and file it in the edition's own folder (like an upload). Returns the picture file's id.
  * An original over 30 MB is taken as its large copy (`fallback`) instead.
  */
 export async function storeOnlineCover(actor: string, edition: EditionRow, release: ReleaseRow, url: string, fallback?: string | null): Promise<string> {
@@ -356,14 +356,12 @@ export async function storeOnlineCover(actor: string, edition: EditionRow, relea
   const database = db();
   const existing = await database.prepare('SELECT id FROM files WHERE sha256 = ? AND edition_id = ?').bind(sha, edition.id).first<{ id: string }>();
   if (existing) return existing.id;
-  const places = await Places.load(database);
-  const extras = places.extrasOf(edition.id);
-  if (!extras) throw new UserError('这个版本没有附件文件夹');
-  const place = places.place(`fd:${extras.id}`);
   const source = /coverartarchive|archive\.org/.test(url) ? 'Cover Art Archive' : 'Bandcamp';
   const id = newId('f');
   const name = `cover (${source}).${ext}`;
   const cs = new ChangeSet(database, actor, summary('版本 {edition}：取回在线封面（{source}）', { edition: `${release.catalog_no ?? release.title} ${edition.name}`.trim(), source }));
+  const places = await Places.load(database);
+  const place = places.place(folderKey(ensureEntityFolder(cs, places, `ed:${edition.id}`)));
   cs.createFiles([{
     id, origin: 'upload', source_path: null, dir: '后台上传/封面', member_of: null, member_path: null, name, ext, size: bytes.length,
     mtime: new Date().toISOString(), sha256: sha, blob_key: key, kind: 'image', format: JSON.stringify({ width: size.width, height: size.height }),
@@ -382,7 +380,7 @@ export async function storeOnlineCover(actor: string, edition: EditionRow, relea
  * (each row with the release's tags, linked to the release's track it already is, by recording or title,
  * else a new one); an edition that has one keeps its order and titles, and its rows whose titles agree
  * get the release's identifiers. The edition records the release, its date, catalog number and track
- * count; the cover, when asked, goes into its 附件 and onto its rows.
+ * count; the cover, when asked, goes into its folder and onto its rows.
  */
 export async function importOnline(actor: string, release: ReleaseRow & { era_name?: string }, edition: EditionRow, online: OnlineRelease, withCover: boolean): Promise<number> {
   const database = db();

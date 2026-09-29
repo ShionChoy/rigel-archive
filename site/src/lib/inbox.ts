@@ -5,7 +5,7 @@ import { db, parseSuggestion, type Suggestion } from './db';
 import { deleteFiles, planDelete, type DeletePlan } from './deletion';
 import { newId } from './ids';
 import {
-  Places, TOP, UNPLACED, UNPLACED_SQL, VISIBLE, applyPatches, ensureEntityFolder, ensureExtras, ensureFolder, folderKey, locationWhere,
+  Places, TOP, UNPLACED, UNPLACED_SQL, VISIBLE, applyPatches, ensureEntityFolder, ensureFolder, folderKey, locationWhere,
   markEditionsCollected, moveFiles, placePatch, sealArchives,
 } from './locations';
 import { presetOf, ruleSetSql, type SmartFolder } from './smart';
@@ -224,8 +224,8 @@ export interface ActionResult {
 const UNPLACE = { release_id: null, edition_id: null, folder_id: null, slot: null, track_id: null };
 
 /**
- * The edition of this type and name of a release (with its folder and 附件), made in `cs` when missing
- * (its id is added to `created`).
+ * The edition of this type and name of a release (with its folder), made in `cs` when missing (its id is
+ * added to `created`).
  */
 export function ensureEdition(cs: ChangeSet, places: Places, releaseId: string, slot: string, name: string, catalog: string | null, created?: string[]): string {
   const found = [...places.editions.values()].find((e) => e.release_id === releaseId && e.slot === slot && e.name === name);
@@ -239,25 +239,19 @@ export function ensureEdition(cs: ChangeSet, places: Places, releaseId: string, 
   return id;
 }
 
-/** Where a rule suggests a file: an edition (made when missing) and the folders under it. */
-export interface SuggestedEdition {
-  edition: string;
-  folder: string[];
-}
-
 /**
- * Where a suggestion puts a file (making the edition or folders it names), or null for nowhere. A
- * suggestion into an edition is returned as such (the caller decides between the edition and its 附件).
+ * Where a suggestion puts a file (making the edition or folders it names), or null for nowhere. Only the
+ * folders the rule names are made: an edition's files go into its own folder unless the rule says more.
  */
-export function suggestedPlace(cs: ChangeSet, places: Places, s: Suggestion, created?: string[]): string | SuggestedEdition | null {
+export function suggestedPlace(cs: ChangeSet, places: Places, s: Suggestion, created?: string[]): string | null {
   const folder = s.folder ? s.folder.split('/').filter(Boolean) : [];
   if (s.place && s.place !== UNPLACED && (s.place === TOP || places.exists(s.place))) {
     if (folder.length) return folderKey(ensureFolder(cs, places, s.place, folder));
     return s.place === TOP ? null : folderKey(ensureEntityFolder(cs, places, s.place));
   }
   if (s.release_id && places.releases.has(s.release_id)) {
-    if (s.slot) return { edition: ensureEdition(cs, places, s.release_id, s.slot, s.edition ?? '', s.edition_catalog ?? null, created), folder };
-    const key = folderKey(ensureEntityFolder(cs, places, `rel:${s.release_id}`));
+    const entity = s.slot ? `ed:${ensureEdition(cs, places, s.release_id, s.slot, s.edition ?? '', s.edition_catalog ?? null, created)}` : `rel:${s.release_id}`;
+    const key = folderKey(ensureEntityFolder(cs, places, entity));
     return folder.length ? folderKey(ensureFolder(cs, places, key, folder)) : key;
   }
   if (folder.length) {
@@ -377,29 +371,6 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
       const patches = new Map<string, Record<string, unknown>>();
       const readmes: [string, string][] = [];
       const made: string[] = [];
-      const targets = new Map<string, string | SuggestedEdition | null>();
-      for (const row of rows) {
-        const s = suggestions.get(row.id);
-        if (!s || inside.has(row.id) || s.state === 'ignored') continue;
-        targets.set(row.id, suggestedPlace(cs, places, s, made));
-      }
-      // Into an edition that has audio (already, or filed in this same step), what is not audio (LOG, CUE,
-      // scans, notes …) goes to its 附件, keeping the folders the rule named below it; an edition without
-      // audio (scans, PV) takes everything directly.
-      const isAudio = (row: Record<string, unknown>) => row.kind === 'audio' || isArchive(row);
-      const intoEditions = [...new Set([...targets.values()].filter((v): v is SuggestedEdition => !!v && typeof v === 'object').map((v) => v.edition))];
-      const withAudio = new Set<string>();
-      if (intoEditions.length) {
-        const { results } = await database
-          .prepare("SELECT DISTINCT edition_id FROM files WHERE edition_id IN (SELECT value FROM json_each(?)) AND kind = 'audio' AND sealed_in IS NULL AND state != 'ignored'")
-          .bind(JSON.stringify(intoEditions))
-          .all<{ edition_id: string }>();
-        for (const r of results) withAudio.add(r.edition_id);
-        for (const row of rows) {
-          const target = targets.get(row.id);
-          if (target && typeof target === 'object' && row.kind === 'audio') withAudio.add(target.edition);
-        }
-      }
       for (const row of rows) {
         const s = suggestions.get(row.id);
         if (!s || inside.has(row.id)) continue;
@@ -407,13 +378,7 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
           patches.set(row.id, { ...UNPLACE, state: 'ignored' });
           continue;
         }
-        const target = targets.get(row.id) ?? null;
-        let key: string | null;
-        if (target && typeof target === 'object') {
-          const edition = folderKey(ensureEntityFolder(cs, places, `ed:${target.edition}`));
-          const base = !isAudio(row) && withAudio.has(target.edition) ? folderKey(ensureExtras(cs, places, places.folderOf(edition)!.id)) : edition;
-          key = target.folder.length ? folderKey(ensureFolder(cs, places, base, target.folder)) : base;
-        } else key = target;
+        const key = suggestedPlace(cs, places, s, made);
         const patch: Record<string, unknown> = key ? placePatch(row as never, places.place(key)) : {};
         if (s.rights) patch.rights = s.rights;
         if (s.role) patch.role = s.role;
