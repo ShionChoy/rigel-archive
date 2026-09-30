@@ -66,10 +66,9 @@ export interface EditionTrackRow {
   disc: number;
   position: number;
   track_id: string;
-  title: string | null;
   duration_ms: number | null;
   external_ids: string;
-  tags: string; // JSON: the row's tags over the file's own (lib/tagging/model.ts)
+  tags: string; // JSON: the row's tags (its title among them) over the file's own (lib/tagging/model.ts)
   cover: string | null; // JSON: the row's chosen cover (lib/tags.ts parseCover)
 }
 
@@ -188,20 +187,6 @@ export function parseSuggestion(raw: string | null): Suggestion | null {
   } catch {
     return null;
   }
-}
-
-/** The patch that "accept suggestion" applies, or null when the suggestion decides nothing. */
-export function suggestionPatch(s: Suggestion | null): Record<string, string | null> | null {
-  if (!s) return null;
-  if (s.state === 'ignored') return { state: 'ignored' };
-  if (!s.release_id && !s.rights) return null;
-  return {
-    release_id: s.release_id ?? null,
-    slot: s.slot ?? null,
-    rights: s.rights ?? 'unknown',
-    role: s.role ?? null,
-    state: 'classified',
-  };
 }
 
 export interface ReleaseOption {

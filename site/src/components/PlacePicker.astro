@@ -5,11 +5,13 @@ import type { Places } from '../lib/locations';
 
 interface Props {
   places: Places;
+  /** false: the page carries the folders already (the 整理台's #desk-data); the picker reads them from there. */
+  options?: boolean;
 }
 
-const { places } = Astro.props;
+const { places, options: embed = true } = Astro.props;
 const { t } = Astro.locals;
-const options = [
+const options = !embed ? [] : [
   { key: 'top', path: t('顶层'), kind: 'top', depth: 0 },
   ...places.options(t).map((o) => ({ key: o.key, path: o.path, kind: o.kind, depth: o.depth + 1 })),
 ];
@@ -30,5 +32,5 @@ const options = [
       <button class="primary" value="ok" type="submit" data-ok disabled>{t('移动到这里')}</button>
     </div>
   </form>
-  <script type="application/json" data-options set:html={JSON.stringify(options).replace(/</g, '\\u003c')} />
+  {embed && <script type="application/json" data-options set:html={JSON.stringify(options).replace(/</g, '\\u003c')} />}
 </dialog>

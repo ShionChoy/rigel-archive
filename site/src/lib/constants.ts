@@ -103,8 +103,6 @@ export function mimeFor(ext: string): string {
   return MIME[ext.toLowerCase()] ?? 'application/octet-stream';
 }
 
-export const ORIGIN_LABELS: Record<string, string> = { nas: N_('合辑'), upload: N_('后台上传') };
-
 /** Top folder of uploaded files in the 整理台 tree. */
 export const UPLOAD_ROOT = '后台上传';
 

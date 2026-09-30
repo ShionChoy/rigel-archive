@@ -96,7 +96,7 @@ const covers = await editionCovers([...firstCollected.values()].filter((x): x is
                   {editions.length === 0 && <span class="muted">—</span>}
                 </div>
               </td>
-              <td class="num"><a href={`/admin/inbox?state=all&release=${r.id}`}>{r.files}</a></td>
+              <td class="num"><a href={`/admin/inbox?loc=rel:${r.id}&sub=1`}>{r.files}</a></td>
             </tr>
           );
         })

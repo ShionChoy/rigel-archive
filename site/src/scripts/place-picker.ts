@@ -60,8 +60,16 @@ export function resetPickerOptions() {
 
 export function pickerOptions(): Option[] {
   if (!options) {
-    const raw = document.querySelector('#place-picker [data-options]')?.textContent ?? '[]';
-    options = (JSON.parse(raw) as Option[]).map((o) => ({ ...o, folded: fold(o.path) }) as Option);
+    const own = document.querySelector('#place-picker [data-options]')?.textContent;
+    // The 整理台 does not repeat its folders for the picker: they are in its #desk-data, in tree order.
+    const list: Option[] = own
+      ? (JSON.parse(own) as Option[])
+      : [
+        { key: 'top', path: t('顶层'), kind: 'top', depth: 0 },
+        ...((JSON.parse(document.querySelector('#desk-data')?.textContent ?? '{}') as { folders?: { id: string; path: string; kind: string; depth: number }[] }).folders ?? [])
+          .map((f) => ({ key: `fd:${f.id}`, path: f.path, kind: f.kind, depth: f.depth + 1 })),
+      ];
+    options = list.map((o) => ({ ...o, folded: fold(o.path) }) as Option);
   }
   return options;
 }

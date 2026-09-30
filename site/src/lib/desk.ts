@@ -2,10 +2,10 @@
 // files; and the 回收站 (files deleted recently, restored by undoing their deletion).
 
 import { editionCovers } from './covers';
-import { db, parseFormat, parseSuggestion, type FileRow, type Suggestion } from './db';
+import { db, parseSuggestion, type FileRow, type Suggestion } from './db';
 import { formName } from './forms';
 import type { T } from './i18n';
-import { folderKey, type FolderInfo, type Places } from './locations';
+import { IS_ARCHIVE, folderKey, type FolderInfo, type Places } from './locations';
 
 export interface FolderStats {
   own: number; // files directly in it
@@ -100,7 +100,7 @@ export async function fileView(id: string): Promise<FileView | null> {
   const row = await db()
     .prepare(
       `SELECT f.*,
-              (SELECT coalesce(et.title, t.title) FROM tracks t LEFT JOIN edition_tracks et ON et.track_id = t.id AND et.edition_id = f.edition_id WHERE t.id = f.track_id) AS track_title,
+              (SELECT coalesce(json_extract(et.tags, '$.title[0]'), t.title) FROM tracks t LEFT JOIN edition_tracks et ON et.track_id = t.id AND et.edition_id = f.edition_id WHERE t.id = f.track_id) AS track_title,
               EXISTS (SELECT 1 FROM edition_tracks et WHERE et.edition_id = f.edition_id) AS edition_has_tracks,
               CASE WHEN f.sha256 IS NULL THEN 1 ELSE (SELECT count(*) FROM files c WHERE c.sha256 = f.sha256) END AS copies,
               (SELECT count(*) FROM files m WHERE m.sealed_in = f.id) AS members,
@@ -136,7 +136,7 @@ export async function filesSummary(ids: string[]): Promise<FilesSummary> {
       .prepare(
         `SELECT count(*) AS count, coalesce(sum(size), 0) AS bytes, sum(folder_id IS NOT NULL) AS placed,
                 sum(suggest IS NOT NULL AND folder_id IS NULL) AS suggested,
-                sum(kind IN ('archive', 'disc_image') OR json_extract(format, '$.archive') IS NOT NULL) AS archives,
+                sum(${IS_ARCHIVE}) AS archives,
                 sum(sealed = 1) AS sealed, sum(origin = 'upload') AS uploads, sum(state = 'ignored') AS ignored
          FROM files WHERE id IN (SELECT value FROM json_each(?))`,
       )
@@ -179,7 +179,3 @@ export async function trashBatches(graceDays: number): Promise<TrashBatch[]> {
   return results.map((r) => ({ ...r, names: (r.names ?? '').slice(0, 300) }));
 }
 
-/** A short description of a file's format for a row (kept here so the page and the inspector agree). */
-export function fileFormat(row: Pick<FileRow, 'format'>) {
-  return parseFormat(row.format);
-}

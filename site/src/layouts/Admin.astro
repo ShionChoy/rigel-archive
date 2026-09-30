@@ -23,6 +23,7 @@ const here = (() => {
 
 // Icons (24×24, drawn with the text colour); the collapsed side bar shows only these.
 const ICONS = {
+  home: '<rect x="4" y="4" width="7" height="8" rx="1.5"/><rect x="13" y="4" width="7" height="5" rx="1.5"/><rect x="13" y="11" width="7" height="9" rx="1.5"/><rect x="4" y="14" width="7" height="6" rx="1.5"/>',
   inbox: '<path d="M3.5 13.5h4.5l1.5 2.5h5l1.5-2.5h4.5"/><path d="M5.5 5h13l2 8.5V19h-17v-5.5z"/>',
   upload: '<path d="M12 15.5V4"/><path d="M7.5 8.5 12 4l4.5 4.5"/><path d="M4.5 15v4.5h15V15"/>',
   release: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2.5"/>',
@@ -32,7 +33,8 @@ const ICONS = {
   storage: '<ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V6"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/>',
   team: '<circle cx="9" cy="8.5" r="3.2"/><path d="M3 19.5c0-3.4 2.7-5.6 6-5.6s6 2.2 6 5.6"/><path d="M15.5 5.5a3.2 3.2 0 0 1 0 6.2"/><path d="M17.5 14.2c2 .6 3.5 2.4 3.5 5.3"/>',
 };
-const nav = [
+const nav: { href: string; label: string; icon: string; also?: string[]; exact?: boolean }[] = [
+  { href: '/admin', label: t('概览'), icon: ICONS.home, exact: true },
   { href: '/admin/inbox', label: t('整理台'), icon: ICONS.inbox },
   { href: '/admin/upload', label: t('上传'), icon: ICONS.upload },
   { href: '/admin/releases', label: t('作品'), icon: ICONS.release, also: ['/admin/types', '/admin/editions'] },
@@ -72,7 +74,7 @@ const nav = [
     <div class="shell">
       <nav class="side">
         <div class="side-head">
-          <a class="brand" href="/admin/inbox" title="Rigël Archive">
+          <a class="brand" href="/admin" title="Rigël Archive">
             <span class="brand-mark" aria-hidden="true">R</span>
             <span class="brand-text">Rigël Archive<small>{t('管理后台')}</small></span>
           </a>
@@ -85,7 +87,7 @@ const nav = [
           {
             nav.map((item) => (
               <li>
-                <a href={item.href} aria-current={[item.href, ...(item.also ?? [])].some((p) => path.startsWith(p)) ? 'page' : undefined} title={item.label}>
+                <a href={item.href} aria-current={(item.exact ? path.replace(/\/$/, '') === item.href : [item.href, ...(item.also ?? [])].some((p) => path.startsWith(p))) ? 'page' : undefined} title={item.label}>
                   <svg viewBox="0 0 24 24" class="nav-icon" aria-hidden="true" set:html={item.icon} />
                   <span class="label">{item.label}</span>
                 </a>
@@ -128,7 +130,15 @@ const nav = [
         <slot />
       </main>
     </div>
+    <dialog id="jump" class="dlg jump" aria-label={t('跳转')}>
+      <input type="search" placeholder={t('跳转到作品、版本、乐曲、文件夹或文件…')} aria-label={t('跳转到')} autocomplete="off" />
+      <ul role="listbox"></ul>
+      <p class="muted small">{t('↑ ↓ 选择 · Enter 打开 · Esc 关闭')}</p>
+    </dialog>
     <script>
+      import { initJump } from '../scripts/jump';
+      initJump();
+
       // The theme buttons (the choice is kept in this browser).
       const buttons = [...document.querySelectorAll<HTMLButtonElement>('[data-theme-choice]')];
       const current = () => document.documentElement.dataset.theme ?? 'auto';

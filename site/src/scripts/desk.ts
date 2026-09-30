@@ -7,12 +7,16 @@ import { initPreviews as initPreviewsIn } from './previews';
 import { initTextPreviews as initTextIn } from './text-preview';
 import { openPicker, recentPlaces, rememberPlace, resetPickerOptions } from './place-picker';
 import {
-  batchBox, closeMenu, confirmBox, conflictBox, guideBox, helpBox, openMenu, previewBox, renameBox, smartBox, toast, typeBox,
+  batchBox, closeMenu, confirmBox, guideBox, helpBox, openMenu, previewBox, renameBox, smartBox, toast, typeBox,
   type MenuEntry, type RenameFile, type RuleSet,
 } from './desk-ui';
+import {
+  fileRequest, folderRequest, lastBatch, moreQueued, nameNewFolder, postJson, queued, renameInPlace, renameRequest, report, undoRequest,
+  type Reply,
+} from './file-ops';
 
 type Kind = 'plain' | 'era' | 'release' | 'edition';
-interface FolderOpt { id: string; parent: string | null; kind: Kind; name: string; path: string; release?: string; edition?: string }
+interface FolderOpt { id: string; parent: string | null; kind: Kind; name: string; raw: string; path: string; depth: number; release?: string; edition?: string }
 interface DeskData {
   loc: string;
   view: string;
@@ -42,7 +46,6 @@ const initTextPreviews = (el: Element) => initTextIn(el as unknown as ParentNode
 let data: DeskData;
 let folders = new Map<string, FolderOpt>();
 let kids = new Map<string | null, string[]>();
-let lastBatch: string | null = null;
 let clipboard: { files: string[]; folders: string[] } | null = null;
 let anchor: HTMLElement | null = null;
 let baseInspector = '';
@@ -119,94 +122,57 @@ function placeProblem(id: string, parent: string | null): string | null {
 }
 
 // ------------------------------------------------------------------------------------------ talking to the server
-
-async function postJson(path: string, body: unknown): Promise<Record<string, unknown>> {
-  try {
-    const r = await fetch(path, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json', 'x-admin-request': '1' },
-      body: JSON.stringify(body),
-    });
-    return (await r.json()) as Record<string, unknown>;
-  } catch (e) {
-    return { ok: false, err: String(e) };
-  }
-}
-
-let busy = false;
+// Every action goes through one queue (scripts/file-ops.ts): a key pressed while the last action is still
+// running waits for it. The page is fetched again after the last action waiting.
 
 /** A folder operation; asks about same-name folders and confirmations, then shows the result. */
-async function folderOp(body: Record<string, unknown>, opts: { quiet?: boolean; after?: (r: Record<string, unknown>) => void } = {}): Promise<boolean> {
-  if (busy) return false;
-  busy = true;
-  try {
-    let r = await postJson('/admin/desk/folder', body);
-    if (!r.ok && Array.isArray(r.conflict)) {
-      const mode = await conflictBox(r.conflict as string[]);
-      if (!mode) return false;
-      r = await postJson('/admin/desk/folder', { ...body, mode });
-    }
-    if (!r.ok && typeof r.confirm === 'string') {
-      if (!(await confirmBox(r.confirm, t('确定删除')))) return false;
-      r = await postJson('/admin/desk/folder', { ...body, confirmed: true });
-    }
-    if (!r.ok) {
-      toast(String(r.err ?? t('操作失败')), { error: true });
-      return false;
-    }
-    lastBatch = (r.batch as string | null) ?? lastBatch;
-    if (!opts.quiet || r.batch) toast(String(r.msg ?? ''), { batch: r.batch as string | null, onUndo: undo });
-    await refresh();
+function folderOp(body: Record<string, unknown>, opts: { quiet?: boolean; after?: (r: Reply) => void } = {}): Promise<boolean> {
+  return queued(async () => {
+    const r = await folderRequest(body);
+    if (!r) return false;
+    if (!opts.quiet || r.batch) report(r);
+    if (!moreQueued()) await refresh();
     opts.after?.(r);
     return true;
-  } finally {
-    busy = false;
-  }
+  });
+}
+
+/** The files an action is about: these, or every file of the list when 「全部」 is ticked. */
+function scopeAll(): boolean {
+  return !!$<HTMLInputElement>('[data-scope-all]')?.checked;
 }
 
 /** A file action (the 整理台's own POST): on the given files, or on the whole list when 「全部」 is ticked. */
-async function fileAction(action: string, ids: string[], extra: Record<string, string> = {}): Promise<boolean> {
-  const all = $<HTMLInputElement>('[data-scope-all]')?.checked;
+function fileAction(action: string, ids: string[], extra: Record<string, string> = {}): Promise<boolean> {
+  const all = scopeAll();
   if (!all && ids.length === 0) {
     toast(t('先选中文件'), { error: true });
-    return false;
+    return Promise.resolve(false);
   }
-  if (busy) return false;
-  busy = true;
-  const body = new FormData();
-  body.append('action', action);
-  if (all) body.append('scope', 'filter');
-  else for (const id of ids) body.append('ids', id);
-  for (const [k, v] of Object.entries(extra)) body.append(k, v);
-  toast(t('处理中…'));
-  try {
-    const r = await fetch(`/admin/inbox${location.search}`, { method: 'POST', body, headers: { accept: 'application/json', 'x-admin-request': '1' } });
-    const j = (await r.json().catch(() => ({ ok: false, err: t('操作失败') }))) as { ok: boolean; msg?: string; err?: string; batch?: string | null };
-    if (!j.ok) {
-      toast(j.err ?? t('操作失败'), { error: true });
-      return false;
+  const search = location.search;
+  return queued(async () => {
+    // A large 「按建议归档」 shows what it will do first: which editions and folders it makes, where the files go.
+    if (action === 'accept' && (all || ids.length > 20)) {
+      toast(t('正在估算…'));
+      const plan = await fileRequest(action, ids, { ...extra, preview: '1' }, { all, search });
+      if (!plan) return false;
+      $('#desk-toast')!.hidden = true;
+      if (!(await confirmBox(String(plan.msg ?? ''), t('按建议归档')))) return false;
     }
-    lastBatch = j.batch ?? lastBatch;
-    toast(j.msg ?? '', { batch: j.batch ?? null });
-    await refresh(true);
+    toast(t('处理中…'));
+    const r = await fileRequest(action, ids, extra, { all, search });
+    if (!r) return false;
+    report(r);
+    if (!moreQueued()) await refresh(true);
     return true;
-  } finally {
-    busy = false;
-  }
+  });
 }
 
-async function undo(batch: string | null = lastBatch) {
-  if (!batch) {
-    toast(t('没有可以撤销的操作'), { error: true });
-    return;
-  }
-  const body = new FormData();
-  body.append('batch', batch);
-  const r = await fetch('/admin/history', { method: 'POST', body, headers: { accept: 'application/json' } });
-  const j = (await r.json().catch(() => ({ ok: false, err: t('撤销失败') }))) as { ok: boolean; msg?: string; err?: string };
-  toast(j.ok ? j.msg ?? t('已撤销') : j.err ?? t('撤销失败'), { error: !j.ok });
-  if (j.ok && batch === lastBatch) lastBatch = null;
-  await refresh();
+function undo(batch?: string | null) {
+  return queued(async () => {
+    const r = await undoRequest(batch || lastBatch());
+    if (r.ok && !moreQueued()) await refresh();
+  });
 }
 
 // ------------------------------------------------------------------------------------------ loading parts of the page
@@ -215,15 +181,16 @@ let loading = 0;
 
 /**
  * Show another folder or list (push = a new history entry), or the same one again after a change
- * (keep = keep the selection and the place in the list).
+ * (keep = keep the selection and the place in the list). Moving around asks only for the middle and the
+ * inspector; after an action (`all`) the sidebar comes too, with its new counts.
  */
-async function load(href: string, push: boolean, keep = false) {
+async function load(href: string, push: boolean, keep = false, all = keep) {
   const token = ++loading;
   const focusAt = keep ? selectables().indexOf(document.activeElement as HTMLElement) : -1;
   const kept = keep ? selectedKeys() : [];
   const scroll = $('#desk-content')?.scrollTop ?? 0;
   const sideScroll = $('#desk-side')?.scrollTop ?? 0;
-  const r = await fetch(href, { headers: { accept: 'text/html' } }).catch(() => null);
+  const r = await fetch(href, { headers: { accept: 'text/html', ...(all ? {} : { 'x-desk-part': 'main' }) } }).catch(() => null);
   if (token !== loading) return;
   if (!r || !r.ok) {
     location.href = href;
@@ -243,11 +210,18 @@ async function load(href: string, push: boolean, keep = false) {
     const here = $(sel);
     if (next && here) here.replaceWith(document.importNode(next, true));
   }
-  $('#desk-data')!.textContent = doc.querySelector('#desk-data')?.textContent ?? '{}';
-  const picker = doc.querySelector('#place-picker [data-options]');
-  if (picker) $('#place-picker [data-options]')!.textContent = picker.textContent;
-  resetPickerOptions();
-  readData();
+  const next = JSON.parse(doc.querySelector('#desk-data')?.textContent ?? '{}') as Partial<DeskData> & { partial?: boolean };
+  if (next.partial) {
+    // Only this view's part: the folders, smart folders and the rest stay as they are.
+    delete next.partial;
+    $('#desk-data')!.textContent = JSON.stringify({ ...data, ...next });
+    readData();
+    markCurrent();
+  } else {
+    $('#desk-data')!.textContent = JSON.stringify(next);
+    resetPickerOptions();
+    readData();
+  }
   afterSwap();
   if (keep) {
     $('#desk-content')!.scrollTop = scroll;
@@ -267,7 +241,18 @@ async function load(href: string, push: boolean, keep = false) {
   syncSource();
 }
 
-const refresh = (keep = false) => load(location.pathname + location.search, false, keep);
+const refresh = (keep = false) => load(location.pathname + location.search, false, keep, true);
+
+/** After moving to another folder or list without the sidebar: mark where we are in it. */
+function markCurrent() {
+  const id = currentFolder();
+  for (const a of $$('.desk-side .fixed a.entry')) a.classList.toggle('current', !data.loc && !data.dir && a.dataset.view === data.view);
+  const here = `/admin/inbox?view=${encodeURIComponent(data.view)}`;
+  for (const a of $$('.desk-side .smart a.entry')) a.classList.toggle('current', !data.loc && a.getAttribute('href') === here);
+  if (data.view.startsWith('p:')) $<HTMLDetailsElement>('.desk-side details.presets')?.setAttribute('open', '');
+  for (const row of $$('.desk-side .frow')) row.classList.toggle('current', !!id && row.dataset.folder === id);
+  if (id) revealInTree(id);
+}
 
 /** What every freshly shown part needs. */
 function afterSwap() {
@@ -410,6 +395,19 @@ async function syncSource() {
   if (r.ok) $('[data-source-body]')!.innerHTML = await r.text();
 }
 
+/** A closed original folder comes without its subfolders; opening it fetches them (one level). */
+function initSourceTree() {
+  // `toggle` does not bubble: listen while it goes down.
+  document.addEventListener('toggle', async (ev) => {
+    const d = ev.target as HTMLElement;
+    if (!(d instanceof HTMLDetailsElement) || !d.open || !d.dataset.lazy || !d.closest('[data-source-body]')) return;
+    const path = d.dataset.lazy;
+    delete d.dataset.lazy;
+    const r = await fetch(`/admin/desk/source?under=${encodeURIComponent(path)}&dir=${encodeURIComponent(data.dir)}`);
+    if (r.ok) d.insertAdjacentHTML('beforeend', await r.text());
+  }, true);
+}
+
 // ------------------------------------------------------------------------------------------ selection
 
 const selectables = () => $$('#desk-content .item, #desk-content .tile[data-folder]');
@@ -536,7 +534,7 @@ async function moveTo(what: { files: string[]; folders: string[] }, key: string,
     const ok = await folderOp({ op: 'move', ids: what.folders, under: newFolder ? await ensureFolderKey(key, newFolder) : key });
     if (!ok) return;
   }
-  if (what.files.length || $<HTMLInputElement>('[data-scope-all]')?.checked) {
+  if (what.files.length || scopeAll()) {
     await fileAction('move', what.files, { target: key, new_folder: newFolder, keep: '__none__' });
   }
   if (key !== 'top') rememberPlace(key);
@@ -549,7 +547,7 @@ async function ensureFolderKey(under: string, name: string): Promise<string> {
 }
 
 async function pickAndMove(what: { files: string[]; folders: string[] }) {
-  if (!what.files.length && !what.folders.length && !$<HTMLInputElement>('[data-scope-all]')?.checked) {
+  if (!what.files.length && !what.folders.length && !scopeAll()) {
     toast(t('先选中文件或文件夹'), { error: true });
     return;
   }
@@ -579,54 +577,66 @@ function freeName(parent: string | null, base: string): string {
   for (let i = 2; ; i += 1) if (!taken.has(`${base} (${i})`)) return `${base} (${i})`;
 }
 
+/** New folder: its name is asked for where it will appear, then it is made (one step, one history entry). */
 async function newFolder(under: string) {
   const parent = under === 'top' ? null : under.slice(3);
-  const name = freeName(parent, t('新建文件夹'));
-  await folderOp({ op: 'create', under, name }, {
-    quiet: true,
-    after: (r) => startRename(String(r.id)),
-  });
+  const name = await askFolderName(parent, freeName(parent, t('新建文件夹')));
+  if (name) await folderOp({ op: 'create', under, name });
+}
+
+/** A tile in the open folder, or a row in the tree under its parent, with a text box for the new name. */
+function askFolderName(parent: string | null, value: string): Promise<string | null> {
+  const icon = () => document.querySelector('.desk-side .frow[data-kind="plain"] svg, #desk-content .tile[data-kind="plain"] svg')?.cloneNode(true);
+  const tiles = parent && parent === currentFolder() ? $('#desk-content .tiles') : null;
+  if (tiles) {
+    const holder = document.createElement('div');
+    holder.className = 'tile item-folder';
+    const i = icon();
+    if (i) holder.appendChild(i);
+    holder.appendChild(Object.assign(document.createElement('span'), { className: 'tname' })).dataset.nameSlot = '';
+    return nameNewFolder(tiles, tiles.querySelector('.tile.new'), holder, value);
+  }
+  if (!paneShown('side')) togglePane('side', true);
+  let list = $('.desk-side .folders > ul.ftree');
+  let depth = 0;
+  if (parent) {
+    const li = revealInTree(parent)?.closest<HTMLElement>('li.fnode');
+    if (!li) return Promise.resolve(null);
+    toggleNode(li, true);
+    li.classList.remove('leaf');
+    list = li.querySelector<HTMLElement>(':scope > ul.ftree') ?? li.appendChild(Object.assign(document.createElement('ul'), { className: 'ftree' }));
+    depth = Number(li.querySelector<HTMLElement>(':scope > .frow')?.style.getPropertyValue('--depth') || 0) + 1;
+  }
+  if (!list) return Promise.resolve(null);
+  const holder = document.createElement('li');
+  holder.className = 'fnode leaf';
+  const row = holder.appendChild(document.createElement('div'));
+  row.className = 'frow';
+  row.style.setProperty('--depth', String(depth));
+  row.appendChild(Object.assign(document.createElement('span'), { className: 'twisty none' }));
+  const i = icon();
+  if (i) row.appendChild(i);
+  row.appendChild(document.createElement('span')).dataset.nameSlot = '';
+  return nameNewFolder(list, null, holder, value);
 }
 
 /** Rename in place: the folder's row in the tree (or its tile); Enter saves, Esc cancels. */
-function startRename(id: string) {
+async function startRename(id: string) {
   const f = folders.get(id);
   if (!f) return;
   const tile = $(`#desk-content .tile[data-folder="${id}"] .tname`);
   if (!tile && !paneShown('side')) togglePane('side', true);
-  const row = tile ? null : revealInTree(id)?.querySelector<HTMLElement>('.fname');
-  const target = tile ?? row;
+  const target = tile ?? revealInTree(id)?.querySelector<HTMLElement>('.fname');
   if (!target) return;
-  // A release is renamed by its title (without the catalog number), an edition by its name (without the source).
-  let value = f.name;
-  if (f.kind === 'release') value = f.name.replace(/^[A-Za-z]{2,}[A-Za-z0-9]*-\d+[A-Za-z]?\s+/, '');
-  if (f.kind === 'edition') value = f.name.includes(' · ') ? f.name.split(' · ').slice(1).join(' · ') : '';
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'rename';
-  input.value = value;
-  input.defaultValue = value;
-  input.setAttribute('aria-label', f.kind === 'release' ? t('作品标题') : f.kind === 'edition' ? t('版本名称') : t('新名称'));
-  const old = target.style.display;
-  target.style.display = 'none';
-  target.parentNode!.insertBefore(input, target.nextSibling);
-  input.focus();
-  input.select();
-  let done = false;
-  const finish = async (save: boolean) => {
-    if (done) return;
-    done = true;
-    const value = input.value.trim();
-    input.remove();
-    target.style.display = old;
-    if (save && value !== input.defaultValue && (value || f.kind === 'edition')) await folderOp({ op: 'rename', id, name: value });
-  };
-  input.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') finish(true);
-    if (e.key === 'Escape') finish(false);
+  // A release is renamed by its title (without the catalog number), an edition by its name (without its type):
+  // what the server keeps, not what the tree shows.
+  const name = await renameInPlace(target, {
+    value: f.raw,
+    label: f.kind === 'release' ? t('作品标题') : f.kind === 'edition' ? t('版本名称') : t('新名称'),
+    row: target.closest<HTMLElement>('[draggable]'),
+    allowEmpty: f.kind === 'edition',
   });
-  input.addEventListener('blur', () => finish(true));
+  if (name !== null) await folderOp({ op: 'rename', id, name });
 }
 
 // ------------------------------------------------------------------------------------------ renaming files
@@ -643,63 +653,27 @@ function fileName(el: HTMLElement): RenameFile {
  * Rename files ([id, new name] pairs; only these, whatever 「全部」 says). The server keeps the original
  * name and refuses clashes in a folder. Returns why it failed, or null.
  */
-async function renameFiles(pairs: [string, string][]): Promise<string | null> {
-  const body = new FormData();
-  body.append('action', 'rename');
-  for (const [id] of pairs) body.append('ids', id);
-  body.append('names', JSON.stringify(pairs));
-  const r = await fetch(`/admin/inbox${location.search}`, { method: 'POST', body, headers: { accept: 'application/json', 'x-admin-request': '1' } }).catch(() => null);
-  const j = (await r?.json().catch(() => null)) as { ok: boolean; msg?: string; err?: string; batch?: string | null } | null;
-  if (!j?.ok) return j?.err ?? t('操作失败');
-  lastBatch = j.batch ?? lastBatch;
-  toast(j.msg ?? '', { batch: j.batch ?? null });
-  await refresh(true);
-  return null;
+function renameFiles(pairs: [string, string][]): Promise<string | null> {
+  return queued(async () => {
+    const r = await renameRequest(pairs);
+    if (!r.ok) return r.err ?? t('操作失败');
+    report(r);
+    if (!moreQueued()) await refresh(true);
+    return null;
+  });
 }
 
 /** Rename one file in its row: the name without the extension is edited; Enter saves, Esc cancels. */
-function startFileRename(id: string) {
+async function startFileRename(id: string) {
   const item = $(`#desk-content .item[data-id="${id}"]`);
   const target = item?.querySelector<HTMLElement>('.fn');
   if (!item || !target) return;
   const f = fileName(item);
-  const box = document.createElement('span');
-  box.className = 'rename-box';
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'rename';
-  input.value = f.stem;
-  input.defaultValue = f.stem;
-  input.setAttribute('aria-label', t('新文件名'));
-  const ext = document.createElement('span');
-  ext.className = 'muted';
-  ext.textContent = f.ext;
-  box.appendChild(input);
-  box.appendChild(ext);
-  target.hidden = true;
-  item.draggable = false;
-  target.parentNode!.insertBefore(box, target.nextSibling);
-  input.focus();
-  input.select();
-  let done = false;
-  const finish = async (save: boolean) => {
-    if (done) return;
-    done = true;
-    const value = input.value.trim();
-    box.remove();
-    target.hidden = false;
-    item.draggable = true;
-    focus(item);
-    if (!save || !value || value === f.stem) return;
-    const problem = await renameFiles([[id, value + f.ext]]);
-    if (problem) toast(problem, { error: true });
-  };
-  input.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') finish(true);
-    if (e.key === 'Escape') finish(false);
-  });
-  input.addEventListener('blur', () => finish(true));
+  const value = await renameInPlace(target, { value: f.stem, ext: f.ext, label: t('新文件名'), row: item });
+  focus(item);
+  if (value === null) return;
+  const problem = await renameFiles([[id, value + f.ext]]);
+  if (problem) toast(problem, { error: true });
 }
 
 /** 「批量重命名」: replace text, a template with numbers, or back to the original names. */
@@ -725,27 +699,27 @@ function renameSelection() {
 
 /** 「标签与封面」 of one audio file (what its 整理版 download gets). */
 async function editTags(id: string) {
-  const r = await tagDialog(id);
+  const r = await tagDialog(id, $(`#desk-content .item[data-id="${id}"]`)?.dataset.edition);
   if (!r) return;
   if (!r.ok) {
     toast(r.err ?? t('读取失败'), { error: true });
     return;
   }
-  lastBatch = r.batch ?? lastBatch;
-  toast(r.msg ?? '', { batch: r.batch ?? null });
-  await refresh(true);
+  report({ ok: r.ok, msg: r.msg, batch: r.batch ?? null });
+  await queued(() => refresh(true));
 }
 
 /** 「设为封面」: a picture, or the cover an audio file carries, becomes the cover of every track of its edition. */
-async function makeCover(id: string) {
-  const r = await postJson('/admin/desk/tags', { op: 'cover', file: id });
-  if (!r.ok) {
-    toast(String(r.err ?? t('操作失败')), { error: true });
-    return;
-  }
-  lastBatch = (r.batch as string | null) ?? lastBatch;
-  toast(String(r.msg ?? ''), { batch: r.batch as string | null });
-  await refresh(true);
+function makeCover(id: string) {
+  return queued(async () => {
+    const r = await postJson('/admin/desk/tags', { op: 'cover', file: id });
+    if (!r.ok) {
+      toast(String(r.err ?? t('操作失败')), { error: true });
+      return;
+    }
+    report(r);
+    if (!moreQueued()) await refresh(true);
+  });
 }
 
 /** 「合并到…」: this folder's contents go into the chosen folder, then this folder is removed. */
@@ -788,7 +762,7 @@ async function setType(id: string) {
 
 async function deleteSelection(what: { files: string[]; folders: string[] }) {
   if (what.folders.length) await folderOp({ op: 'delete', ids: what.folders });
-  if (what.files.length || $<HTMLInputElement>('[data-scope-all]')?.checked) await fileAction('discard', what.files);
+  if (what.files.length || scopeAll()) await fileAction('discard', what.files);
 }
 
 async function paste() {
@@ -1245,7 +1219,7 @@ function initClicks() {
       case 'color': folderOp({ op: 'color', id: act.dataset.folder, color: act.dataset.color ?? '' }, { quiet: true }); break;
       case 'open': navigate(`/admin/inbox?loc=${act.dataset.key}`); break;
       case 'undo': undo(act.dataset.batch!); break;
-      case 'undo-toast': undo(act.dataset.batch || lastBatch); break;
+      case 'undo-toast': undo(act.dataset.batch || null); break;
       case 'close-toast': $('#desk-toast')!.hidden = true; break;
       case 'smart-new': editSmart(null); break;
       case 'smart-edit': editSmart(act.dataset.smart!); break;
@@ -1339,7 +1313,10 @@ function initKeys() {
   document.addEventListener('keydown', async (ev) => {
     if (ev.defaultPrevented || document.querySelector('dialog[open]') || !$('#desk-menu')!.hidden) return;
     const target = ev.target as HTMLElement;
-    if (target.closest('input, textarea, select, [contenteditable]')) {
+    // A ticked checkbox (a group's, 「全部」) keeps the focus: Space stays its own, the other keys are the 整理台's.
+    const box = target instanceof HTMLInputElement && target.type === 'checkbox';
+    if (box && ev.key === ' ') return;
+    if (!box && target.closest('input, textarea, select, [contenteditable]')) {
       if (ev.key === 'Escape') target.blur();
       return;
     }
@@ -1436,6 +1413,7 @@ export function initDesk() {
   initResize();
   initDrag();
   initMarquee();
+  initSourceTree();
   syncSource();
   if (!store.get('rigel.deskGuide', false)) setTimeout(guideBox, 400);
 }

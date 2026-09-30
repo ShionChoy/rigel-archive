@@ -5,6 +5,7 @@
 // drag and drop, the keyboard and loading without page reloads; everything also works as plain links.
 import { env } from 'cloudflare:workers';
 import Admin from '../../layouts/Admin.astro';
+import Bare from '../../components/Bare.astro';
 import Dialogs from '../../components/desk/Dialogs.astro';
 import FolderIcon from '../../components/desk/FolderIcon.astro';
 import FolderTree from '../../components/desk/FolderTree.astro';
@@ -19,10 +20,10 @@ import { formatBytes, formatSpec, percent, withParams } from '../../lib/format';
 import { keptMessage, originalGone } from '../../lib/deletion';
 import { errorText, summaryText, UserError, type T } from '../../lib/i18n';
 import {
-  FIXED_VIEWS, applyInboxAction, deskOrder, deskWhere, idsForQuery, parseInboxAction, progress, readDeskQuery, viewCounts,
+  FIXED_VIEWS, applyInboxAction, deskOrder, deskWhere, idsForQuery, parseInboxAction, readDeskQuery, viewCounts,
   type ActionResult, type DeskQuery,
 } from '../../lib/inbox';
-import { Places, folderKey, folderTree, split, type LocNode } from '../../lib/locations';
+import { Places, folderKey, folderTree, isArchive, split, type LocNode } from '../../lib/locations';
 import { guessRelease, loadQuickAccess } from '../../lib/folders';
 import { ORIGINS, PRESETS, RULE_FIELDS, RULE_OPS, SUGGEST_KINDS, loadSmartFolders, presetOf, type RuleSet } from '../../lib/smart';
 import { EDITION_PROBLEMS, editionProblems, type EditionProblem } from '../../lib/checks';
@@ -39,6 +40,9 @@ const url = Astro.url;
 const { t } = Astro.locals;
 const actor = Astro.locals.admin!.email;
 const wantsJson = (Astro.request.headers.get('accept') ?? '').includes('application/json');
+// Moving between folders, the page's script asks only for the middle and the inspector: no sidebar (its counts
+// scan every file), no dialogs, no folder list for the script (it keeps its own until an action changes things).
+const partial = Astro.request.headers.get('x-desk-part') === 'main';
 const database = db();
 
 /** The message shown after an action, in the admin's language. */
@@ -56,8 +60,30 @@ function resultMessage(r: ActionResult, deleting: boolean, tr: T): string {
   const low = r.lowConfidence ? tr('，{n} 个把握度低于 50% 已跳过（请逐个确认或手动移动）', { n: r.lowConfidence }) : '';
   const refused = r.refused?.length ? tr('；{names} 的包内已有文件归档，没有收起（先把它们退回待整理）', { names: r.refused.join('、') }) : '';
   const noType = r.noType ? tr('，{n} 个的建议用到的版本类型已被删除，已跳过（请手动移动）', { n: r.noType }) : '';
-  const created = r.created?.length ? tr('；按建议新建了 {n} 个版本：{names}（可以在作品页改名或删除）', { n: r.created.length, names: r.created.join('、') }) : '';
+  // A long list of new editions is cut short (the whole list is in the history).
+  const names = r.created && r.created.length > 5 ? tr('{names} 等', { names: r.created.slice(0, 5).join('、') }) : r.created?.join('、');
+  const created = r.created?.length ? tr('；按建议新建了 {n} 个版本：{names}（可以在作品页改名或删除）', { n: r.created.length, names }) : '';
   return `${head}${skipped}${low}${noType}${refused}${created}${r.kept ? keptMessage(r.kept, tr) : ''}`;
+}
+
+/** What a large 「按建议归档」 would do (its preview), line by line. */
+function planMessage(r: ActionResult, tr: T): string {
+  const p = r.plan!;
+  const lines = [tr('按建议归档 {n} 个文件：', { n: p.files })];
+  if (r.placed) lines.push(tr('· {n} 个放入位置', { n: r.placed }));
+  if (p.ignored) lines.push(tr('· {n} 个按建议忽略', { n: p.ignored }));
+  if (r.sealed?.archives) lines.push(tr('· {n} 个压缩包整体收藏（{hidden} 个包内文件不再单独整理）', { n: r.sealed.archives, hidden: r.sealed.hidden }));
+  if (p.editions || p.folders) lines.push(tr('· 新建 {editions} 个版本、{folders} 个文件夹', { editions: p.editions, folders: p.folders }));
+  const skipped = r.skipped + r.lowConfidence + (r.noType ?? 0);
+  if (skipped) lines.push(tr('· 跳过 {n} 个（没有可用建议、把握度低于 50%，或建议的版本类型已删除）', { n: skipped }));
+  if (p.where.length) lines.push(tr('主要去向：'), ...p.where.map((w) => `    ${w.path} — ${w.n}`));
+  if (r.created?.length) {
+    const names = r.created.length > 5 ? tr('{names} 等', { names: r.created.slice(0, 5).join('、') }) : r.created.join('、');
+    lines.push(tr('新建的版本：{names}', { names }));
+  }
+  if (r.refused?.length) lines.push(tr('{names} 的包内已有文件归档，不会收起', { names: r.refused.join('、') }));
+  lines.push(tr('执行后可以在修改记录里整批撤销。'));
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------- actions on files (JSON from the page's script, or a plain form)
@@ -76,8 +102,12 @@ if (Astro.request.method === 'POST') {
     }
     if (ids.length === 0) throw new UserError('没有选中文件');
     const r = await applyInboxAction(actor, ids, action, t);
+    if (r.plan) return new Response(JSON.stringify({ ok: true, msg: planMessage(r, t), batch: null }), { headers: { 'content-type': 'application/json' } });
     const msg = action.action === 'rename' && !r.changed ? t('没有改动') : resultMessage(r, ['delete', 'discard', 'note', 'rename'].includes(action.action), t);
     if (wantsJson) return new Response(JSON.stringify({ ok: true, msg, batch: r.batchId, changed: r.changed }), { headers: { 'content-type': 'application/json' } });
+    // 「放入指定位置」 on the upload page: on to the place the files went.
+    const then = places.canonical(String(form.get('then') ?? ''));
+    if (then && then.startsWith('fd:')) return Astro.redirect(withParams(new URL(`/admin/inbox?loc=${then}&sub=1`, url), { msg, undo: r.batchId }), 303);
     return back({ msg, undo: r.batchId });
   } catch (e) {
     const err = errorText(e, t);
@@ -104,7 +134,7 @@ type Row = Pick<
   | 'sha256' | 'format' | 'origin' | 'dup_of' | 'sealed' | 'role' | 'blob_key' | 'created_at'
 > & { copies: number; same_audio: number; gone: number; old: number; recordings: number };
 
-const [totals, rowsResult, counts, tree, quick, problems, overall, forms] = await Promise.all([
+const [totals, rowsResult, counts, tree, quick, problems, forms] = await Promise.all([
   listsFiles
     ? database.prepare(`SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM files ${w.sql}`).bind(...w.binds).first<{ n: number; bytes: number }>()
     : Promise.resolve({ n: 0, bytes: 0 }),
@@ -124,12 +154,11 @@ const [totals, rowsResult, counts, tree, quick, problems, overall, forms] = awai
       .bind(...w.binds, PAGE_SIZE, (page - 1) * PAGE_SIZE)
       .all<Row>()
     : Promise.resolve({ results: [] as Row[] }),
-  viewCounts(),
+  partial ? Promise.resolve(null) : viewCounts(),
   folderTree(places, t),
   loadQuickAccess(actor),
-  editionProblems(),
-  progress(),
-  loadForms(),
+  partial && !preset?.editions ? Promise.resolve(new Map<string, EditionProblem[]>()) : editionProblems(),
+  partial ? Promise.resolve(null) : loadForms(),
 ]);
 const rows = rowsResult.results;
 const total = totals?.n ?? 0;
@@ -179,7 +208,7 @@ const [trash, problemEditions, openFolder, readme] = await Promise.all([
 const viewName = (view: string): string => {
   if (view === 'all') return t('全部');
   if (view === 'unplaced') return t('未归档');
-  if (view === 'suggested') return t('有建议待确认');
+  if (view === 'suggested') return t('可按建议归档');
   if (view === 'ignored') return t('已忽略');
   if (view === 'trash') return t('回收站');
   if (view.startsWith('p:')) return t(presetOf(view.slice(2))?.name ?? view);
@@ -205,7 +234,7 @@ const ruleText = (set: RuleSet) =>
     return `${t(field?.label ?? r.field)} ${t(RULE_OPS[r.op] ?? r.op)} ${value}`.trim();
   });
 
-// Rows come in groups: by original folder when sorted by path, by suggested release in 有建议待确认.
+// Rows come in groups: by original folder when sorted by path, by suggested release in 可按建议归档.
 const groups: { key: string; label: string; href: string | null; rows: Row[] }[] = [];
 for (const row of rows) {
   const s = parseSuggestion(row.suggest);
@@ -243,16 +272,12 @@ const subfolders = folder ? places.children(folder.id) : [];
 const showPlace = !q.loc || q.sub;
 
 // Everything the page's script needs to know about the tree (for the picker, drag and drop and menus).
-const deskData = {
-  loc: q.loc,
-  view: q.view,
-  dir: q.dir,
-  sub: q.sub,
-  total,
-  layout,
+const viewData = { loc: q.loc, view: q.view, dir: q.dir, sub: q.sub, total, layout };
+const deskData = partial ? { ...viewData, partial: true } : {
+  ...viewData,
   folders: places.options(t).map((o) => {
     const f = places.folders.get(o.id)!;
-    return { id: o.id, parent: o.parent, kind: o.kind, name: o.name, path: o.path, release: f.release_id ?? undefined, edition: f.edition_id ?? undefined };
+    return { id: o.id, parent: o.parent, kind: o.kind, name: o.name, raw: places.rawName(f), path: o.path, depth: o.depth, release: f.release_id ?? undefined, edition: f.edition_id ?? undefined };
   }),
   quick,
   smart: smartFolders.map((s) => ({ id: s.id, name: s.name, rules: s.rules })),
@@ -268,11 +293,14 @@ const deskData = {
   slots: places.types.options(t),
 };
 const statusText: Record<string, string> = { missing: '缺档', partial: '部分缺档', planned: '预定', unknown: '待确认' };
-const done = overall.total - overall.left;
+// 已整理 = placed, published or ignored (files kept whole inside an archive do not count).
+const done = counts ? counts.all - counts.unplaced : 0;
+const Page = partial ? Bare : Admin;
 ---
 
-<Admin title={t('整理台')} wide>
+<Page title={t('整理台')} wide>
   <div id="desk" class="desk" data-loc={q.loc} data-view={q.view} data-layout={layout}>
+    {!partial && counts && forms && (
     <aside id="desk-side" class="desk-side" aria-label={t('位置')}>
       <nav class="fixed">
         {FIXED_VIEWS.map((v) => (
@@ -282,8 +310,8 @@ const done = overall.total - overall.left;
           </a>
         ))}
         <div class="progress mini" title={t('已整理 = 已归档、已发布或已忽略')}>
-          <div class="bar"><span style={`width:${overall.total ? (done / overall.total) * 100 : 0}%`}></span></div>
-          <span class="muted small">{t('已整理 {pct}', { pct: percent(overall.total ? done / overall.total : 0) })}</span>
+          <div class="bar"><span style={`width:${counts.all ? (done / counts.all) * 100 : 0}%`}></span></div>
+          <span class="muted small">{t('已整理 {pct}', { pct: percent(counts.all ? done / counts.all : 0) })}</span>
         </div>
       </nav>
 
@@ -336,6 +364,7 @@ const done = overall.total - overall.left;
         <div data-source-body data-dir={q.dir}><p class="muted small">{t('读取中…')}</p></div>
       </details>
     </aside>
+    )}
 
     <section id="desk-main" class="desk-main">
       <header id="desk-top" class="desk-top">
@@ -487,13 +516,13 @@ const done = overall.total - overall.left;
                     const key = placeOf(f);
                     const sugPlace = s ? suggestionPlace(s) : null;
                     const thumb = thumbOf(f);
-                    const isArchive = f.kind === 'archive' || f.kind === 'disc_image' || !!fmt.archive;
+                    const archive = isArchive({ kind: f.kind, format: fmt });
                     const shown = f.download_name || f.name;
                     return (
                       <div class="item" role="option" aria-selected="false" tabindex="-1" draggable="true"
                         data-id={f.id} data-kind={f.kind} data-state={f.state} data-upload={f.origin === 'upload' ? '1' : undefined}
                         data-name={shown} data-orig={f.name} data-ext={f.ext} data-edition={f.edition_id ?? undefined} data-release={f.release_id ?? undefined}
-                        data-archive={isArchive ? '1' : undefined} data-sealed={f.sealed ? '1' : undefined} data-sug={s && !key ? '1' : undefined}
+                        data-archive={archive ? '1' : undefined} data-sealed={f.sealed ? '1' : undefined} data-sug={s && !key ? '1' : undefined}
                         data-placed={key ? '1' : undefined}>
                         <input type="checkbox" class="pick" tabindex="-1" aria-label={t('选中')} />
                         <div class="thumb">{thumb ? <img src={thumb} alt="" loading="lazy" /> : <span class={`kind-icon k-${f.kind}`}>{(f.ext || '?').slice(0, 4).toUpperCase()}</span>}</div>
@@ -516,11 +545,11 @@ const done = overall.total - overall.left;
                             {f.role && ROLE_LABELS[f.role] && <span class="chip">{t(ROLE_LABELS[f.role])}</span>}
                           </span>
                           {f.note && <span class="muted small note">{f.note}</span>}
-                          {(q.sort !== 'path' || q.view === 'suggested') && <span class="muted mono src-path">{f.dir}</span>}
+                          {(q.sort !== 'path' || q.view === 'suggested') && <span class="muted mono src-path" title={f.dir}>{f.dir}</span>}
                         </div>
                         <div class="isize">{formatBytes(f.size)}</div>
-                        <div class="ispec" title={fmt.probe_error}>{formatSpec(fmt)}</div>
-                        <div class="isug">
+                        <div class="ispec" title={fmt.probe_error ?? formatSpec(fmt)}>{formatSpec(fmt)}</div>
+                        <div class="isug" title={key ? places.path(key, t) : s ? [sugPlace, t('规则：{rule}', { rule: t(s.rule) }), percent(s.confidence)].filter(Boolean).join(' · ') : undefined}>
                           {key ? (
                             showPlace ? <a href={folderHref(key)} data-nav title={places.path(key, t)} class="place-link">{shortPath(key)}</a> : null
                           ) : s ? (
@@ -568,7 +597,7 @@ const done = overall.total - overall.left;
 
       <div id="desk-bar" class="desk-bar" hidden>
         <span class="count" set:html={t('已选 {n} 个', { n: '<b data-count>0</b>' })} />
-        {listsFiles && total > 0 && <label class="small"><input type="checkbox" data-scope-all /> {t('改为当前列表全部 {n} 个文件', { n: total })}</label>}
+        {listsFiles && total > 0 && <label class="small" title={t('改为当前列表全部 {n} 个文件', { n: total })}><input type="checkbox" data-scope-all /> <span>{t('改为当前列表全部 {n} 个文件', { n: total })}</span></label>}
         <span class="sep"></span>
         <button type="button" data-act="move-selection" title="M">{t('移动到…')}</button>
         <button type="button" class="primary" data-act="file-action" data-action="accept" title="A">{t('按建议归档')}</button>
@@ -583,14 +612,15 @@ const done = overall.total - overall.left;
       </div>
     </section>
 
-    <div class="desk-resize" data-resize="side" title={t('拖动调整宽度，双击恢复')} aria-hidden="true"></div>
-    <div class="desk-resize" data-resize="insp" title={t('拖动调整宽度，双击恢复')} aria-hidden="true"></div>
+    {!partial && <div class="desk-resize" data-resize="side" title={t('拖动调整宽度，双击恢复')} aria-hidden="true"></div>}
+    {!partial && <div class="desk-resize" data-resize="insp" title={t('拖动调整宽度，双击恢复')} aria-hidden="true"></div>}
     <aside id="desk-inspector" class="desk-inspector" aria-label={t('详情')}>
       {openFolder ? (
         <Inspector mode="folder" places={places} view={openFolder} />
       ) : (
         <Inspector
-          mode="view" title={title} hint={preset ? t(preset.hint) : q.view === 'unplaced' ? t('还不在任何文件夹里的文件。有规则建议的可以「按建议归档」，其余的拖到左侧的文件夹上。') : undefined}
+          mode="view" title={title} hint={preset ? t(preset.hint) : q.view === 'unplaced' ? t('还不在任何文件夹里的文件。有规则建议的可以「按建议归档」，其余的拖到左侧的文件夹上。')
+            : q.view === 'suggested' ? t('建议把握度在 50% 以上、还没归档的文件（批量「按建议归档」处理的就是这些），按建议的作品分组：勾选一组按 A 即可。') : undefined}
           count={total} bytes={totals?.bytes ?? 0} link={preset?.link ? { href: preset.link.href, label: t(preset.link.label) } : null}
           smart={smart?.id ?? null} rules={smart ? ruleText(smart.rules) : []}
         />
@@ -598,12 +628,16 @@ const done = overall.total - overall.left;
     </aside>
   </div>
 
-  <div id="desk-menu" class="ctx-menu" role="menu" hidden></div>
-  <div id="desk-drag" class="drag-label" hidden></div>
-  <PlacePicker places={places} />
-  <Dialogs types={places.types} forms={forms} />
+  {!partial && forms && (
+    <>
+      <div id="desk-menu" class="ctx-menu" role="menu" hidden></div>
+      <div id="desk-drag" class="drag-label" hidden></div>
+      <PlacePicker places={places} options={false} />
+      <Dialogs types={places.types} forms={forms} />
+    </>
+  )}
   <script type="application/json" id="desk-data" set:html={JSON.stringify(deskData).replace(/</g, '\\u003c')} />
-</Admin>
+</Page>
 
 <script>
   import { initDesk } from '../../scripts/desk';

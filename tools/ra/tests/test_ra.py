@@ -225,7 +225,7 @@ def test_seed_skips_releases_deleted_in_the_admin_and_gives_new_ones_folders(tmp
     ids = {r[0] for r in db.execute("SELECT id FROM releases")}
     assert gone not in ids and len(ids) == len(releases) - 1
     assert db.execute("SELECT count(*) FROM releases WHERE form IS NULL OR form != kind").fetchone()[0] == 0
-    assert db.execute("SELECT count(*) FROM release_slots").fetchone()[0] == 0
+    assert db.execute("SELECT count(*) FROM sqlite_master WHERE name = 'release_slots'").fetchone()[0] == 0  # retired in 0012
     assert db.execute(
         "SELECT count(*) FROM folders f JOIN folders p ON p.id = f.parent_id WHERE p.type = 'edition'"
     ).fetchone()[0] == 0

@@ -184,9 +184,6 @@ export async function deleteType(actor: string, id: string, t: T): Promise<strin
   if (problem) throw problem;
   const database = db();
   const cs = new ChangeSet(database, actor, summary('删除版本类型 {name}', { name: typeName(type, t) }));
-  // The retired per-release slots (release_slots, kept since 0008) still point at the type.
-  const { results } = await database.prepare('SELECT release_id FROM release_slots WHERE slot = ?').bind(id).all<{ release_id: string }>();
-  for (const r of results) await cs.delete('release_slot', { release_id: r.release_id, slot: id });
   await cs.delete('edition_type', { id });
   await cs.commit();
   return cs.summary;

@@ -231,7 +231,7 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
   }
 
   <h2 id="tracks">{t('曲目条目')}</h2>
-  <form method="post" class="panel">
+  <form method="post" class="panel" data-unsaved={t('曲目条目')}>
     <input type="hidden" name="section" value="tracks" />
     <input type="hidden" name="anchor" value="tracks" />
     <p class="muted" set:html={translateHtml(lang, '这个作品各版本出现过的每一首（取并集）。各版的曲目顺序、曲名差异和标签在版本页编辑；这里改条目本身的标题、版本说明和所属乐曲。同一首曲在别的作品里的版本在<a href="/admin/songs">乐曲</a>页合并。')} />
@@ -285,14 +285,14 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
   </form>
 
   <h2>{t('基本信息')}</h2>
-  <form method="post" class="panel">
+  <form method="post" class="panel" data-unsaved={t('基本信息')}>
     <input type="hidden" name="section" value="info" />
     <ReleaseFields release={release} />
     <p><button class="primary" type="submit">{t('保存基本信息')}</button></p>
   </form>
 
   <h2>{t('译名与介绍')}</h2>
-  <form method="post" class="panel">
+  <form method="post" class="panel" data-unsaved={t('译名与介绍')}>
     <input type="hidden" name="section" value="i18n" />
     <p class="muted">{t('原文标题：{title}。留空时页面显示原文；中文译名由管理组审定。介绍的原文在「基本信息」里。', { title: release.title })}</p>
     <div class="lang-grid">
@@ -311,6 +311,9 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
 </Admin>
 
 <script>
+  import { guardForms } from '../../../scripts/unsaved';
+  guardForms();
+
   // 「＋ 新类型…」 asks for the new type's name.
   for (const el of Array.from(document.querySelectorAll('[data-type-select]'))) {
     const select = el as unknown as HTMLSelectElement;
@@ -352,6 +355,7 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
     dragged?.classList.remove('dragging');
     dragged = null;
     renumber();
+    body.dispatchEvent(new Event('input', { bubbles: true })); // the order changed: the form has unsaved changes
   });
   body?.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -366,6 +370,7 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
     if (!template || !body) return;
     body.appendChild(template.content.cloneNode(true));
     renumber();
+    body.dispatchEvent(new Event('input', { bubbles: true }));
     (body.rows[body.rows.length - 1].querySelector('input[name="title"]') as HTMLInputElement).focus();
   });
 </script>

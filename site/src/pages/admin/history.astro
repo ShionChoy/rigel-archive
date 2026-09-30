@@ -114,7 +114,7 @@ function diff(rev: Rev): { field: string; before: string; after: string }[] {
 }
 const link = (rev: Rev) =>
   rev.entity === 'edition' ? `/admin/editions/${rev.entity_id}`
-  : rev.entity === 'folder' ? `/admin/inbox?loc=fd:${rev.entity_id}&state=all`
+  : rev.entity === 'folder' ? `/admin/inbox?loc=fd:${rev.entity_id}`
   : rev.entity === 'release' ? `/admin/releases/${rev.entity_id}`
   : rev.entity === 'release_slot' ? `/admin/releases/${rev.entity_id.split('/')[0]}`
   : rev.entity === 'file' ? `/admin/files/${rev.entity_id}`

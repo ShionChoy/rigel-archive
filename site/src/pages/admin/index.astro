@@ -1,3 +1,100 @@
 ---
-return Astro.redirect('/admin/inbox');
+// 概览: the admin's front page. How far the organizing is, what is waiting (suggestions to accept, the
+// 检查清单, missing editions, duplicates, failed processing), and the latest changes, each linking to where
+// it is done.
+import Admin from '../../layouts/Admin.astro';
+import { runChecks } from '../../lib/checks';
+import { db } from '../../lib/db';
+import { originalGone } from '../../lib/deletion';
+import { formatTime, percent } from '../../lib/format';
+import { summaryText } from '../../lib/i18n';
+import { duplicateGroups, viewCounts } from '../../lib/inbox';
+
+const { t } = Astro.locals;
+const database = db();
+const [counts, checks, dups, other, recent] = await Promise.all([
+  viewCounts(),
+  runChecks(t),
+  duplicateGroups('content', 1, 1),
+  database
+    .prepare(
+      `SELECT (SELECT count(*) FROM releases) AS releases, (SELECT count(*) FROM editions) AS editions,
+              (SELECT count(*) FROM editions WHERE status IN ('missing', 'partial', 'unknown')) AS waiting,
+              (SELECT count(*) FROM files WHERE sealed_in IS NOT NULL) AS hidden,
+              (SELECT count(*) FROM files WHERE ${originalGone('files')}) AS gone,
+              (SELECT count(DISTINCT sha256) FROM media_tasks WHERE state = 'failed') AS failed`,
+    )
+    .first<{ releases: number; editions: number; waiting: number; hidden: number; gone: number; failed: number }>(),
+  database
+    .prepare(
+      `SELECT batch_id, min(at) AS at, actor, summary, count(*) AS n, max(reverted_by_batch) AS reverted
+       FROM revisions WHERE id > (SELECT coalesce(max(id), 0) - 2000 FROM revisions)
+       GROUP BY batch_id ORDER BY min(id) DESC LIMIT 8`,
+    )
+    .all<{ batch_id: string; at: string; actor: string; summary: string; n: number; reverted: string | null }>(),
+]);
+const done = counts.all - counts.unplaced;
+const todo = [
+  { n: counts.suggested, label: t('个文件可以按建议归档'), href: '/admin/inbox?view=suggested' },
+  { n: other?.waiting ?? 0, label: t('个版本缺档、部分缺档或待确认'), href: '/admin/missing' },
+  { n: dups.total, label: t('组内容完全相同的文件'), href: '/admin/duplicates' },
+  { n: other?.gone ?? 0, label: t('个合辑文件的原件已不存在，可以删除'), href: '/admin/inbox?view=p:gone' },
+  { n: other?.failed ?? 0, label: t('份内容处理失败'), href: '/admin/storage' },
+].filter((x) => x.n > 0);
+const problems = checks.map((c) => ({ id: c.id, title: t(c.title), n: c.items.length + c.more })).filter((c) => c.n > 0);
 ---
+
+<Admin title={t('概览')}>
+  <div class="overview-stats">
+    <a class="stat" href="/admin/inbox?view=all">
+      <span class="stat-n">{percent(counts.all ? done / counts.all : 0)}</span>
+      <span class="stat-label">{t('已整理')}</span>
+      <span class="bar"><span style={`width:${counts.all ? (done / counts.all) * 100 : 0}%`}></span></span>
+    </a>
+    <a class="stat" href="/admin/inbox?view=unplaced"><span class="stat-n">{counts.unplaced.toLocaleString()}</span><span class="stat-label">{t('未归档')}</span></a>
+    <a class="stat" href="/admin/inbox?view=suggested"><span class="stat-n">{counts.suggested.toLocaleString()}</span><span class="stat-label">{t('可按建议归档')}</span></a>
+    <a class="stat" href="/admin/inbox?view=p:sealed"><span class="stat-n">{(other?.hidden ?? 0).toLocaleString()}</span><span class="stat-label">{t('整体收藏的包内文件')}</span></a>
+    <a class="stat" href="/admin/releases"><span class="stat-n">{other?.releases ?? 0}</span><span class="stat-label">{t('作品 · {n} 个版本', { n: other?.editions ?? 0 })}</span></a>
+  </div>
+
+  <div class="overview-cols">
+    <section class="panel">
+      <h2>{t('待处理')}</h2>
+      {todo.length === 0 && problems.length === 0 && <p class="muted">{t('没有待处理的事项。')}</p>}
+      <ul class="todo">
+        {todo.map((x) => <li><a href={x.href}><b>{x.n.toLocaleString()}</b> {x.label}</a></li>)}
+      </ul>
+      {problems.length > 0 && (
+        <>
+          <h3>{t('检查清单')}</h3>
+          <ul class="todo">
+            {problems.map((c) => <li><a href={`/admin/checks#${c.id}`}><b>{c.n}</b> {c.title}</a></li>)}
+          </ul>
+        </>
+      )}
+      <p class="small"><a href="/admin/checks">{t('查看全部检查项 ›')}</a></p>
+    </section>
+
+    <section class="panel">
+      <h2>{t('最近的修改')}</h2>
+      <ul class="recent">
+        {recent.results.map((b) => (
+          <li class:list={{ reverted: !!b.reverted }}>
+            <span class="muted mono small">{formatTime(b.at)}</span>
+            <span>{summaryText(b.summary, t)}</span>
+            <span class="muted small">{b.actor}</span>
+          </li>
+        ))}
+      </ul>
+      <p class="small"><a href="/admin/history">{t('全部修改记录 ›')}</a></p>
+    </section>
+  </div>
+
+  <section class="panel quick-links">
+    <a class="button" href="/admin/inbox">{t('整理台')}</a>
+    <a class="button" href="/admin/upload">{t('上传')}</a>
+    <a class="button" href="/admin/releases/new">{t('新建作品')}</a>
+    <a class="button" href="/admin/types">{t('作品形式与版本类型')}</a>
+    <span class="muted small">{t('在任何页面按 Ctrl+K 可以跳到作品、版本、乐曲或文件。')}</span>
+  </section>
+</Admin>

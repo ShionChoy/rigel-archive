@@ -1,0 +1,304 @@
+---
+// The public album page (公开页) of a release, drawn from lib/release-view.ts: on the left the collected
+// editions (each with its own address), on the right the chosen one — covers, information, tracks that play
+// only its own files, attachments — or 「版本对照」. On a phone the editions become a row of buttons above.
+// The page around it (its <html>, colours, a bar at the top) is the caller's; see pages/admin/releases/[id]/preview.astro.
+import { RELATION_MARK, RELATION_TEXT } from '../lib/editions';
+import { withParams } from '../lib/format';
+import { formatClock, type ReleaseView } from '../lib/release-view';
+
+interface Props {
+  view: ReleaseView;
+  url: URL; // this page's address (the editions link to it with ?edition= / ?view=compare)
+}
+
+const { view, url } = Astro.props;
+const { t } = Astro.locals;
+const { release, chosen, compare } = view;
+const editionHref = (id: string) => withParams(url, { edition: id, view: null });
+---
+
+<main>
+  <div class="kicker">{release.era_name} · {view.formLabel}</div>
+  <h1>{release.title}</h1>
+  <div class="sub">{view.subline}</div>
+
+  {view.editions.length === 0 ? (
+    <p class="muted" style="margin-top:24px">{t('这个作品还没有已收录的版本。')}</p>
+  ) : (
+    <div class="layout">
+      <nav class="editions" aria-label={t('版本')}>
+        <h2>{t('版本')}</h2>
+        {view.editions.map((e) => (
+          <a href={editionHref(e.id)} class:list={{ on: chosen?.id === e.id }} aria-current={chosen?.id === e.id ? 'page' : undefined}>
+            {e.cover ? <img src={e.cover} alt="" loading="lazy" /> : <span class="blank"></span>}
+            <span><span class="name">{e.name}</span><br /><span class="meta">{e.sub}</span></span>
+          </a>
+        ))}
+        {view.editions.length > 1 && (
+          <>
+            <hr />
+            <a href={withParams(url, { view: 'compare', edition: null })} class:list={['compare-link', { on: !!compare }]}>
+              <span class="blank">⇄</span>
+              <span><span class="name">{t('版本对照')}</span><br /><span class="meta">{t('各版本曲目异同')}</span></span>
+            </a>
+          </>
+        )}
+      </nav>
+
+      <div class="content">
+        {compare && (
+          <section style="margin-top:0">
+            <h2 class="sec">{t('版本对照')}</h2>
+            {compare.rows.length === 0 ? <p class="muted">{t('还没有可以对照的曲目表。')}</p> : (
+              <div class="compare">
+                <table>
+                  <thead><tr><th></th>{compare.editions.map((e) => <th><a href={editionHref(e.id)}>{view.compareNames.get(e.id) ?? e.name}</a><div class="muted">{e.catalog_no ?? ''}</div></th>)}</tr></thead>
+                  <tbody>
+                    {compare.rows.map(({ track, cells }) => (
+                      <tr>
+                        <td>{track.title}</td>
+                        {cells.map((c) => (
+                          <td class={c ? `r-${c.relation}` : ''} title={c ? t(RELATION_TEXT[c.relation]) : t('这一版没有')}>
+                            {c ? `${c.position ?? '·'} ${RELATION_MARK[c.relation]}${c.relation === 'part' && c.share !== undefined ? ` ${Math.round(c.share * 100)}%` : ''}` : '—'}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p class="muted" style="font-size:12px">{t('= 完全相同　≈ 同一母带　△ 重新混音或母带　◐ 部分相同　≠ 不同录音　+ 这一版新增')}</p>
+          </section>
+        )}
+
+        {chosen && (
+          <>
+            <div class="ed-head">
+              <div>
+                {chosen.covers[0] ? <img class="cover" id="big-cover" src={chosen.covers[0].src} alt="" /> : <div class="nocover">{t('无封面')}</div>}
+                {chosen.covers.length > 1 && (
+                  <div class="thumbs">
+                    {chosen.covers.map((c, i) => <button type="button" class:list={{ on: i === 0 }} data-cover={c.src} title={t('用于 {n} 首', { n: c.n })}><img src={c.src} alt="" /></button>)}
+                  </div>
+                )}
+              </div>
+              <div>
+                <div class="ed-kind">{chosen.name}</div>
+                <div class="ed-title">{chosen.albumTitle}</div>
+                <div class="sub">
+                  {chosen.subline}
+                  {chosen.status === 'partial' && <> · <span class="muted">{t('部分缺档')}</span></>}
+                </div>
+                {chosen.credits.length > 0 && <dl class="credits">{chosen.credits.map(([k, v]) => <><dt>{k}</dt><dd>{v}</dd></>)}</dl>}
+                {chosen.description && <p style="white-space:pre-wrap">{chosen.description}</p>}
+                {chosen.note && <p style="white-space:pre-wrap">{chosen.note}</p>}
+                <div class="actions">
+                  {chosen.lines.some((l) => l.sources) && <button class="primary" id="play-all">{t('▶ 播放全部')}</button>}
+                  <a href={chosen.download}>{chosen.withTracks ? t('下载本版（带标签）') : t('下载本版')}</a>
+                  {chosen.musicbrainz && <a href={chosen.musicbrainz} target="_blank" rel="noopener">MusicBrainz ↗</a>}
+                  {chosen.bandcamp && <a href={chosen.bandcamp} target="_blank" rel="noopener">Bandcamp ↗</a>}
+                </div>
+                <p class="muted" style="font-size:12px">{t('公开站上，下载只提供给注册用户；第三方的文件只列条目。')}</p>
+              </div>
+            </div>
+
+            {chosen.withTracks && (
+              <section>
+                <h2 class="sec">{t('曲目')}</h2>
+                <table id="tracks">
+                  <tbody>
+                    {chosen.lines.map((l, i) => (
+                      <tr data-sources={l.sources ? JSON.stringify(l.sources) : undefined} data-title={l.title} data-index={i}>
+                        <td class="n">{chosen.multiDisc ? `${l.disc}-` : ''}{String(l.position).padStart(2, '0')}</td>
+                        {chosen.differentCovers && <td class="cv">{l.cover ? <img src={l.cover} alt="" loading="lazy" /> : null}</td>}
+                        <td>{l.title}{l.sub && <div class="tsub">{l.sub}</div>}</td>
+                        <td class="time">{l.seconds ? formatClock(l.seconds) : ''}</td>
+                        <td class="play">{l.sources ? <button class="play" aria-label={t('播放')}>▶</button> : null}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {!chosen.lines.some((l) => l.sources) && <p class="muted">{t('这个版本的音频还没有收录，只列出曲目。')}</p>}
+              </section>
+            )}
+
+            {chosen.attachments.length > 0 && (
+              <section>
+                <h2 class="sec">{chosen.withTracks ? t('附件') : t('文件')}</h2>
+                {chosen.attachments.map((g) => (
+                  <>
+                    {g.label && <div class="group">{g.label}</div>}
+                    {g.pictures.length > 0 && (
+                      <div class="gallery">
+                        {g.pictures.map((p) => ('href' in p ? (
+                          <a href={p.href} data-view="image">
+                            <img src={p.thumb} alt="" loading="lazy" />
+                            {p.caption}
+                          </a>
+                        ) : <span class="muted">{p.name}</span>))}
+                      </div>
+                    )}
+                    {g.docs.length > 0 && (
+                      <table class="docs">
+                        <tbody>
+                          {g.docs.map((d) => (
+                            <tr>
+                              <td>{d.name}</td>
+                              <td class="muted" style="width:6em">{d.size}</td>
+                              <td style="width:4em">{d.view ? <a href={d.view} data-view="text">{t('查看')}</a> : d.download ? <a href={d.download}>{t('下载')}</a> : null}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </>
+                ))}
+              </section>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )}
+</main>
+<footer class="player">
+  <span id="now" class="muted">{t('未在播放')}</span>
+  <audio id="audio" controls preload="none"></audio>
+</footer>
+<dialog class="lightbox" id="lightbox"></dialog>
+
+<style is:global>
+  main { max-width: 1240px; margin: 0 auto; padding: 20px 16px; }
+  .kicker { color: var(--muted); font-size: 14px; }
+  h1 { margin: 2px 0 2px; font-size: 30px; line-height: 1.25; }
+  .sub { color: var(--muted); }
+  .layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 28px; margin-top: 20px; align-items: start; }
+  nav.editions { position: sticky; top: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  nav.editions h2 { font-size: 13px; color: var(--muted); margin: 0 0 6px; font-weight: 500; }
+  nav.editions a { display: grid; grid-template-columns: 44px 1fr; gap: 10px; align-items: center; padding: 6px; border-radius: 8px; color: var(--ink); text-decoration: none; }
+  nav.editions a:hover { background: var(--now); }
+  nav.editions a.on { background: var(--now); box-shadow: inset 3px 0 0 var(--accent); }
+  nav.editions img, nav.editions .blank { width: 44px; height: 44px; object-fit: cover; border-radius: 4px; background: var(--blank); display: block; }
+  nav.editions .name { font-size: 14px; line-height: 1.35; }
+  nav.editions .meta { font-size: 12px; color: var(--muted); }
+  nav.editions hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
+  nav.editions .compare-link .blank { display: grid; place-items: center; color: var(--muted); background: none; }
+  .ed-head { display: grid; grid-template-columns: minmax(200px, 360px) 1fr; gap: 28px; align-items: start; }
+  .cover { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; background: var(--blank); display: block; box-shadow: 0 6px 22px rgb(0 0 0 / 0.14); }
+  .nocover { width: 100%; aspect-ratio: 1; border-radius: 8px; background: var(--blank); display: grid; place-items: center; color: var(--muted); }
+  .thumbs { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .thumbs button { border: 2px solid transparent; padding: 0; border-radius: 6px; background: none; cursor: pointer; }
+  .thumbs button.on { border-color: var(--accent); }
+  .thumbs img { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; display: block; }
+  .ed-kind { color: var(--accent); font-weight: 600; }
+  .ed-title { font-size: 26px; margin: 2px 0 6px; line-height: 1.3; }
+  dl.credits { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 12px 0; }
+  dl.credits dt { color: var(--muted); }
+  dl.credits dd { margin: 0; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .actions a, .actions button { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 6px; padding: 7px 14px; text-decoration: none; cursor: pointer; font: inherit; }
+  .actions .primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  section { margin-top: 30px; }
+  h2.sec { font-size: 18px; border-bottom: 1px solid var(--line); padding-bottom: 6px; margin: 0 0 4px; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; text-align: left; }
+  td.n { width: 3.2em; color: var(--muted); }
+  td.cv { width: 42px; } td.cv img { width: 36px; height: 36px; object-fit: cover; border-radius: 3px; display: block; }
+  td.time { width: 4.5em; color: var(--muted); text-align: right; }
+  td.play { width: 3.4em; text-align: right; }
+  .tsub { color: var(--muted); font-size: 13px; }
+  button.play { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 50%; width: 32px; height: 32px; cursor: pointer; }
+  tr.now td { background: var(--now); }
+  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-top: 10px; }
+  .gallery a { display: block; color: var(--muted); font-size: 12px; text-decoration: none; }
+  .gallery img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 6px; background: var(--blank); display: block; margin-bottom: 4px; }
+  .group { margin-top: 14px; font-size: 13px; color: var(--muted); }
+  .docs td { font-size: 14px; }
+  footer.player { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 12px; align-items: center; }
+  footer.player audio { flex: 1; min-width: 0; }
+  .muted { color: var(--muted); }
+  .compare { overflow-x: auto; }
+  .compare td, .compare th { font-size: 12px; white-space: nowrap; text-align: center; }
+  .compare td:first-child, .compare th:first-child { text-align: left; white-space: normal; }
+  .r-new { background: var(--r-new); } .r-same, .r-master { background: var(--r-same); } .r-remix { background: var(--r-remix); } .r-part { background: var(--r-part); } .r-other { background: var(--r-other); }
+  .lightbox { border: 0; padding: 0; background: transparent; max-width: 96vw; max-height: 96vh; }
+  .lightbox::backdrop { background: rgb(0 0 0 / 0.8); }
+  .lightbox img { max-width: 94vw; max-height: 90vh; display: block; }
+  .lightbox pre { background: var(--card); color: var(--ink); padding: 16px; max-width: 90vw; max-height: 86vh; overflow: auto; white-space: pre-wrap; margin: 0; border-radius: 8px; font-size: 13px; }
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; gap: 14px; }
+    nav.editions { position: static; display: flex; gap: 6px; overflow-x: auto; padding: 0; border: 0; background: none; scrollbar-width: none; }
+    nav.editions h2, nav.editions hr, nav.editions .meta, nav.editions img, nav.editions .blank, nav.editions br { display: none; }
+    nav.editions a { display: block; white-space: nowrap; border: 1px solid var(--line); border-radius: 18px; padding: 4px 12px; background: var(--card); flex: none; }
+    nav.editions a.on { background: var(--accent); color: var(--on-accent); box-shadow: none; border-color: var(--accent); }
+    .ed-head { grid-template-columns: 1fr; gap: 14px; }
+    h1 { font-size: 24px; }
+  }
+
+</style>
+
+<script>
+  const audio = document.querySelector<HTMLAudioElement>('#audio')!;
+  const now = document.querySelector<HTMLElement>('#now')!;
+  const rows = Array.from(document.querySelectorAll<HTMLTableRowElement>('#tracks tr[data-sources]'));
+  let current = -1;
+  // The first source this browser plays: the lossless stream (FLAC), else AAC, else the original.
+  const pick = (row: HTMLTableRowElement) => {
+    const sources = JSON.parse(row.dataset.sources!) as { src: string; type: string }[];
+    return (sources.find((s) => audio.canPlayType(s.type) !== '') ?? sources[sources.length - 1]).src;
+  };
+  const play = (i: number) => {
+    const row = rows[i];
+    if (!row) return;
+    rows.forEach((r) => r.classList.remove('now'));
+    row.classList.add('now');
+    current = i;
+    audio.src = pick(row);
+    now.textContent = `${row.querySelector('td')?.textContent ?? ''} ${row.dataset.title ?? ''}`;
+    audio.play().catch(() => undefined);
+  };
+  rows.forEach((row, i) => row.querySelector('button.play')?.addEventListener('click', () => play(i)));
+  document.querySelector('#play-all')?.addEventListener('click', () => play(0));
+  audio.addEventListener('ended', () => play(current + 1));
+  // The covers of an edition whose tracks carry different ones.
+  for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-cover]'))) {
+    b.addEventListener('click', () => {
+      (document.querySelector('#big-cover') as HTMLImageElement).src = b.dataset.cover!;
+      document.querySelectorAll('[data-cover]').forEach((x) => x.classList.toggle('on', x === b));
+    });
+  }
+  // Pictures and text files open over the page.
+  const box = document.querySelector<HTMLDialogElement>('#lightbox')!;
+  document.addEventListener('click', async (e) => {
+    const a = (e.target as HTMLElement).closest('a[data-view]') as HTMLAnchorElement | null;
+    if (!a) return;
+    e.preventDefault();
+    box.innerHTML = '';
+    if (a.dataset.view === 'image') {
+      const img = document.createElement('img');
+      img.src = a.href;
+      box.appendChild(img);
+    } else {
+      const pre = document.createElement('pre');
+      pre.textContent = '…';
+      box.appendChild(pre);
+      const bytes = new Uint8Array(await (await fetch(a.href)).arrayBuffer());
+      let text = new TextDecoder('utf-8').decode(bytes);
+      if (text.includes('�')) {
+        for (const enc of ['utf-16le', 'shift_jis']) {
+          try {
+            text = new TextDecoder(enc, { fatal: true }).decode(bytes);
+            break;
+          } catch {
+            // next
+          }
+        }
+      }
+      pre.textContent = text;
+    }
+    box.showModal();
+  });
+  box.addEventListener('click', () => box.close());
+</script>

@@ -12,7 +12,7 @@ const total = checks.reduce((n, c) => n + c.items.length + c.more, 0);
   <div class="checks">
     {
       checks.map((c) => (
-        <details class="panel check" open={c.items.length > 0 && c.items.length <= 20}>
+        <details class="panel check" id={c.id} open={c.items.length > 0 && c.items.length <= 20}>
           <summary>
             <b>{t(c.title)}</b> <span class:list={['chip', c.items.length ? 'partial' : 'collected']}>{c.items.length + c.more}</span>
             <span class="muted"> {t(c.hint)}</span>
@@ -32,3 +32,9 @@ const total = checks.reduce((n, c) => n + c.items.length + c.more, 0);
     }
   </div>
 </Admin>
+
+<script>
+  // 概览 links to one check (#id): open it.
+  const target = location.hash ? document.getElementById(decodeURIComponent(location.hash.slice(1))) : null;
+  if (target instanceof HTMLDetailsElement) target.open = true;
+</script>

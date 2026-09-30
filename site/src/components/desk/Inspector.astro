@@ -8,7 +8,7 @@ import { FILE_KIND_LABELS, FILE_STATE_LABELS, RIGHTS, RIGHTS_LABELS, ROLE_LABELS
 import { formatBytes, formatSpec, percent } from '../../lib/format';
 import { parseFormat } from '../../lib/db';
 import { EDITION_STATUS_LABELS } from '../../lib/editions';
-import { FOLDER_COLORS, FOLDER_COLOR_LABELS, FOLDER_TYPE_LABELS, type Places } from '../../lib/locations';
+import { FOLDER_COLORS, FOLDER_COLOR_LABELS, FOLDER_TYPE_LABELS, isArchive, type Places } from '../../lib/locations';
 import type { FilesSummary, FileView, FolderView } from '../../lib/desk';
 import type { Derived } from '../../lib/media';
 import type { FileTagView } from '../../lib/tagedit';
@@ -148,7 +148,7 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
       const key = places.keyOf(f);
       const tags = Object.entries(fmt.tags ?? {}).slice(0, 8);
       const tv = props.tags;
-      const isArchive = f.kind === 'archive' || f.kind === 'disc_image' || !!fmt.archive;
+      const archive = isArchive({ kind: f.kind, format: fmt });
       return (
         <div data-file={f.id}>
           <FilePreview file={f} base={props.base} derived={props.derived} />
@@ -206,7 +206,7 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
               {RIGHTS.map((r) => <option value={r} selected={f.rights === r}>{t(RIGHTS_LABELS[r])}</option>)}
             </select>
           </section>
-          {isArchive && (
+          {archive && (
             <section class="insp-sec">
               <h4>{t('整体收藏')} <span class="help" title={t('整体收藏：包内文件不单独整理，只在文件页列出清单')}>?</span></h4>
               {f.sealed

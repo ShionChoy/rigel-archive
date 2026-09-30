@@ -4,8 +4,7 @@ import { backupSettings, processor } from '../processor';
 import { readPending } from './embedded';
 import { failAbandoned, pendingCounts } from './processing';
 
-/** Every 10 minutes: start the processing container when anything is waiting (it stops by itself). */
-export const QUEUE_CRON = '*/10 * * * *';
+// The other cron, every 10 minutes, starts the processing container when anything is waiting (it stops by itself).
 /** Every night at 04:17 in Japan: the encrypted backup. */
 export const BACKUP_CRON = '17 19 * * *';
 

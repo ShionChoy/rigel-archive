@@ -68,6 +68,14 @@ export const PLACED = '(files.folder_id IS NOT NULL OR files.release_id IS NOT N
 export const UNPLACED_SQL = `(${VISIBLE} AND files.release_id IS NULL AND files.folder_id IS NULL AND files.state != 'ignored')`;
 /** SQL (on `files`): an archive or disc image, which can be kept whole. */
 export const IS_ARCHIVE = "(files.kind IN ('archive', 'disc_image') OR json_extract(files.format, '$.archive') IS NOT NULL)";
+/** The same for a row read from `files` (format as stored, or already parsed). */
+export function isArchive(f: { kind: string; format?: unknown }): boolean {
+  if (f.kind === 'archive' || f.kind === 'disc_image') return true;
+  return typeof f.format === 'string' ? f.format.includes('"archive"') : !!(f.format as { archive?: unknown } | null | undefined)?.archive;
+}
+
+/** What taking a file out of its place writes (未归档 again, or with a state added by the caller). */
+export const NO_PLACE = { release_id: null, edition_id: null, folder_id: null, slot: null, track_id: null } as const;
 
 const MAX_DEPTH = 64;
 const collator = new Intl.Collator('ja', { numeric: true });
@@ -309,6 +317,17 @@ export class Places {
     return f.name;
   }
 
+  /**
+   * What renaming a folder edits: an era's name, a release's title (without its catalog number), an
+   * edition's own name (without its type), else the folder's name.
+   */
+  rawName(f: FolderInfo): string {
+    if (f.era_id) return this.eras.get(f.era_id)?.name ?? '';
+    if (f.release_id) return this.releases.get(f.release_id)?.title ?? '';
+    if (f.edition_id) return this.editions.get(f.edition_id)?.name ?? '';
+    return f.name;
+  }
+
   /** The name of one node. */
   name(key: string, t: T): string {
     if (key === TOP) return t('全部文件夹');
@@ -412,14 +431,6 @@ export function checkFolderName(raw: string): string {
 export function nextSort(places: Places, parentId: string | null): number {
   const max = Math.max(0, ...places.children(parentId).map((f) => f.sort));
   return max > 0 ? max + 10 : 0;
-}
-
-/** The parent id of a folder made directly under this place (null at the top). */
-export function parentIdOf(places: Places, key: string): string | null {
-  if (key === TOP) return null;
-  const f = places.folderOf(key);
-  if (!f) throw new UserError('找不到这个位置');
-  return f.id;
 }
 
 export function plainFolder(id: string, parentId: string | null, name: string, sort: number): FolderInfo {
@@ -533,12 +544,6 @@ export function placePatch(row: Pick<MoveRow, 'state' | 'rights' | 'release_id' 
   };
 }
 
-/** Give each file its patch (set-based, however many files). */
-export function applyPatches(cs: ChangeSet, patches: Map<string, Record<string, unknown>>): number {
-  cs.patchFiles(patches);
-  return patches.size;
-}
-
 /** Editions filled by files for the first time are no longer missing. */
 export function markEditionsCollected(cs: ChangeSet, places: Places, editionIds: Iterable<string | null>) {
   for (const id of new Set(editionIds)) {
@@ -586,7 +591,7 @@ export async function moveFiles(actor: string, ids: string[], where: string, t: 
     patches.set(row.id, placePatch(row, places.place(key)));
   }
   if (patches.size === 0 && skipped) throw new UserError('这些文件都在整体收藏的压缩包里，不能单独移动');
-  applyPatches(cs, patches);
+  cs.patchFiles(patches);
   const placed = [...patches.values()];
   markEditionsCollected(cs, places, placed.map((p) => p.edition_id as string | null));
   const changed = await cs.commit();
@@ -620,8 +625,6 @@ export async function sealArchives(actor: string, ids: string[], seal: boolean, 
   const rows = await loadRows<{ id: string; name: string; kind: string; format: string | null; sealed: number; sealed_in: string | null }>(
     'id, name, kind, format, sealed, sealed_in', ids,
   );
-  const isArchive = (r: { kind: string; format: string | null }) =>
-    r.kind === 'archive' || r.kind === 'disc_image' || (r.format ?? '').includes('"archive"');
   const archives = rows.filter((r) => isArchive(r) && !r.sealed_in && !!r.sealed !== seal);
   const skipped = rows.filter((r) => !isArchive(r)).length;
   const refused: string[] = [];
@@ -658,4 +661,3 @@ export async function sealArchives(actor: string, ids: string[], seal: boolean, 
   return { summary: cs.summary, changed, archives: done.length, hidden, refused, skipped, batchId: cs.batchId };
 }
 
-export const SEAL_NOTE = N_('整体收藏：包内文件不单独整理，只在文件页列出清单');

@@ -3,6 +3,7 @@
 import { db, parseFormat } from './db';
 import { N_, type T } from './i18n';
 import { titleKey } from './tracks';
+import { parseTags } from './tagging/model';
 import { VISIBLE } from './locations';
 import { loadTypes, type TypeList } from './types';
 
@@ -75,13 +76,8 @@ export async function runChecks(t: T): Promise<Check[]> {
        WHERE ${VISIBLE} AND release_id IS NULL AND folder_id IS NULL AND state = 'inbox'
          AND json_extract(suggest, '$.confidence') >= 0.8 GROUP BY dir ORDER BY n DESC`,
     ),
-    // Files whose own title tag differs from what the edition calls the track.
-    database.prepare(
-      `SELECT f.id, f.name, f.format, et.title AS et_title, t.title AS entry_title, t.version_label, f.edition_id
-       FROM files f JOIN edition_tracks et ON et.edition_id = f.edition_id AND et.track_id = f.track_id
-       JOIN tracks t ON t.id = f.track_id
-       WHERE f.kind = 'audio' AND f.sealed_in IS NULL AND json_extract(f.format, '$.tags.title') IS NOT NULL`,
-    ),
+    // Track rows whose downloaded title differs from their track entry.
+    database.prepare(TITLE_SQL),
     // Folders with nothing in them (the admins' own; an empty edition folder is a missing edition).
     database.prepare(
       `SELECT id, name FROM folders fd WHERE fd.type = 'plain' AND NOT EXISTS (SELECT 1 FROM files f WHERE f.folder_id = fd.id)
@@ -107,13 +103,13 @@ export async function runChecks(t: T): Promise<Check[]> {
   }));
   checks.push({ id: 'format', title: N_('目录名与实际格式不符'), hint: N_('确认是不是放错了目录，或目录名写错了。'), ...cap(mislabelled) });
 
-  const tagDiff: CheckItem[] = tagDifferences(tagRows.results as TagRow[]).map(({ r, tag, mine }) => ({
-    label: r.name, href: `/admin/editions/${r.edition_id}#tracks`, detail: t('文件：{tag} · 本站：{mine}', { tag, mine }),
+  const tagDiff: CheckItem[] = titleDifferences(tagRows.results as TitleRow[]).map(({ r, title, mine }) => ({
+    label: r.download_name || r.name, href: `/admin/editions/${r.edition_id}#tracks`, detail: t('下载曲名：{title} · 曲目条目：{mine}', { title, mine }),
   }));
-  checks.push({ id: 'tags', title: N_('内嵌标签与本站不一致'), hint: N_('整理版下载会写入本站的标签；确认本站的曲名是对的，或在版本页「从文件标签导入」。'), ...cap(tagDiff) });
+  checks.push({ id: 'tags', title: TITLE_CHECK.name, hint: TITLE_CHECK.hint, ...cap(tagDiff) });
 
   checks.push({
-    id: 'unlinked', title: N_('音频没有对应曲目'), hint: N_('在版本页点「对应文件」，或在文件列表里逐个选择。'),
+    id: 'unlinked', title: N_('音频没有对应曲目'), hint: N_('在版本页的曲目列表下方点「按曲号、标题和时长自动对应」，或逐个「对应到…」。'),
     ...cap((unlinked.results as { id: string; name: string; edition_id: string }[]).map((f) => ({ label: f.name, href: `/admin/editions/${f.edition_id}#files` }))),
   });
   checks.push({
@@ -121,7 +117,7 @@ export async function runChecks(t: T): Promise<Check[]> {
     ...cap((noCover.results as EditionInfo[]).map((e) => edItem(e))),
   });
   checks.push({
-    id: 'sure', title: N_('把握度高的建议还没确认'), hint: N_('这些文件的建议把握度在 80% 以上，可以在整理台「按建议确认」。'),
+    id: 'sure', title: N_('把握度高的建议还没确认'), hint: N_('这些文件的建议把握度在 80% 以上，可以在整理台「按建议归档」。'),
     ...cap((sure.results as { dir: string; n: number }[]).map((d) => ({ label: d.dir || '/', href: `/admin/inbox?view=unplaced&dir=${encodeURIComponent(d.dir)}`, detail: t('{n} 个', { n: d.n }) }))),
   });
   checks.push({
@@ -134,7 +130,22 @@ export async function runChecks(t: T): Promise<Check[]> {
 // ------------------------------------------------------------------------------------------ for the 整理台
 
 interface DirExts { dir: string; exts: string }
-interface TagRow { id: string; name: string; format: string; et_title: string | null; entry_title: string; version_label: string | null; edition_id: string }
+/** Each track row with its main audio file: the title its 整理版 download gets, and its track entry's title. */
+const TITLE_SQL = `
+  SELECT et.edition_id, et.tags, t.title AS entry_title, t.version_label, f.id, f.name, f.download_name, f.format, m.tags AS own
+  FROM edition_tracks et JOIN tracks t ON t.id = et.track_id
+  JOIN files f ON f.id = (SELECT x.id FROM files x WHERE x.edition_id = et.edition_id AND x.track_id = et.track_id AND x.kind = 'audio'
+                            AND x.sealed_in IS NULL AND x.state != 'ignored' ORDER BY lower(x.ext) = 'flac' DESC, x.size DESC LIMIT 1)
+  LEFT JOIN embedded m ON m.sha256 = f.sha256`;
+interface TitleRow {
+  edition_id: string; tags: string; entry_title: string; version_label: string | null;
+  id: string; name: string; download_name: string | null; format: string | null; own: string | null;
+}
+
+export const TITLE_CHECK = {
+  name: N_('曲名与曲目条目不一致'),
+  hint: N_('整理版下载写入的曲名（版本页标签里的「标题」，没改过就是文件自带的）与作品页的曲目条目不同：改其中一边，让两处一致。'),
+};
 
 const FORMAT_WORDS: [RegExp, string[]][] = [
   [/\bflac\b/i, ['flac']], [/\bwav\b/i, ['wav']], [/\bmp3\b/i, ['mp3']], [/\bm4a\b|\baac\b/i, ['m4a', 'aac']], [/\bogg\b/i, ['ogg']],
@@ -154,13 +165,18 @@ function mislabelledDirs(rows: DirExts[]): { dir: string; named: string[]; exts:
   return out;
 }
 
-/** Files whose own title tag differs from what their edition calls the track. */
-function tagDifferences(rows: TagRow[]): { r: TagRow; tag: string; mine: string }[] {
-  const out: { r: TagRow; tag: string; mine: string }[] = [];
+/** Rows whose downloaded title (the row's own, else the file's) differs from the track entry's title. */
+function titleDifferences(rows: TitleRow[]): { r: TitleRow; title: string; mine: string }[] {
+  const out: { r: TitleRow; title: string; mine: string }[] = [];
   for (const r of rows) {
-    const tag = parseFormat(r.format).tags?.title;
-    const mine = r.et_title ?? (r.version_label ? `${r.entry_title} (${r.version_label})` : r.entry_title);
-    if (tag && titleKey(tag.replace(/^\d{1,3}\s*[.．)）]\s+/, '')) !== titleKey(mine) && titleKey(tag) !== titleKey(r.entry_title)) out.push({ r, tag, mine });
+    const row = parseTags(r.tags);
+    const probed = parseFormat(r.format).tags?.title;
+    const list = 'title' in row ? row.title : parseTags(r.own).title ?? (probed ? [probed] : []);
+    const title = list[0];
+    if (!title) continue;
+    const mine = r.version_label ? `${r.entry_title} (${r.version_label})` : r.entry_title;
+    const bare = titleKey(title.replace(/^\d{1,3}\s*[.．)）]\s+/, ''));
+    if (bare !== titleKey(mine) && bare !== titleKey(r.entry_title)) out.push({ r, title, mine });
   }
   return out;
 }
@@ -180,17 +196,10 @@ export async function formatMismatchIds(): Promise<string[]> {
   return ids.map((r) => r.id);
 }
 
-/** 智能文件夹「标签与本站不一致」. */
+/** 智能文件夹「曲名与曲目条目不一致」: the rows' main audio files. */
 export async function tagMismatchIds(): Promise<string[]> {
-  const { results } = await db()
-    .prepare(
-      `SELECT f.id, f.name, f.format, et.title AS et_title, t.title AS entry_title, t.version_label, f.edition_id
-       FROM files f JOIN edition_tracks et ON et.edition_id = f.edition_id AND et.track_id = f.track_id
-       JOIN tracks t ON t.id = f.track_id
-       WHERE f.kind = 'audio' AND f.sealed_in IS NULL AND json_extract(f.format, '$.tags.title') IS NOT NULL`,
-    )
-    .all<TagRow>();
-  return tagDifferences(results).map((d) => d.r.id);
+  const { results } = await db().prepare(TITLE_SQL).all<TitleRow>();
+  return titleDifferences(results).map((d) => d.r.id);
 }
 
 export const EDITION_PROBLEMS = { count: N_('曲数与声明不符'), log: N_('CD 抓轨没有 LOG'), cover: N_('没有封面') } as const;

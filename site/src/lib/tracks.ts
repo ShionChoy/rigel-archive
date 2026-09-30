@@ -138,28 +138,6 @@ export async function saveTracks(actor: string, release: ReleaseRow, current: Tr
   return cs.commit();
 }
 
-interface AudioFile {
-  id: string;
-  dir: string;
-  name: string;
-  slot: string | null;
-  track_id: string | null;
-  format: string | null;
-}
-
-async function audioFiles(releaseId: string, slot?: string): Promise<AudioFile[]> {
-  const { results } = await db()
-    .prepare(
-      `SELECT id, dir, name, slot, track_id, format FROM files f
-       WHERE release_id = ? AND kind = 'audio' AND state != 'ignored' AND dup_of IS NULL
-         AND NOT EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id) ${slot ? 'AND slot = ?' : ''}
-       ORDER BY dir, name`,
-    )
-    .bind(...(slot ? [releaseId, slot] : [releaseId]))
-    .all<AudioFile>();
-  return results;
-}
-
 /** Disc and track number of an audio file, from its tags, else from its name and folder. */
 export function trackNumber(file: { dir: string; name: string; format: string | null }): { disc: number; track: number | null } {
   const tags = parseFormat(file.format).tags ?? {};
@@ -183,79 +161,6 @@ export function titleFromFile(file: { name: string; format: string | null }): st
   // «Rigel Theatre - Phantom Swing.wav»: the circle's name in front is not part of the title.
   const title = stem.replace(/^Rig[eë]l Theatre\s+-\s+/i, '');
   return title.replace(/^(?:\d[-.])?\d{1,3}\s*[-._)\]]*\s*/, '').trim() || title;
-}
-
-/** Link each audio file without a track to the track with its disc and number. Returns the count. */
-/**
- * Tracks of this release already heard in unlinked files: a file with the same decoded audio (pcm_md5)
- * or the same recording (acoustic fingerprint, most of the shorter file matching) as a file that is
- * already linked to a track. Only unambiguous answers (one track) are returned.
- */
-async function sameRecordingTracks(releaseId: string): Promise<Map<string, string>> {
-  const { results } = await db()
-    .prepare(
-      `SELECT f.id AS file, g.track_id AS track FROM files f
-       JOIN files g ON g.pcm_md5 = f.pcm_md5 AND g.release_id = f.release_id AND g.track_id IS NOT NULL
-       WHERE f.release_id = ?1 AND f.kind = 'audio' AND f.track_id IS NULL AND f.pcm_md5 IS NOT NULL
-       UNION
-       SELECT f.id, g.track_id FROM files f
-       JOIN acoustic_matches m ON f.sha256 IN (m.a, m.b)
-       JOIN fingerprints pa ON pa.sha256 = m.a JOIN fingerprints pb ON pb.sha256 = m.b
-       JOIN files g ON g.sha256 = CASE WHEN m.a = f.sha256 THEN m.b ELSE m.a END
-         AND g.release_id = f.release_id AND g.track_id IS NOT NULL
-       WHERE f.release_id = ?1 AND f.kind = 'audio' AND f.track_id IS NULL
-         AND m.matched_ms >= 800 * min(pa.duration, pb.duration)`,
-    )
-    .bind(releaseId)
-    .all<{ file: string; track: string }>();
-  const found = new Map<string, Set<string>>();
-  for (const r of results) found.set(r.file, (found.get(r.file) ?? new Set()).add(r.track));
-  return new Map([...found].filter(([, tracks]) => tracks.size === 1).map(([file, tracks]) => [file, [...tracks][0]]));
-}
-
-export async function matchFiles(actor: string, release: ReleaseRow): Promise<{ matched: number; left: number }> {
-  const tracks = await loadTracks(release.id);
-  if (tracks.length === 0) throw new UserError('还没有曲目表');
-  const byNumber = new Map(tracks.map((t) => [`${t.disc}/${t.position}`, t.id]));
-  const byTitle = new Map(tracks.map((t) => [titleKey(t.title), t.id]));
-  const [files, heard] = await Promise.all([audioFiles(release.id), sameRecordingTracks(release.id)]);
-  const groups = new Map<string, string[]>();
-  let left = 0;
-  for (const f of files.filter((f) => !f.track_id)) {
-    const n = trackNumber(f);
-    const id = heard.get(f.id) ?? (n.track ? byNumber.get(`${n.disc}/${n.track}`) : undefined) ?? byTitle.get(titleKey(titleFromFile(f)));
-    if (!id) {
-      left += 1;
-      continue;
-    }
-    groups.set(id, [...(groups.get(id) ?? []), f.id]);
-  }
-  const cs = new ChangeSet(db(), actor, summary('作品 {release}：按音频、曲号与标题把文件对应到曲目', { release: label(release) }));
-  for (const [trackId, ids] of groups) cs.updateFiles(ids, { track_id: trackId });
-  const matched = await cs.commit();
-  return { matched, left };
-}
-
-/** Save the track chosen for each listed file (the file list on the release page). */
-export async function saveFileTracks(actor: string, release: ReleaseRow, form: FormData): Promise<number> {
-  const ids = form.getAll('file_id').map(String);
-  const chosen = form.getAll('file_track').map(String);
-  const tracks = new Set((await loadTracks(release.id)).map((t) => t.id));
-  const { results: current } = await db()
-    .prepare('SELECT id, track_id FROM files WHERE release_id = ? AND id IN (SELECT value FROM json_each(?))')
-    .bind(release.id, JSON.stringify(ids))
-    .all<{ id: string; track_id: string | null }>();
-  const now = new Map(current.map((f) => [f.id, f.track_id]));
-  const groups = new Map<string, string[]>();
-  ids.forEach((id, i) => {
-    const want = chosen[i] || '';
-    if (!now.has(id) || (now.get(id) ?? '') === want) return;
-    if (want && !tracks.has(want)) throw new UserError('所选曲目不属于这个作品');
-    groups.set(want, [...(groups.get(want) ?? []), id]);
-  });
-  const cs = new ChangeSet(db(), actor, summary('作品 {release}：修改文件对应的曲目', { release: label(release) }));
-  for (const [trackId, list] of groups) cs.updateFiles(list, { track_id: trackId || null });
-  return cs.commit();
 }
 
 /** Songs with a title like this track's, other than its own, as candidates for linking. */

@@ -1,16 +1,26 @@
 ---
 // 按来源浏览: the original folders (合辑 and uploads) with how many files each still has to organize,
-// loaded when the sidebar section is opened.
-import DirTree from '../../../components/DirTree.astro';
+// loaded when the sidebar section is opened: the top level and the way to the open folder (?dir=), or the
+// folders directly under one (?under=<path>) when it is opened in the tree.
+import DirTree, { type DirNode } from '../../../components/DirTree.astro';
 import { sourceTree } from '../../../lib/inbox';
 
 export const partial = true;
 const { t } = Astro.locals;
 const url = new URL('/admin/inbox?view=all', Astro.url);
 const current = Astro.url.searchParams.get('dir') ?? '';
+const under = Astro.url.searchParams.get('under');
 const tree = await sourceTree();
+let nodes: DirNode[] = tree.nodes;
+if (under !== null) {
+  for (const part of under.split('/')) nodes = nodes.find((n) => n.name === part)?.children ?? [];
+}
 ---
 
-<a class:list={['src-all', { current: !current }]} href="/admin/inbox?view=all" data-nav>{t('全部来源')}</a>
-<span class="n">{tree.left} / {tree.total}</span>
-<DirTree nodes={tree.nodes} current={current} url={url} params={{ view: 'all' }} />
+{under === null && (
+  <>
+    <a class:list={['src-all', { current: !current }]} href="/admin/inbox?view=all" data-nav>{t('全部来源')}</a>
+    <span class="n">{tree.left} / {tree.total}</span>
+  </>
+)}
+<DirTree nodes={nodes} current={current} url={url} params={{ view: 'all' }} />

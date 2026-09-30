@@ -10,6 +10,8 @@ const { t } = Astro.locals;
 const url = Astro.url;
 const by = url.searchParams.get('by') === 'audio' ? 'audio' : 'content';
 const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+const inside = url.searchParams.get('inside') === '1';
+const SHOWN = 6; // files listed per group before the rest folds away
 
 if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData();
@@ -28,7 +30,7 @@ if (Astro.request.method === 'POST') {
   }
 }
 
-const [{ groups, total }, places] = await Promise.all([duplicateGroups(by, page), Places.load()]);
+const [{ groups, total }, places] = await Promise.all([duplicateGroups(by, page, 40, inside), Places.load()]);
 const pages = Math.max(1, Math.ceil(total / 40));
 ---
 
@@ -38,7 +40,10 @@ const pages = Math.max(1, Math.ceil(total / 40));
     <a class:list={['button', { primary: by === 'content' }]} href={withParams(url, { by: null, page: null })}>{t('内容完全相同')}</a>
     <a class:list={['button', { primary: by === 'audio' }]} href={withParams(url, { by: 'audio', page: null })}>{t('解码后音频相同（格式不同）')}</a>
     <span class="muted">{t('共 {n} 组', { n: total })}</span>
+    <label class="inline-check"><input type="checkbox" checked={inside} onchange="location.href = this.dataset[this.checked ? 'on' : 'off']"
+      data-on={withParams(url, { inside: '1', page: null })} data-off={withParams(url, { inside: null, page: null })} /> {t('包括同一个压缩包里的重复')}</label>
   </div>
+  <p class="muted small">{t('按去掉重复后能省下的空间排序。全部副本都在同一个压缩包里的（如游戏的语言文件）默认不列出：整体收藏那个包后它们就不再出现。')}</p>
   {by === 'audio' && <p class="muted">{t('格式不同的同一音频（如 WAV 与 FLAC）不一定要去掉：它们可以各自留在自己的版本里。')}</p>}
   <form method="post">
     {groups.map((g, gi) => (
@@ -47,19 +52,22 @@ const pages = Math.max(1, Math.ceil(total / 40));
         <input type="hidden" name={`files_${gi}`} value={g.files.map((f) => f.id).join(',')} />
         <table class="grid">
           <tbody>
-            {g.files.map((f) => {
+            {g.files.map((f, i) => {
               const key = places.keyOf(f);
               return (
-                <tr>
+                <tr class:list={{ folded: i >= SHOWN && f.id !== g.keeper }}>
                   <td style="width:5em"><label><input type="radio" name={`keep_${gi}`} value={f.id} checked={f.id === g.keeper} /> {t('保留')}</label></td>
                   <td class="name"><a href={`/admin/files/${f.id}`}>{f.name}</a><div class="muted mono">{f.dir}</div></td>
-                  <td>{key ? <a href={`/admin/inbox?state=all&loc=${encodeURIComponent(key)}`}>{places.path(key, t)}</a> : <span class={`chip ${f.state}`}>{t(f.state === 'inbox' ? '未归档' : FILE_STATE_LABELS[f.state as keyof typeof FILE_STATE_LABELS])}</span>}</td>
+                  <td>{key ? <a href={`/admin/inbox?loc=${encodeURIComponent(key)}`}>{places.path(key, t)}</a> : <span class={`chip ${f.state}`}>{t(f.state === 'inbox' ? '未归档' : FILE_STATE_LABELS[f.state as keyof typeof FILE_STATE_LABELS])}</span>}</td>
                   <td class="num">{formatBytes(f.size)}</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+        {g.files.length > SHOWN + 1 && (
+          <button type="button" class="link" onclick="this.closest('.dup-group').classList.add('unfold'); this.remove()">{t('显示其余 {n} 个', { n: g.files.length - SHOWN - 1 })}</button>
+        )}
         <button type="submit" name="only" value={String(gi)}>{t('其余 {n} 个标为重复', { n: g.files.length - 1 })}</button>
       </div>
     ))}

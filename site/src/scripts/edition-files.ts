@@ -5,7 +5,10 @@
 // section is fetched again afterwards, and the track list takes the new files when it has nothing unsaved.
 
 import { t } from './i18n';
-import { closeMenu, confirmBox, conflictBox, openMenu, renameBox, toast, type MenuEntry, type RenameFile } from './desk-ui';
+import { closeMenu, confirmBox, openMenu, renameBox, toast, type MenuEntry, type RenameFile } from './desk-ui';
+import {
+  fileRequest, folderRequest, moreQueued, nameNewFolder, postJson, queued, renameInPlace, renameRequest, report, undoRequest, type Reply,
+} from './file-ops';
 import { openPicker, rememberPlace, resetPickerOptions } from './place-picker';
 import { namingProblem, renderName, type NameParts } from '../lib/naming';
 import type { Editor } from './edition';
@@ -20,8 +23,6 @@ const editor = () => (window as unknown as { rigelEditor?: Editor }).rigelEditor
 const section = $('#files');
 const selected = new Set<string>(); // row keys: f:<file id>, d:<folder id>
 let anchor: string | null = null; // where a Shift range starts
-let lastBatch: string | null = null;
-let busy = false;
 
 const rows = () => $$<HTMLTableRowElement>('tr[data-key]', section!);
 const rowOf = (key: string) => rows().find((r) => r.dataset.key === key) ?? null;
@@ -99,89 +100,40 @@ function clearSelection() {
 }
 
 // ------------------------------------------------------------------------------------------ talking to the server
+// The 整理台's own requests and queue (scripts/file-ops.ts): one action at a time, a key pressed meanwhile waits.
 
-async function postJson(path: string, body: unknown): Promise<Record<string, unknown>> {
-  try {
-    const r = await fetch(path, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json', 'x-admin-request': '1' },
-      body: JSON.stringify(body),
-    });
-    return (await r.json()) as Record<string, unknown>;
-  } catch (e) {
-    return { ok: false, err: String(e) };
-  }
-}
-
-function done(r: { msg?: unknown; batch?: unknown }) {
-  const batch = (r.batch as string | null | undefined) ?? null;
-  lastBatch = batch ?? lastBatch;
-  toast(String(r.msg ?? ''), { batch });
-}
-
-/** A folder operation (/admin/desk/folder): asks about same-named folders, then shows the result. */
-async function folderOp(body: Record<string, unknown>): Promise<Record<string, unknown> | null> {
-  let r = await postJson('/admin/desk/folder', body);
-  if (!r.ok && Array.isArray(r.conflict)) {
-    const mode = await conflictBox(r.conflict as string[]);
-    if (!mode) return null;
-    r = await postJson('/admin/desk/folder', { ...body, mode });
-  }
-  if (!r.ok && typeof r.confirm === 'string') {
-    if (!(await confirmBox(r.confirm, t('确定删除')))) return null;
-    r = await postJson('/admin/desk/folder', { ...body, confirmed: true });
-  }
-  if (!r.ok) {
-    toast(String(r.err ?? t('操作失败')), { error: true });
-    return null;
-  }
-  done(r);
+/** A folder operation (/admin/desk/folder), its message shown; null when it failed or the admin said no. */
+async function folderOp(body: Record<string, unknown>): Promise<Reply | null> {
+  const r = await folderRequest(body);
+  if (r) report(r);
   return r;
 }
 
-/** A file action (the 整理台's POST): move, rename, ignore, discard, rights, dup, reset. */
+/** A file action (the 整理台's POST): move, ignore, discard, rights, dup, reset. */
 async function fileAction(action: string, ids: string[], extra: Record<string, string> = {}): Promise<boolean> {
   if (!ids.length) return false;
-  const body = new FormData();
-  body.append('action', action);
-  for (const id of ids) body.append('ids', id);
-  for (const [k, v] of Object.entries(extra)) body.append(k, v);
-  const r = await fetch('/admin/inbox', { method: 'POST', body, headers: { accept: 'application/json', 'x-admin-request': '1' } }).catch(() => null);
-  const j = (await r?.json().catch(() => null)) as { ok: boolean; msg?: string; err?: string; batch?: string | null } | null;
-  if (!j?.ok) {
-    toast(j?.err ?? t('操作失败'), { error: true });
-    return false;
-  }
-  done(j);
-  return true;
+  const r = await fileRequest(action, ids, extra);
+  if (r) report(r);
+  return !!r;
 }
 
-/** One action at a time (the list is dimmed meanwhile); the section and the track list are fetched again after it. */
-async function run(work: () => Promise<unknown>, opts: { keep?: boolean } = {}) {
-  if (busy) return;
-  busy = true;
-  section?.classList.add('working');
-  try {
-    closeMenu();
-    await work();
-    if (!opts.keep) clearSelection();
-    await refresh();
-  } finally {
-    busy = false;
-    section?.classList.remove('working');
-  }
-}
-
-async function undo(batch: string | null = lastBatch) {
-  if (!batch) return;
-  await run(async () => {
-    const body = new FormData();
-    body.append('batch', batch);
-    const r = await fetch('/admin/history', { method: 'POST', body, headers: { accept: 'application/json' } }).catch(() => null);
-    const j = (await r?.json().catch(() => null)) as { ok: boolean; msg?: string; err?: string } | null;
-    toast(j?.ok ? j.msg ?? t('已撤销') : j?.err ?? t('撤销失败'), { error: !j?.ok });
-    if (j?.ok && batch === lastBatch) lastBatch = null;
+/** One action at a time (the list is dimmed meanwhile); the section and the track list are fetched again after the last. */
+function run(work: () => Promise<unknown>, opts: { keep?: boolean } = {}) {
+  return queued(async () => {
+    section?.classList.add('working');
+    try {
+      closeMenu();
+      await work();
+      if (!opts.keep) clearSelection();
+      if (!moreQueued()) await refresh();
+    } finally {
+      if (!moreQueued()) section?.classList.remove('working');
+    }
   });
+}
+
+function undo(batch?: string | null) {
+  return run(() => undoRequest(batch));
 }
 
 /** Fetch the page again and swap in the file list, the delete button and the places for 「移动到…」. */
@@ -278,63 +230,43 @@ function freeName(parent: string, base: string): string {
   for (let i = 2; ; i += 1) if (!taken.has(`${base} (${i})`)) return `${base} (${i})`;
 }
 
+/** New folder: its name is asked for in a row where it will appear, then it is made (one history entry). */
 async function newFolder(parent = home()) {
-  if (!parent || busy) return;
-  let id: string | null = null;
-  await run(async () => {
-    const r = await folderOp({ op: 'create', under: folderKey(parent), name: freeName(parent, t('新建文件夹')) });
-    id = r?.id ? String(r.id) : null;
-  });
-  if (id) startRename(`d:${id}`);
+  if (!parent) return;
+  const name = await askFolderName(parent, freeName(parent, t('新建文件夹')));
+  if (name) await run(() => folderOp({ op: 'create', under: folderKey(parent), name }), { keep: true });
+}
+
+function askFolderName(parent: string, value: string): Promise<string | null> {
+  const parentRow = rowOf(`d:${parent}`);
+  const body = parentRow?.parentElement;
+  if (!parentRow || !body) return Promise.resolve(null);
+  const row = document.createElement('tr');
+  row.className = 'folder-row';
+  row.appendChild(Object.assign(document.createElement('td'), { className: 'sel' }));
+  const name = row.appendChild(Object.assign(document.createElement('td'), { className: 'tree-name' }));
+  name.style.setProperty('--depth', String(Number(parentRow.dataset.depth || 0) + 1));
+  const icon = $('tr[data-role="plain"] .tree-name svg', section!) ?? $('.tree-name svg', parentRow);
+  if (icon) name.appendChild(icon.cloneNode(true));
+  name.appendChild(document.createElement('span')).dataset.nameSlot = '';
+  row.appendChild(Object.assign(document.createElement('td'), { colSpan: 5 }));
+  return nameNewFolder(body, parentRow.nextElementSibling, row, value);
 }
 
 /** Rename in the row: a file without its extension, or a folder; Enter saves, Esc cancels. */
-function startRename(key: string) {
+async function startRename(key: string) {
   const row = rowOf(key);
   const link = row && $<HTMLElement>('.fname', row);
   if (!row || !link) return;
   const name = row.dataset.name ?? '';
   const ext = isFile(key) ? extOf(row) : '';
   const stem = ext ? name.slice(0, -ext.length) : name;
-  const box = document.createElement('span');
-  box.className = 'rename-box';
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'rename';
-  input.value = stem;
-  input.setAttribute('aria-label', isFile(key) ? t('新文件名') : t('新名称'));
-  box.appendChild(input);
-  if (ext) {
-    const tail = document.createElement('span');
-    tail.className = 'muted';
-    tail.textContent = ext;
-    box.appendChild(tail);
+  const value = await renameInPlace(link, { value: stem, ext, label: isFile(key) ? t('新文件名') : t('新名称'), row });
+  if (value !== null) {
+    if (isFile(key)) await run(() => renameFiles([[idOf(key), value + ext]]), { keep: true });
+    else await run(() => folderOp({ op: 'rename', id: idOf(key), name: value }), { keep: true });
   }
-  link.hidden = true;
-  row.draggable = false;
-  link.parentNode!.insertBefore(box, link.nextSibling);
-  input.focus();
-  input.select();
-  let finished = false;
-  const finish = async (save: boolean) => {
-    if (finished) return;
-    finished = true;
-    const value = input.value.trim();
-    box.remove();
-    link.hidden = false;
-    row.draggable = row.dataset.role !== 'root';
-    if (save && value && value !== stem) {
-      if (isFile(key)) await run(() => renameFiles([[idOf(key), value + ext]]), { keep: true });
-      else await run(() => folderOp({ op: 'rename', id: idOf(key), name: value }), { keep: true });
-    }
-    rowOf(key)?.focus({ preventScroll: true }); // the keys keep working on it
-  };
-  input.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') finish(true);
-    if (e.key === 'Escape') finish(false);
-  });
-  input.addEventListener('blur', () => finish(true));
+  rowOf(key)?.focus({ preventScroll: true }); // the keys keep working on it
 }
 
 /** «.flac» when the name ends in the file's extension, else ''. */
@@ -345,17 +277,12 @@ function extOf(row: HTMLElement): string {
 }
 
 async function renameFiles(pairs: [string, string][]): Promise<string | null> {
-  const body = new FormData();
-  body.append('action', 'rename');
-  for (const [id] of pairs) body.append('ids', id);
-  body.append('names', JSON.stringify(pairs));
-  const r = await fetch('/admin/inbox', { method: 'POST', body, headers: { accept: 'application/json', 'x-admin-request': '1' } }).catch(() => null);
-  const j = (await r?.json().catch(() => null)) as { ok: boolean; msg?: string; err?: string; batch?: string | null } | null;
-  if (!j?.ok) {
-    toast(j?.err ?? t('操作失败'), { error: true });
-    return j?.err ?? t('操作失败');
+  const r = await renameRequest(pairs);
+  if (!r.ok) {
+    toast(r.err ?? t('操作失败'), { error: true });
+    return r.err ?? t('操作失败');
   }
-  done(j);
+  report(r);
   return null;
 }
 
@@ -365,20 +292,18 @@ async function batchRename(ids: string[]) {
     const ext = extOf(r);
     return { id: idOf(r.dataset.key!), name, stem: ext ? name.slice(0, -ext.length) : name, ext, orig: r.dataset.orig ?? name };
   });
-  if (!list.length || busy) return;
+  if (!list.length) return;
   // The dialog stays open until the names are saved (a clash is shown in it) and the list is fetched again.
-  await renameBox(list, async (pairs) => {
-    busy = true;
+  await renameBox(list, (pairs) => queued(async () => {
     section?.classList.add('working');
     try {
       const problem = await renameFiles(pairs);
-      if (!problem) await refresh();
+      if (!problem && !moreQueued()) await refresh();
       return problem;
     } finally {
-      busy = false;
       section?.classList.remove('working');
     }
-  });
+  }));
 }
 
 function renameSelection() {
@@ -411,7 +336,7 @@ async function setCover(id: string) {
   await run(async () => {
     const r = await postJson('/admin/desk/tags', { op: 'cover', file: id });
     if (!r.ok) toast(String(r.err ?? t('操作失败')), { error: true });
-    else done(r);
+    else report(r);
   }, { keep: true });
 }
 
@@ -554,7 +479,7 @@ async function namingDialog() {
  */
 async function tidyDialog() {
   const d = $<HTMLDialogElement>('#dlg-tidy');
-  if (!d || busy) return;
+  if (!d) return;
   const loose = rows().filter((r) => isFile(r.dataset.key!) && r.dataset.parent === home() && r.dataset.loose);
   if (!loose.length) return;
   const form = $<HTMLFormElement>('form', d)!;
@@ -795,7 +720,7 @@ function init() {
   document.addEventListener('click', (ev) => {
     const act = (ev.target as HTMLElement).closest<HTMLElement>('#desk-toast [data-act]');
     if (!act) return;
-    if (act.dataset.act === 'undo-toast') undo(act.dataset.batch || lastBatch);
+    if (act.dataset.act === 'undo-toast') undo(act.dataset.batch || null);
     if (act.dataset.act === 'close-toast') $('#desk-toast')!.hidden = true;
   });
   initDrag();

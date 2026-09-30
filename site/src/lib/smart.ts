@@ -7,8 +7,8 @@ import { db } from './db';
 import { originalGone } from './deletion';
 import { N_, UserError } from './i18n';
 import { newId } from './ids';
-import { UNPLACED_SQL, type Places } from './locations';
-import { formatMismatchIds, tagMismatchIds } from './checks';
+import { IS_ARCHIVE, UNPLACED_SQL, type Places } from './locations';
+import { TITLE_CHECK, formatMismatchIds, tagMismatchIds } from './checks';
 
 export const RULE_OPS = {
   contains: N_('包含'),
@@ -76,7 +76,7 @@ const HAS_PLACE = `(${S('release_id')} IS NOT NULL OR ${S('folder')} IS NOT NULL
 export const HAS_COPY = `(files.sha256 IS NOT NULL AND EXISTS (SELECT 1 FROM files d WHERE d.sha256 = files.sha256 AND d.id != files.id AND d.sealed_in IS NULL AND d.state != 'ignored'))`;
 const SAME_RECORDING = (own: boolean) => `(files.sha256 IS NOT NULL AND EXISTS (SELECT 1 FROM acoustic_matches m WHERE (m.a = files.sha256 OR m.b = files.sha256)
   ${own ? "AND EXISTS (SELECT 1 FROM files o WHERE o.sha256 = CASE WHEN m.a = files.sha256 THEN m.b ELSE m.a END AND o.rights = 'own')" : ''}))`;
-const ARCHIVE = "(files.kind IN ('archive', 'disc_image') OR json_extract(files.format, '$.archive') IS NOT NULL)";
+const ARCHIVE = IS_ARCHIVE;
 
 function textSql(column: string, op: RuleOp, value: string): { sql: string; binds: unknown[] } {
   // instr / substr instead of LIKE: D1 refuses LIKE patterns longer than 50 bytes.
@@ -202,12 +202,12 @@ export const PRESETS: Preset[] = [
   { key: 'recent', name: N_('最近上传'), hint: N_('7 天内在后台上传的文件。'), sql: "files.origin = 'upload' AND files.created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')" },
   { key: 'gone', name: N_('原件已不存在'), hint: N_('最近一次导入时合辑里已找不到原件的文件，可以删除。'), sql: originalGone('files') },
   {
-    key: 'unlinked', name: N_('音频没有对应曲目'), hint: N_('版本已有曲目顺序、但还没对应到曲目的音频：在版本页点「对应文件」。'),
+    key: 'unlinked', name: N_('音频没有对应曲目'), hint: N_('版本已有曲目顺序、但还没对应到曲目的音频：在版本页的曲目列表下方点「按曲号、标题和时长自动对应」。'),
     sql: `files.kind = 'audio' AND files.edition_id IS NOT NULL AND files.track_id IS NULL AND files.state != 'ignored' AND files.dup_of IS NULL
       AND EXISTS (SELECT 1 FROM edition_tracks et WHERE et.edition_id = files.edition_id)
       AND NOT EXISTS (SELECT 1 FROM files n WHERE n.replaces = files.id)`,
   },
-  { key: 'tags', name: N_('标签与本站不一致'), hint: N_('文件内嵌的曲名与本站不同：确认本站的曲名，或在版本页「从文件标签导入」。'), ids: tagMismatchIds },
+  { key: 'tags', name: TITLE_CHECK.name, hint: TITLE_CHECK.hint, ids: tagMismatchIds },
   { key: 'format', name: N_('目录名与格式不符'), hint: N_('原始目录名写的格式与实际文件不同：确认是不是放错了目录。'), ids: formatMismatchIds },
   { key: 'editions', name: N_('有问题的版本'), hint: N_('曲数与声明不符、CD 抓轨没有 LOG、没有封面的版本。'), editions: true },
 ];

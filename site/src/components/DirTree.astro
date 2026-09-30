@@ -1,4 +1,7 @@
 ---
+// The original folders (按来源浏览): each with how many files it still has to organize. Only the way to the
+// open folder is drawn open; a folder with subfolders that is closed is sent without them and fetches them
+// when opened (data-lazy; /admin/desk/source?under=<path>), so the tree of ten thousand folders stays small.
 import { ARCHIVE_NAME } from '../lib/constants';
 import { withParams } from '../lib/format';
 
@@ -14,7 +17,7 @@ interface Props {
   nodes: DirNode[];
   current: string;
   url: URL;
-  /** Other query parameters every link sets (e.g. the tree tab, or loc=unplaced). */
+  /** Other query parameters every link sets (e.g. view=all). */
   params?: Record<string, string | null>;
 }
 
@@ -31,14 +34,14 @@ const count = (node: DirNode) => (node.left === undefined ? String(node.n) : nod
     nodes.map((node) => (
       <li>
         {node.children.length > 0 ? (
-          <details open={isOpen(node)}>
+          <details open={isOpen(node)} data-lazy={isOpen(node) ? undefined : node.path}>
             <summary>
               <a class:list={[mark(node), { current: current === node.path, done: node.left === 0 }]} href={href(node)} data-dir={node.path} data-nav>
                 {node.name}
               </a>
               <span class="n">{count(node)}</span>
             </summary>
-            <Astro.self nodes={node.children} current={current} url={url} params={params} />
+            {isOpen(node) && <Astro.self nodes={node.children} current={current} url={url} params={params} />}
           </details>
         ) : (
           <>

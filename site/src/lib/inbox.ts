@@ -5,7 +5,7 @@ import { db, parseSuggestion, type Suggestion } from './db';
 import { deleteFiles, planDelete, type DeletePlan } from './deletion';
 import { newId } from './ids';
 import {
-  Places, TOP, UNPLACED, UNPLACED_SQL, VISIBLE, applyPatches, ensureEntityFolder, ensureFolder, folderKey, locationWhere,
+  NO_PLACE, Places, TOP, UNPLACED, UNPLACED_SQL, VISIBLE, ensureEntityFolder, ensureFolder, folderKey, isArchive, loadRows, locationWhere,
   markEditionsCollected, moveFiles, placePatch, sealArchives,
 } from './locations';
 import { presetOf, ruleSetSql, type SmartFolder } from './smart';
@@ -66,6 +66,13 @@ function isView(view: string): boolean {
 const S = (field: string) => `json_extract(files.suggest, '$.${field}')`;
 /** SQL (on `files`): the rules suggest a place, or keeping it whole. */
 export const HAS_SUGGESTION = `(${S('release_id')} IS NOT NULL OR ${S('folder')} IS NOT NULL OR ${S('place')} IS NOT NULL OR ${S('seal')} = 1 OR ${S('state')} = 'ignored')`;
+/** Suggestions below this confidence are only accepted one file at a time (on the file page). */
+export const MIN_BATCH_CONFIDENCE = 0.5;
+/**
+ * SQL (on `files`): 「可按建议归档」, what a batch 「按建议归档」 files: unplaced, with a suggestion that decides
+ * something and is sure enough. (Every file of the 合辑 has some suggestion, so 「有建议」 alone was 未归档 again.)
+ */
+export const ACCEPTABLE_SQL = `${UNPLACED_SQL} AND ${HAS_SUGGESTION} AND coalesce(${S('confidence')}, 0) >= ${MIN_BATCH_CONFIDENCE}`;
 
 /**
  * The files a query lists. `smart` is the open smart folder, `ids` the files a preset found by code
@@ -80,7 +87,7 @@ export function deskWhere(q: DeskQuery, places: Places, smart?: SmartFolder | nu
   };
   if (q.loc) add(locationWhere(places, q.loc, q.sub));
   else if (q.view === 'unplaced') parts.push(UNPLACED_SQL);
-  else if (q.view === 'suggested') parts.push(`${UNPLACED_SQL} AND ${HAS_SUGGESTION}`);
+  else if (q.view === 'suggested') parts.push(ACCEPTABLE_SQL);
   else if (q.view === 'ignored') parts.push("files.state = 'ignored'");
   else if (q.view.startsWith('p:')) {
     const preset = presetOf(q.view.slice(2));
@@ -123,7 +130,7 @@ export async function idsForQuery(q: DeskQuery, places: Places, smart?: SmartFol
 export async function viewCounts(): Promise<Record<Exclude<FixedView, 'trash'>, number>> {
   const row = await db()
     .prepare(
-      `SELECT count(*) AS all_, sum(${UNPLACED_SQL}) AS unplaced, sum(${UNPLACED_SQL} AND ${HAS_SUGGESTION}) AS suggested,
+      `SELECT count(*) AS all_, sum(${UNPLACED_SQL}) AS unplaced, sum(${ACCEPTABLE_SQL}) AS suggested,
               sum(files.state = 'ignored') AS ignored
        FROM files WHERE ${VISIBLE}`,
     )
@@ -170,31 +177,8 @@ export async function sourceTree(onlyUnplaced = false): Promise<{ nodes: SourceN
   return { nodes: finish(root), total: root.n, left: root.left };
 }
 
-/** Overall progress: visible files, still to organize, and per top-level original folder. */
-export async function progress(): Promise<{ total: number; left: number; ignored: number; hidden: number; tops: { name: string; n: number; left: number }[] }> {
-  const [overall, tops] = await db().batch([
-    db().prepare(
-      `SELECT sum(sealed_in IS NULL) AS total, sum(sealed_in IS NULL AND state = 'inbox' AND release_id IS NULL AND folder_id IS NULL) AS left,
-              sum(sealed_in IS NULL AND state = 'ignored') AS ignored, sum(sealed_in IS NOT NULL) AS hidden FROM files`,
-    ),
-    db().prepare(
-      `SELECT CASE WHEN instr(dir, '/') > 0 THEN substr(dir, 1, instr(dir, '/') - 1) ELSE dir END AS name, count(*) AS n,
-              sum(state = 'inbox' AND release_id IS NULL AND folder_id IS NULL) AS left
-       FROM files WHERE sealed_in IS NULL GROUP BY 1 ORDER BY 1`,
-    ),
-  ]);
-  const o = overall.results[0] as { total: number | null; left: number | null; ignored: number | null; hidden: number | null };
-  return {
-    total: o.total ?? 0, left: o.left ?? 0, ignored: o.ignored ?? 0, hidden: o.hidden ?? 0,
-    tops: (tops.results as { name: string; n: number; left: number }[]).filter((r) => r.name),
-  };
-}
-
-/** Suggestions below this confidence are only accepted one file at a time (on the file page). */
-export const MIN_BATCH_CONFIDENCE = 0.5;
-
 export type InboxAction =
-  | { action: 'accept' }
+  | { action: 'accept'; preview?: boolean } // preview: say what it would do, change nothing
   | { action: 'move'; target: string; keep: string | null; newFolder: string | null }
   | { action: 'rights'; rights: string }
   | { action: 'ignore' }
@@ -219,9 +203,17 @@ export interface ActionResult {
   sealed?: { archives: number; hidden: number }; // archives kept whole, and the files that left the 整理台
   created?: string[]; // accept: editions made because a suggestion named one that did not exist yet
   noType?: number; // accept: files skipped because their suggestion's edition type has been deleted
+  plan?: AcceptPlan; // accept with preview: what it would do (nothing was changed)
 }
 
-const UNPLACE = { release_id: null, edition_id: null, folder_id: null, slot: null, track_id: null };
+/** What 「按建议归档」 would do, shown before a large one runs. */
+export interface AcceptPlan {
+  files: number; // files accepted (placed, ignored, or archives kept whole)
+  ignored: number;
+  editions: number; // editions made (their names are in `created`)
+  folders: number; // other folders made
+  where: { path: string; n: number }[]; // where most files go
+}
 
 /**
  * The edition of this type and name of a release (with its folder), made in `cs` when missing (its id is
@@ -289,7 +281,7 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
       : ignore.length === 0
         ? summary('删除 {n} 个文件（30 天内可在回收站恢复）', { n: plan.count })
         : summary('删除 {n} 个文件、忽略 {m} 个（合辑里的原件还在的只能忽略）', { n: plan.count, m: ignore.length }));
-    if (ignore.length) cs.updateFiles(ignore, { ...UNPLACE, state: 'ignored' });
+    if (ignore.length) cs.updateFiles(ignore, { ...NO_PLACE, state: 'ignored' });
     if (plan.count) cs.deleteFiles(plan.levels);
     const changed = await cs.commit();
     return { summary: cs.summary, changed, skipped: ids.length - ignore.length - plan.count + plan.members, lowConfidence: 0, batchId: changed ? cs.batchId : null };
@@ -335,9 +327,7 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
         else if (s.confidence < MIN_BATCH_CONFIDENCE && ids.length > 1) unsure.add(row.id);
         else suggestions.set(row.id, s);
       }
-      const isArchive = (row: Record<string, unknown>) =>
-        row.kind === 'archive' || row.kind === 'disc_image' || String(row.format ?? '').includes('"archive"');
-      let seals = rows.filter((r) => suggestions.get(r.id)?.seal && isArchive(r)).map((r) => r.id);
+      let seals = rows.filter((r) => suggestions.get(r.id)?.seal && isArchive({ kind: String(r.kind), format: r.format })).map((r) => r.id);
       // Files inside an archive kept whole in this same step are not filed one by one.
       const inside = new Set<string>();
       if (seals.length) {
@@ -375,14 +365,14 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
         const s = suggestions.get(row.id);
         if (!s || inside.has(row.id)) continue;
         if (s.state === 'ignored') {
-          patches.set(row.id, { ...UNPLACE, state: 'ignored' });
+          patches.set(row.id, { ...NO_PLACE, state: 'ignored' });
           continue;
         }
         const key = suggestedPlace(cs, places, s, made);
         const patch: Record<string, unknown> = key ? placePatch(row as never, places.place(key)) : {};
         if (s.rights) patch.rights = s.rights;
         if (s.role) patch.role = s.role;
-        if (!key && !s.rights && !s.role && !(s.seal && isArchive(row))) {
+        if (!key && !s.rights && !s.role && !(s.seal && isArchive({ kind: String(row.kind), format: row.format }))) {
           skipped += 1;
           continue;
         }
@@ -391,9 +381,9 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
       }
       const accepted = new Set([...patches.keys(), ...seals]).size;
       cs.setSummary(summary('整理台：按建议确认 {n} 个文件', { n: accepted }));
-      applyPatches(cs, patches);
+      cs.patchFiles(patches);
       const placed = [...patches.values()].filter((p) => p.state !== 'ignored');
-      markEditionsCollected(cs, places, placed.map((p) => p.edition_id as string | null));
+      if (!a.preview) markEditionsCollected(cs, places, placed.map((p) => p.edition_id as string | null));
       created = made.map((id) => {
         const e = places.editions.get(id)!;
         return `${places.releaseLabel(e.release_id)} / ${places.editionLabel(e, t)}`;
@@ -411,6 +401,18 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
         refused = r.refused;
       }
       placedCount = placed.length;
+      if (a.preview) {
+        const where = new Map<string, number>();
+        for (const p of placed) if (p.folder_id) where.set(p.folder_id as string, (where.get(p.folder_id as string) ?? 0) + 1);
+        const plan: AcceptPlan = {
+          files: accepted,
+          ignored: patches.size - placed.length,
+          editions: made.length,
+          folders: Math.max(0, cs.queuedCount('folder') - made.length),
+          where: [...where].sort((x, y) => y[1] - x[1]).slice(0, 8).map(([id, n]) => ({ path: places.path(folderKey(id), t), n })),
+        };
+        return { summary: cs.summary, changed: 0, skipped, lowConfidence, batchId: null, placed: placedCount, sealed, refused, created, noType, plan };
+      }
       break;
     }
     case 'rights': {
@@ -423,13 +425,13 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
     case 'ignore': {
       const rows = await visible('id, sealed_in');
       cs = new ChangeSet(database, actor, summary('整理台：忽略 {n} 个文件', { n: rows.length }));
-      cs.updateFiles(rows.map((r) => r.id), { ...UNPLACE, state: 'ignored' });
+      cs.updateFiles(rows.map((r) => r.id), { ...NO_PLACE, state: 'ignored' });
       break;
     }
     case 'reset': {
       const rows = await visible('id, sealed_in');
       cs = new ChangeSet(database, actor, summary('整理台：{n} 个文件退回待整理', { n: rows.length }));
-      cs.updateFiles(rows.map((r) => r.id), { ...UNPLACE, state: 'inbox', role: null, rights: 'unknown', dup_of: null });
+      cs.updateFiles(rows.map((r) => r.id), { ...NO_PLACE, state: 'inbox', role: null, rights: 'unknown', dup_of: null });
       break;
     }
     case 'dup': {
@@ -437,7 +439,7 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
       skipped = plan.skipped;
       const marked = [...plan.keepers.values()].reduce((n, list) => n + list.length, 0);
       cs = new ChangeSet(database, actor, summary('整理台：{n} 个文件标为重复', { n: marked }));
-      for (const [keeper, list] of plan.keepers) cs.updateFiles(list, { ...UNPLACE, dup_of: keeper, state: 'ignored' });
+      for (const [keeper, list] of plan.keepers) cs.updateFiles(list, { ...NO_PLACE, dup_of: keeper, state: 'ignored' });
       break;
     }
   }
@@ -503,22 +505,11 @@ async function renameFiles(actor: string, names: [string, string][]): Promise<Ac
   return { summary: cs.summary, changed, skipped, lowConfidence: 0, batchId: changed ? cs.batchId : null };
 }
 
-async function loadRows<R>(columns: string, ids: string[]): Promise<R[]> {
-  const out: R[] = [];
-  for (let i = 0; i < ids.length; i += 2000) {
-    const { results } = await db()
-      .prepare(`SELECT ${columns} FROM files WHERE id IN (SELECT value FROM json_each(?))`)
-      .bind(JSON.stringify(ids.slice(i, i + 2000)))
-      .all<R>();
-    out.push(...results);
-  }
-  return out;
-}
-
 export function parseInboxAction(form: FormData): InboxAction {
   const action = String(form.get('action') ?? '');
   switch (action) {
     case 'accept':
+      return { action, preview: form.get('preview') === '1' };
     case 'ignore':
     case 'reset':
     case 'dup':
@@ -635,17 +626,18 @@ export interface DupGroup {
 
 /**
  * Groups of visible files with the same content (or, by='audio', the same decoded audio in different
- * files), largest first, with the copy 「标为重复」 would keep.
+ * files), the most space to gain first, with the copy 「标为重复」 would keep. Copies that are all inside
+ * one archive (a game's hundred identical locale files) are left out unless `inside` asks for them.
  */
-export async function duplicateGroups(by: 'content' | 'audio', page: number, size = 40): Promise<{ groups: DupGroup[]; total: number }> {
+export async function duplicateGroups(by: 'content' | 'audio', page: number, size = 40, inside = false): Promise<{ groups: DupGroup[]; total: number }> {
   const key = by === 'content' ? 'sha256' : 'pcm_md5';
   const database = db();
   const where = `${key} IS NOT NULL AND sealed_in IS NULL AND state != 'ignored'`;
-  const having = by === 'content' ? 'count(*) > 1' : 'count(DISTINCT sha256) > 1';
+  const having = [by === 'content' ? 'count(*) > 1' : 'count(DISTINCT sha256) > 1', inside ? '' : 'count(DISTINCT coalesce(member_of, id)) > 1'].filter(Boolean).join(' AND ');
   const [totalRow, keys] = await database.batch([
     database.prepare(`SELECT count(*) AS n FROM (SELECT ${key} FROM files WHERE ${where} GROUP BY ${key} HAVING ${having})`),
     database
-      .prepare(`SELECT ${key} AS k, count(*) AS n, max(size) AS size FROM files WHERE ${where} GROUP BY ${key} HAVING ${having} ORDER BY n DESC, size DESC LIMIT ? OFFSET ?`)
+      .prepare(`SELECT ${key} AS k, (count(*) - 1) * max(size) AS gain FROM files WHERE ${where} GROUP BY ${key} HAVING ${having} ORDER BY gain DESC, k LIMIT ? OFFSET ?`)
       .bind(size, (page - 1) * size),
   ]);
   const list = (keys.results as { k: string }[]).map((r) => r.k);
@@ -669,7 +661,7 @@ export async function markDuplicateGroups(actor: string, choices: { keeper: stri
   const cs = new ChangeSet(db(), actor, summary('重复内容：{n} 个文件标为重复', { n: choices.reduce((n, c) => n + c.others.length, 0) }));
   for (const c of choices) {
     const others = c.others.filter((id) => id !== c.keeper);
-    if (others.length) cs.updateFiles(others, { ...UNPLACE, dup_of: c.keeper, state: 'ignored' });
+    if (others.length) cs.updateFiles(others, { ...NO_PLACE, dup_of: c.keeper, state: 'ignored' });
   }
   const changed = await cs.commit();
   return { summary: cs.summary, changed, skipped: 0, lowConfidence: 0, batchId: changed ? cs.batchId : null };

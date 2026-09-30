@@ -10,7 +10,7 @@ import {
 } from '../../../lib/constants';
 import { db, parseFormat, parseSuggestion, releaseOptions, type FileRow } from '../../../lib/db';
 import { applyInboxAction, checkFileName } from '../../../lib/inbox';
-import { INSIDE_ARCHIVE, Places, moveFiles, sealArchives } from '../../../lib/locations';
+import { INSIDE_ARCHIVE, Places, isArchive, moveFiles, sealArchives } from '../../../lib/locations';
 import { taggedSource } from '../../../lib/tags';
 import { embeddedFor, pictureUrl, readNow } from '../../../lib/embedded';
 import { tagLabel } from '../../../lib/tagging/names';
@@ -201,9 +201,9 @@ const tagText = (name: string) => {
   const l = tagLabel(name);
   return l.role !== undefined ? t(l.text, { role: l.role }) : t(l.text);
 };
-const isArchive = !!fmt.archive || file.kind === 'archive' || file.kind === 'disc_image';
+const archive = isArchive({ kind: file.kind, format: fmt });
 const memberQuery = (Astro.url.searchParams.get('mq') ?? '').trim();
-const members = isArchive
+const members = archive
   ? (await database
       .prepare(
         `SELECT id, dir, name, size, mtime, kind, state FROM files WHERE ${INSIDE_ARCHIVE}
@@ -351,7 +351,7 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
               {fmt.archive.toUpperCase()} · {t('{n} 个文件', { n: fmt.files ?? 0 })}
               {fmt.encoding && ` · ${t('文件名编码 {encoding}', { encoding: t(NAME_ENCODING_LABELS[fmt.encoding] ?? fmt.encoding) })}`}
               {' '}<span class:list={['chip', fmt.status === 'ok' ? 'classified' : 'missing']}>{t(ARCHIVE_STATUS_LABELS[fmt.status ?? ''] ?? fmt.status ?? '')}</span>
-              {' '}{file.sealed ? <a href="#members">{t('包内清单')}</a> : <a href={`/admin/inbox?state=all&tree=source&dir=${encodeURIComponent(treePath)}`}>{t('在整理台查看包内文件')}</a>}
+              {' '}{file.sealed ? <a href="#members">{t('包内清单')}</a> : <a href={`/admin/inbox?view=all&dir=${encodeURIComponent(treePath)}`}>{t('在整理台查看包内文件')}</a>}
               {fmt.error && <div class="muted">{fmt.error}</div>}
             </span>
           </>
@@ -487,7 +487,7 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
         </form>
         {placeKey && <form method="post" class="inline"><input type="hidden" name="section" value="reset" /><button type="submit">{t('退回待整理')}</button></form>}
         {file.state !== 'ignored' && <form method="post" class="inline"><input type="hidden" name="section" value="ignore" /><button type="submit">{t('忽略')}</button></form>}
-        {isArchive && (
+        {archive && (
           <form method="post" class="inline">
             <input type="hidden" name="section" value={file.sealed ? 'unseal' : 'seal'} />
             <button type="submit" title={t('包内文件不再单独整理，只在下面列出清单；可随时展开')}>{file.sealed ? t('展开（包内文件回到整理台）') : t('整体收藏（不单独整理包内文件）')}</button>
@@ -538,7 +538,7 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
   </form>
 
   {
-    isArchive && (
+    archive && (
       <div class="panel" id="members">
         <b>{t('包内清单（{n} 个文件）', { n: fmt.files ?? members.length })}</b>{' '}
         <span class="muted">{file.sealed ? t('整体收藏：包内文件不单独整理，只在这里列出。') : t('包内文件也在整理台里逐个整理（打开「原始位置」里的这个包）。')}</span>

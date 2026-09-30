@@ -6,11 +6,7 @@ import { t } from './i18n';
 import type { EditorData } from './edition';
 
 type Tags = Record<string, string[]>;
-const NUMBERS = ['tracknumber', 'totaltracks', 'discnumber', 'totaldiscs'];
-const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-const join = (v: string[] | undefined) => (v ?? []).join('; ');
-const parse = (text: string) => [...new Set(text.split(/\s*;\s*/).map((s) => s.trim()).filter(Boolean))];
-const same = (a: string[] = [], b: string[] = []) => a.length === b.length && a.every((v, i) => v === b[i]);
+import { NUMBERS, esc, join, parse, same } from './tag-values';
 
 interface Result { ok: boolean; msg?: string; batch?: string | null; err?: string }
 
@@ -19,16 +15,39 @@ async function getJson<T>(url: string): Promise<T | null> {
   return ((await r?.json().catch(() => null)) as T | null) ?? null;
 }
 
-/** Open the dialog; resolves with the save's result (null when nothing was saved). */
-export async function tagDialog(fileId: string): Promise<Result | null> {
-  const view = await getJson<{ ok: boolean; err?: string; view?: { file: { id: string; name: string; edition_id: string | null }; row: { id: string } | null } }>(
-    `/admin/desk/tags?file=${encodeURIComponent(fileId)}`,
-  );
-  if (!view?.ok || !view.view) return { ok: false, err: view?.err ?? t('读取失败') };
+/**
+ * Open the dialog; resolves with the save's result (null when nothing was saved). It opens at once with
+ * 「读取中…」 (two requests follow, in parallel when the page knows the file's edition); closing it
+ * meanwhile cancels. Never on top of another dialog.
+ */
+export async function tagDialog(fileId: string, editionHint?: string | null): Promise<Result | null> {
+  if (document.querySelector('dialog[open]')) return null;
+  const d = document.createElement('dialog');
+  d.className = 'dlg dlg-wide tag-dialog';
+  d.innerHTML = `<form method="dialog"><h3>${esc(t('标签与封面'))}</h3><p class="muted">${esc(t('读取中…'))}</p>
+    <div class="dlg-buttons"><button value="cancel">${esc(t('取消'))}</button></div></form>`;
+  document.body.appendChild(d);
+  d.showModal();
+  let closed = false;
+  d.addEventListener('close', () => (closed = true), { once: true });
+  type View = { ok: boolean; err?: string; view?: { file: { id: string; name: string; edition_id: string | null }; row: { id: string } | null } };
+  type Data = { ok: boolean; data?: EditorData; err?: string };
+  const editorData = (id: string) => getJson<Data>(`/admin/editions/${id}/data`);
+  const [view, early] = await Promise.all([
+    getJson<View>(`/admin/desk/tags?file=${encodeURIComponent(fileId)}`),
+    editionHint ? editorData(editionHint) : Promise.resolve(null),
+  ]);
+  const fail = (err: string): Result | null => {
+    d.remove();
+    return closed ? null : { ok: false, err };
+  };
+  if (closed) return fail('');
+  if (!view?.ok || !view.view) return fail(view?.err ?? t('读取失败'));
   const edition = view.view.file.edition_id;
-  if (!edition) return { ok: false, err: t('先把文件放进某个版本：标签在版本的曲目表里编辑') };
-  const res = await getJson<{ ok: boolean; data?: EditorData; err?: string }>(`/admin/editions/${edition}/data`);
-  if (!res?.ok || !res.data) return { ok: false, err: res?.err ?? t('读取失败') };
+  if (!edition) return fail(t('先把文件放进某个版本：标签在版本的曲目表里编辑'));
+  const res = edition === editionHint ? early : await editorData(edition);
+  if (closed) return fail('');
+  if (!res?.ok || !res.data) return fail(res?.err ?? t('读取失败'));
   const data = res.data;
   const rowId = view.view.row?.id ?? null;
   const labels = new Map(data.tagDefs.map((d) => [d.name, d.label]));
@@ -39,10 +58,6 @@ export async function tagDialog(fileId: string): Promise<Result | null> {
   const row = rowId ? data.rows.find((r) => r.id === rowId) : undefined;
   const tags: Tags = structuredClone(row?.tags ?? {});
   const extra = new Set<string>();
-
-  const d = document.createElement('dialog');
-  d.className = 'dlg dlg-wide tag-dialog';
-  document.body.appendChild(d);
   const values = (n: string) => (n in tags ? tags[n] : original[n] ?? []);
   const status = (n: string) => {
     const o = original[n] ?? [];
@@ -130,7 +145,7 @@ export async function tagDialog(fileId: string): Promise<Result | null> {
   });
   draw();
   for (;;) {
-    d.showModal();
+    if (!d.open) d.showModal();
     const choice = await new Promise<string>((resolve) => d.addEventListener('close', () => resolve(d.returnValue), { once: true }));
     if (choice !== 'ok' && choice !== 'new') {
       d.remove();

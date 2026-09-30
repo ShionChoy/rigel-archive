@@ -9,7 +9,7 @@ import { chosenForm, kindOf, loadForms } from './forms';
 import { summary, UserError, type Params, type T } from './i18n';
 import { newId } from './ids';
 import {
-  FOLDER_COLORS, Places, TOP, UNPLACED, checkFolderName, ensureFolder, folderKey, markEditionsCollected,
+  FOLDER_COLORS, NO_PLACE, Places, TOP, UNPLACED, checkFolderName, ensureFolder, folderKey, markEditionsCollected,
   nextSort, type Context, type FolderInfo, type FolderType,
 } from './locations';
 import { NEW_TYPE, addType } from './types';
@@ -358,7 +358,8 @@ export async function reorderFolders(actor: string, under: string, order: string
   return done(cs);
 }
 
-const UNPLACE = { release_id: null, edition_id: null, folder_id: null, slot: null, track_id: null, state: 'inbox' };
+/** Files of a deleted folder go back to 未归档. */
+const UNPLACE = { ...NO_PLACE, state: 'inbox' };
 
 /** Delete folders: the files in them go back to 未归档 (never deleted); an era, release or edition goes with its folder. */
 export async function deleteFolders(actor: string, ids: string[], confirmed: boolean, t: T): Promise<FolderResult> {
@@ -377,22 +378,43 @@ export async function deleteFolders(actor: string, ids: string[], confirmed: boo
       .bind(JSON.stringify(places.subtree(id)))
       .first<{ n: number }>();
     if (published?.n) throw new UserError('「{name}」里有 {n} 个已发布的文件，先取消发布', { name, n: published.n });
-    if (!confirmed && (f.release_id || f.edition_id)) {
-      const tracks = f.release_id
-        ? await database.prepare('SELECT count(*) AS n FROM tracks WHERE release_id = ?').bind(f.release_id).first<{ n: number }>()
-        : await database.prepare('SELECT count(*) AS n FROM edition_tracks WHERE edition_id = ?').bind(f.edition_id).first<{ n: number }>();
-      if (tracks?.n) {
-        throw new ConfirmError(f.release_id
-          ? '作品「{name}」有 {n} 首曲目的曲目表，删除后曲目表和各版本的曲目顺序也一起删除（可在修改记录里撤销）。确定删除吗？'
-          : '版本「{name}」有 {n} 首的曲目顺序，删除后一起删除（可在修改记录里撤销）。确定删除吗？', { name, n: tracks.n });
+  }
+  // An era, release or edition goes with its folder (its data, its editions and track lists): always asked first.
+  if (!confirmed) {
+    const lines: string[] = [];
+    for (const id of list) {
+      const f = places.folders.get(id)!;
+      if (f.type === 'plain') continue;
+      const name = places.folderName(f, t);
+      const sub = JSON.stringify(places.subtree(id));
+      const editions = places.subtree(id).map((k) => places.folders.get(k)!.edition_id).filter((e): e is string => !!e);
+      const [files, tracks, rows] = await database.batch([
+        database.prepare('SELECT count(*) AS n FROM files WHERE folder_id IN (SELECT value FROM json_each(?)) AND sealed_in IS NULL').bind(sub),
+        database.prepare('SELECT count(*) AS n FROM tracks WHERE release_id = ?').bind(f.release_id ?? ''),
+        database.prepare('SELECT count(*) AS n FROM edition_tracks WHERE edition_id IN (SELECT value FROM json_each(?))').bind(JSON.stringify(editions)),
+      ]);
+      const n = (r: D1Result) => (r.results[0] as { n: number }).n;
+      if (f.release_id) {
+        lines.push(t('作品「{name}」：作品资料（基本信息、译名、{editions} 个版本、{tracks} 首曲目条目）一起删除，里面的 {files} 个文件退回「未归档」。', { name, editions: editions.length, tracks: n(tracks), files: n(files) }));
+      } else if (f.edition_id) {
+        lines.push(t('版本「{name}」：版本资料（{rows} 行曲目表与标签）一起删除，里面的 {files} 个文件退回「未归档」。', { name, rows: n(rows), files: n(files) }));
+      } else {
+        lines.push(t('名义「{name}」一起删除，里面的 {files} 个文件退回「未归档」。', { name, files: n(files) }));
       }
+    }
+    if (lines.length) {
+      lines.push(t('文件本身不删；可以在修改记录里撤销。确定删除吗？'));
+      throw new ConfirmError('{lines}', { lines: lines.join('\n') });
     }
   }
   const first = places.folders.get(list[0])!;
   const parent = first.parent_id ? folderKey(first.parent_id) : null;
-  const cs = new ChangeSet(database, actor, list.length === 1
-    ? summary('删除文件夹 {path}', { path: places.path(folderKey(list[0]), t) })
-    : summary('删除 {n} 个文件夹', { n: list.length }));
+  const path = places.path(folderKey(list[0]), t);
+  const cs = new ChangeSet(database, actor, list.length > 1
+    ? summary('删除 {n} 个文件夹', { n: list.length })
+    : first.release_id ? summary('删除作品 {path}（连同作品资料）', { path })
+      : first.edition_id ? summary('删除版本 {path}（连同版本资料）', { path })
+        : first.era_id ? summary('删除名义 {path}', { path }) : summary('删除文件夹 {path}', { path }));
   for (const id of list) {
     const f = places.folders.get(id)!;
     const sub = places.subtree(id);
@@ -413,15 +435,10 @@ export async function deleteFolders(actor: string, ids: string[], confirmed: boo
   return done(cs, { parent });
 }
 
-/** The rows only a release has (its retired slots, translations), then the release itself. Its files and folders are handled by the caller. */
+/** The rows only a release has (its translations), then the release itself. Its files and folders are handled by the caller. */
 async function deleteRelease(cs: ChangeSet, releaseId: string) {
-  const database = db();
-  const [slots, translations] = await database.batch([
-    database.prepare('SELECT slot FROM release_slots WHERE release_id = ?').bind(releaseId),
-    database.prepare("SELECT field, lang FROM translations WHERE entity = 'release' AND entity_id = ?").bind(releaseId),
-  ]);
-  for (const s of slots.results as { slot: string }[]) await cs.delete('release_slot', { release_id: releaseId, slot: s.slot });
-  for (const r of translations.results as { field: string; lang: string }[]) {
+  const { results } = await db().prepare("SELECT field, lang FROM translations WHERE entity = 'release' AND entity_id = ?").bind(releaseId).all();
+  for (const r of results as { field: string; lang: string }[]) {
     await cs.delete('translation', { entity: 'release', entity_id: releaseId, field: r.field, lang: r.lang });
   }
   await cs.delete('release', { id: releaseId });

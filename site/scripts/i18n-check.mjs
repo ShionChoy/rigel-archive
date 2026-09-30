@@ -1,7 +1,7 @@
 // Lists the admin texts that have no Japanese yet (npm run check:i18n; part of npm run deploy).
 //
-// Texts are found where the code marks them: t('…'), translateHtml(lang, '…'), N_('…'),
-// new UserError('…'), summary('…'), plus the rule names in tools/ra/rules/mapping.yaml. Each Japanese
+// Texts are found where the code marks them: t('…') (or tr('…'), a translator passed in), translateHtml(lang, '…'),
+// N_('…'), new UserError('…') / ConfirmError('…'), summary('…'), plus the rule names in tools/ra/rules/mapping.yaml. Each Japanese
 // text must keep the {placeholders} of its key.
 // `--missing` prints the missing keys as JSON (for adding them to src/lib/i18n-ja.ts).
 
@@ -10,7 +10,7 @@ import { join, relative } from 'node:path';
 import { JA } from '../src/lib/i18n-ja.ts';
 
 const ROOT = new URL('../src/', import.meta.url).pathname;
-const CALL = /(?:\b(?:t|N_|summary|summaryOf|new UserError)\(|\btranslateHtml\(\s*\w+\s*,)\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\$]|\\.)*`)/g;
+const CALL = /(?:\b(?:t|tr|N_|summary|summaryOf|new UserError|new ConfirmError)\(|\btranslateHtml\(\s*\w+\s*,)\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\$]|\\.)*`)/g;
 
 function* files(dir) {
   for (const name of readdirSync(dir)) {
@@ -20,7 +20,7 @@ function* files(dir) {
   }
 }
 
-const unquote = (s) => s.slice(1, -1).replace(/\\(.)/g, '$1');
+const unquote = (s) => s.slice(1, -1).replace(/\\(.)/g, (_, c) => (c === 'n' ? '\n' : c));
 const found = new Map(); // key -> first place
 for (const path of files(ROOT)) {
   const text = readFileSync(path, 'utf8');

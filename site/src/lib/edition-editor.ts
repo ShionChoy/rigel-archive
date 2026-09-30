@@ -123,7 +123,7 @@ interface RawRow {
 async function loadRows(editionId: string): Promise<RawRow[]> {
   const { results } = await db()
     .prepare(
-      `SELECT et.id, et.disc, et.position, et.track_id, et.title, et.duration_ms, et.tags, et.cover,
+      `SELECT et.id, et.disc, et.position, et.track_id, et.duration_ms, et.tags, et.cover,
               t.title AS entry_title, t.version_label, t.duration_ms AS entry_duration
        FROM edition_tracks et JOIN tracks t ON t.id = et.track_id WHERE et.edition_id = ? ORDER BY et.disc, et.position, et.id`,
     )
@@ -318,7 +318,7 @@ export async function saveEditionTags(actor: string, edition: EditionRow, releas
     const start = Object.keys(tags).length ? tags : newRowTags(albumRows, release, edition, title);
     if (!start.title?.length) start.title = [title];
     cs.create('edition_track', {
-      id: newId('et'), edition_id: edition.id, disc, position, track_id: trackId, title: null, duration_ms: null, external_ids: '{}',
+      id: newId('et'), edition_id: edition.id, disc, position, track_id: trackId, duration_ms: null, external_ids: '{}',
       tags: JSON.stringify(start), cover: coverJson(cover),
     });
     if (file && file.track_id !== trackId) cs.updateFiles([file.id], { track_id: trackId });

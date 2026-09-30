@@ -68,7 +68,7 @@ export const ENTITIES = {
   edition_track: {
     table: 'edition_tracks',
     key: ['id'],
-    fields: ['edition_id', 'disc', 'position', 'track_id', 'title', 'duration_ms', 'external_ids', 'tags', 'cover'],
+    fields: ['edition_id', 'disc', 'position', 'track_id', 'duration_ms', 'external_ids', 'tags', 'cover'],
   },
   folder: {
     table: 'folders',
@@ -133,8 +133,13 @@ const ROW_DEFAULTS: Partial<Record<EntityName, Record<string, string>>> = {
   edition_type: { missing_board: '1' },
   edition_track: { tags: "'{}'" },
 };
-/** Columns since dropped (folders.extras, migration 0011): older revisions of them are left out of an undo. */
-const RETIRED: Partial<Record<EntityName, readonly string[]>> = { folder: ['extras'] };
+/**
+ * Columns since dropped (folders.extras in 0011, edition_tracks.title in 0012): older revisions of them are
+ * left out of an undo.
+ */
+const RETIRED: Partial<Record<EntityName, readonly string[]>> = { folder: ['extras'], edition_track: ['title'] };
+/** Tables since dropped (release_slots in 0012): their old revisions are skipped when a batch is undone. */
+const RETIRED_TABLES: readonly EntityName[] = ['release_slot'];
 const withoutRetired = (entity: EntityName, row: Row | null): Row | null =>
   row && Object.fromEntries(Object.entries(row).filter(([f]) => !RETIRED[entity]?.includes(f)));
 
@@ -431,6 +436,11 @@ export class ChangeSet {
     this.rowChanges += 1;
   }
 
+  /** Rows of this table waiting to be created (made while filing). */
+  queuedCount(entity: EntityName): number {
+    return this.queued.get(entity)?.length ?? 0;
+  }
+
   private queuedStatements(): D1PreparedStatement[] {
     const out: D1PreparedStatement[] = [];
     // Parents first: a folder names its era, release or edition, all of which may be made in this batch.
@@ -577,6 +587,7 @@ export async function undoBatch(db: D1Database, actor: string, batchId: string, 
   for (const rev of revs) {
     if (!isEntity(rev.entity)) return { ok: false, reason: new UserError('未知的记录类型 {entity}', { entity: rev.entity }) };
     const entity = rev.entity;
+    if (RETIRED_TABLES.includes(entity)) continue;
     const key = parseEntityId(entity, rev.entity_id);
     const before = withoutRetired(entity, rev.before ? (JSON.parse(rev.before) as Row) : null);
     const after = withoutRetired(entity, rev.after ? (JSON.parse(rev.after) as Row) : null);

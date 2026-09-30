@@ -56,10 +56,6 @@ export async function loadEditions(releaseId: string, types?: TypeList): Promise
   return sortEditions(results, list);
 }
 
-export async function loadEdition(id: string): Promise<EditionRow | null> {
-  return db().prepare('SELECT * FROM editions WHERE id = ?').bind(id).first<EditionRow>();
-}
-
 function text(form: FormData, name: string, max = 500): string | null {
   const value = String(form.get(name) ?? '').trim();
   if (value.length > max) throw new UserError('内容过长');
@@ -194,11 +190,10 @@ export async function loadEditionTracks(editionId: string): Promise<EditionTrack
   return results;
 }
 
-/** The title an edition gives a track: its title tag, else its own title, else the track's (with its version label). */
-export function trackTitle(et: Pick<EditionTrackView, 'title' | 'entry_title' | 'version_label'> & { tags?: string | null }): string {
+/** The title an edition gives a track: its title tag, else the track's (with its version label). */
+export function trackTitle(et: Pick<EditionTrackView, 'entry_title' | 'version_label'> & { tags?: string | null }): string {
   const tag = parseTags(et.tags).title?.[0];
   if (tag) return tag;
-  if (et.title) return et.title;
   return et.version_label ? `${et.entry_title} (${et.version_label})` : et.entry_title;
 }
 
@@ -308,11 +303,9 @@ export async function generateEditionTracks(actor: string, release: ReleaseRow, 
       known.add(trackId);
       byTitle.set(titleKey(title), trackId);
     }
-    const entryTitle = entries.find((t) => t.id === trackId)?.title ?? title;
     // The row's tags: its title, and what the catalog says about the album (the files' own tags stay under them).
     cs.create('edition_track', {
       id: newId('et'), edition_id: edition.id, disc: g.disc, position, track_id: trackId,
-      title: titleKey(entryTitle) === titleKey(title) ? null : title,
       duration_ms: seconds ? Math.round(seconds * 1000) : null, external_ids: '{}',
       tags: JSON.stringify(newRowTags([], { ...release, era_name: era?.name ?? '' }, edition, title)), cover: null,
     });
@@ -543,8 +536,12 @@ export async function mergeTracks(actor: string, release: ReleaseRow, keepId: st
   const database = db();
   const { results: rows } = await database.prepare('SELECT * FROM edition_tracks WHERE track_id = ?').bind(drop.id).all<EditionTrackRow>();
   const cs = new ChangeSet(database, actor, summary('作品 {release}：曲目条目「{drop}」并入「{keep}」', { release: label(release), drop: drop.title, keep: keep.title }));
+  // A row that showed the dropped entry's title keeps it, as its own 标题 tag.
+  const dropped = drop.version_label ? `${drop.title} (${drop.version_label})` : drop.title;
   for (const r of rows) {
-    cs.updateKnown('edition_track', { id: r.id }, r as unknown as Record<string, unknown>, { track_id: keep.id, title: r.title ?? (drop.title !== keep.title ? drop.title : null) });
+    const tags = parseTags(r.tags);
+    const next = 'title' in tags || titleKey(dropped) === titleKey(keep.title) ? r.tags : JSON.stringify({ ...tags, title: [dropped] });
+    cs.updateKnown('edition_track', { id: r.id }, r as unknown as Record<string, unknown>, { track_id: keep.id, tags: next });
   }
   cs.updateFilesWhere('track_id = ?', [drop.id], { track_id: keep.id });
   await cs.delete('track', { id: drop.id });

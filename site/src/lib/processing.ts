@@ -249,7 +249,6 @@ export async function derivedFor(db: D1Database, shas: (string | null)[]): Promi
   return out;
 }
 
-export const mediaUrl = (key: string) => `/admin/media/${key}`;
 
 /** Forget a content's results so the processing program does the task again. */
 export async function redo(db: D1Database, task: Task, sha256: string): Promise<void> {

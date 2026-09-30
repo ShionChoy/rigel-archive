@@ -247,7 +247,7 @@ const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
       <label for="catalog_no">{t('编号')}</label>
       <input id="catalog_no" type="text" name="catalog_no" value={edition.catalog_no ?? ''} placeholder="RTCD-004A" />
       <label for="release_date">{t('发行日')}</label>
-      <input id="release_date" type="text" name="release_date" value={edition.release_date ?? ''} placeholder="2019-04-28" />
+      <input id="release_date" type="text" name="release_date" value={edition.release_date ?? ''} placeholder="YYYY-MM-DD" />
       <label for="source">{t('来源')}</label>
       <input id="source" type="text" name="source" value={edition.source ?? ''} placeholder={t('商店、平台或抓轨者')} />
       <label for="based_on">{t('源于')}</label>

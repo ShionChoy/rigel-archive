@@ -416,7 +416,7 @@ export async function importOnline(actor: string, release: ReleaseRow & { era_na
       }
       taken.add(entry.id);
       cs.create('edition_track', {
-        id: newId('et'), edition_id: edition.id, disc: x.disc, position: x.position, track_id: entry.id, title: null, duration_ms: x.duration_ms,
+        id: newId('et'), edition_id: edition.id, disc: x.disc, position: x.position, track_id: entry.id, duration_ms: x.duration_ms,
         external_ids: '{}', tags: JSON.stringify({ ...online.album, ...x.tags }), cover,
       });
     }

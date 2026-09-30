@@ -45,6 +45,7 @@ const places = await Places.load();
     <form method="post" id="accept-form" hidden>
       <input type="hidden" name="action" value="accept" />
       <input type="hidden" name="scope" value="filter" />
+      <input type="hidden" name="then" value="" />
       <button class="primary" type="submit">{t('放入指定位置')}</button>
     </form>
   </div>
@@ -266,10 +267,12 @@ const places = await Places.load();
     };
     await Promise.all(Array.from({ length: PARALLEL }, worker));
     running = false;
-    toInbox.href = `/admin/inbox?state=all&tree=source&dir=${encodeURIComponent(session.dir)}`;
+    toInbox.href = `/admin/inbox?view=all&dir=${encodeURIComponent(session.dir)}`;
     toInbox.hidden = !items.some((i) => i.status === 'done');
     const acceptForm = document.querySelector<HTMLFormElement>('#accept-form')!;
-    acceptForm.action = `/admin/inbox?state=inbox&tree=source&dir=${encodeURIComponent(session.dir)}`;
+    acceptForm.action = `/admin/inbox?view=unplaced&dir=${encodeURIComponent(session.dir)}`;
+    // Afterwards the 整理台 opens the place the files went.
+    acceptForm.querySelector<HTMLInputElement>('input[name="then"]')!.value = placeInput.value;
     acceptForm.hidden = !placeInput.value || !items.some((i) => i.status === 'done');
     refresh();
   });

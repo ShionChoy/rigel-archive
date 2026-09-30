@@ -55,11 +55,14 @@ if (Astro.request.method === 'POST') {
         await wakeProcessor(env, true);
         msg = t('备份已开始，完成后结果显示在下面（首次备份要传完全部原件，需要较长时间）');
         break;
-      default: {
+      case 'purge': {
         if (!canManage(Astro.locals.admin)) throw new UserError('清理存储需要站长或管理员权限');
         const r = await purge(database, env.MEDIA, grace);
         msg = r.count ? t('已清理 {n} 个对象，释放 {size}', { n: r.count, size: formatBytes(r.bytes) }) : t('没有可以清理的对象');
+        break;
       }
+      default:
+        throw new UserError('未知的操作');
     }
     return Astro.redirect(withParams(Astro.url, { msg, err: null }), 303);
   } catch (e) {
@@ -288,7 +291,7 @@ const lastOk = runs.results.find((r) => r.ok === 1);
     }
     {
       gone && gone.n > 0 && (
-        <p set:html={translateHtml(lang, '另有 <a href="/admin/inbox?state=all&origin=gone">{n} 个合辑文件原件已不存在</a>（最近一次导入时 source 里没有找到），可以在整理台删除。', { n: gone.n })} />
+        <p set:html={translateHtml(lang, '另有 <a href="/admin/inbox?view=p:gone">{n} 个合辑文件原件已不存在</a>（最近一次导入时 source 里没有找到），可以在整理台删除。', { n: gone.n })} />
       )
     }
   </div>

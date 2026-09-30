@@ -11,6 +11,7 @@
 // the override, 「恢复为文件原值」 removes them all.
 
 import { t } from './i18n';
+import { NUMBERS, esc, join, parse, same } from './tag-values';
 
 type Tags = Record<string, string[]>;
 interface Cover { file?: string; picture?: string; mode: 'replace' | 'add' }
@@ -34,20 +35,11 @@ export interface EditorData {
 
 interface Row { id: string; disc: number; tags: Tags; cover: Cover | null; entry: string; duration: number | null; title?: string }
 
-const NUMBERS = ['tracknumber', 'totaltracks', 'discnumber', 'totaldiscs'];
 const PERFORMER = 'performer:';
 const COLUMNS_KEY = 'rigel.edColumns';
 
-const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 // The Workers types clash with the DOM's ParentNode here; these take any element.
 const $ = <E = HTMLElement>(sel: string, root: unknown = document) => (root as ParentNode).querySelector(sel) as unknown as E | null;
-const same = (a: string[] | undefined, b: string[] | undefined) => {
-  const x = a ?? [];
-  const y = b ?? [];
-  return x.length === y.length && x.every((v, i) => v === y[i]);
-};
-const join = (v: string[] | undefined) => (v ?? []).join('; ');
-const parse = (text: string) => [...new Set(text.split(/\s*;\s*/).map((s) => s.trim()).filter(Boolean))];
 const clock = (s: number | null | undefined) => {
   if (!s) return '';
   const r = Math.round(s);
@@ -1121,7 +1113,7 @@ export function initEditor(data: EditorData) {
   function renderBar() {
     const n = changes();
     bar.hidden = n === 0 && !busy;
-    $('[data-dirty]', bar)!.textContent = busy || t('{n} 处改动未保存 · 保存后可在修改记录里撤销', { n });
+    $('[data-dirty]', bar)!.textContent = busy || t('{n} 首曲目有改动，还没保存 · 保存后可在修改记录里撤销', { n });
     $<HTMLButtonElement>('[data-act="save"]', bar)!.disabled = !!busy;
     const note = $('[data-archive-note]');
     if (note) note.hidden = n === 0;
