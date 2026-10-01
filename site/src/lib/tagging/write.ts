@@ -19,6 +19,11 @@ export interface WriteSpec {
   tags: Tags; // the row's overrides, with the number tags
   cover: { image: Uint8Array; mime: string } | null;
   coverMode: 'replace' | 'add';
+  /**
+   * The original's own pictures, for a file made from another stored object that has none (a WAV or AIFF
+   * downloaded as FLAC is made from its stream FLAC, which leaves pictures out): written as they were.
+   */
+  pictures?: { image: Uint8Array; mime: string; type: number; description: string }[];
 }
 
 export interface Layout {
@@ -61,7 +66,7 @@ export function mergeVorbis(original: [string, string][], tags: Tags, cover: Wri
 async function flacLayout(read: Read, size: number, spec: WriteSpec): Promise<Layout> {
   const layout = await readFlacLayout(read);
   const fields = mergeVorbis(layout.comments, spec.tags, null, spec.coverMode);
-  let pictures = layout.pictures;
+  let pictures = layout.pictures.length ? layout.pictures : (spec.pictures ?? []).map((p) => pictureBlock(p.image, p.mime, p.type, p.description));
   if (spec.cover) {
     const hasFront = pictures.some((p) => parsePictureType(p) === 3);
     pictures = spec.coverMode === 'replace'

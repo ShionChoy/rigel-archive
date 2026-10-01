@@ -13,7 +13,7 @@ import { concat } from './tagging/bytes';
 import { albumArtist, catalogTags, commonAlbumTags } from './rowtags';
 import { numberTags, parseTags, type Tags } from './tagging/model';
 import { renumberOgg } from './tagging/ogg';
-import { WRITABLE, layoutLength, taggedLayout, type Layout, type Part } from './tagging/write';
+import { WRITABLE, layoutLength, taggedLayout, type Layout, type Part, type WriteSpec } from './tagging/write';
 import type { ZipEntry } from './tagging/zip';
 
 /** Pictures a download can embed as they are; larger ones use their 1600 px copy (derived «embed»). */
@@ -183,6 +183,10 @@ export async function coverBytes(media: R2Bucket, cover: RowCover | null): Promi
     if (p && p.size < COVER_MAX) {
       key = p.key;
       mime = p.mime;
+    } else if (p) {
+      // A very large picture carried by a track: its 1600 px JPEG copy, as for picture files.
+      const d = await database.prepare("SELECT key FROM derived WHERE sha256 = ? AND kind = 'embed'").bind(cover.picture).first<{ key: string }>();
+      if (d) key = d.key;
     }
   } else if (cover.file) {
     const f = await database
@@ -204,10 +208,36 @@ export async function coverBytes(media: R2Bucket, cover: RowCover | null): Promi
   return { image: new Uint8Array(await object.arrayBuffer()), mime };
 }
 
+/**
+ * The pictures the original carries (文件原值, stored under pictures/), for a download made from its stream
+ * FLAC instead (a WAV asked for as FLAC, an AIFF): the stream leaves pictures out, the download keeps them.
+ */
+async function originalPictures(media: R2Bucket, sha256: string | null): Promise<NonNullable<WriteSpec['pictures']>> {
+  if (!sha256) return [];
+  const own = (await embeddedFor([sha256])).get(sha256);
+  if (!own?.pictures.length) return [];
+  const { results } = await db()
+    .prepare('SELECT sha256, key FROM pictures WHERE sha256 IN (SELECT value FROM json_each(?))')
+    .bind(JSON.stringify([...new Set(own.pictures.map((p) => p.sha256))]))
+    .all<{ sha256: string; key: string }>();
+  const bytes = new Map<string, Uint8Array>();
+  for (const r of results) {
+    const object = await media.get(r.key);
+    if (object) bytes.set(r.sha256, new Uint8Array(await object.arrayBuffer()));
+  }
+  return own.pictures.flatMap((p) => {
+    const image = bytes.get(p.sha256);
+    return image ? [{ image, mime: p.mime, type: p.type, description: p.description }] : [];
+  });
+}
+
 export async function taggedParts(media: R2Bucket, src: TaggedSource): Promise<Layout> {
   const read = (offset: number, length: number) => readRange(media, src.key, offset, Math.max(0, Math.min(length, src.size - offset)));
-  const cover = await coverBytes(media, src.cover);
-  return taggedLayout(src.ext, read, src.size, { tags: src.tags, cover, coverMode: src.cover?.mode ?? 'replace' });
+  const [cover, pictures] = await Promise.all([
+    coverBytes(media, src.cover),
+    src.key !== src.file.blob_key ? originalPictures(media, src.file.sha256) : Promise.resolve(undefined),
+  ]);
+  return taggedLayout(src.ext, read, src.size, { tags: src.tags, cover, coverMode: src.cover?.mode ?? 'replace', pictures });
 }
 
 /** The parts one after the other: bytes as they are, ranges from storage (Ogg ranges renumbered). */

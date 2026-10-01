@@ -110,13 +110,14 @@ export function pictureImage(body: Uint8Array): { image: Uint8Array; mime: strin
 }
 
 /** A PICTURE block body (the front cover unless another type is given). */
-export function pictureBlock(image: Uint8Array, mime: string, type = FRONT_COVER): Uint8Array {
+export function pictureBlock(image: Uint8Array, mime: string, type = FRONT_COVER, description = ''): Uint8Array {
   const size = imageSize(image);
   const m = utf8(size?.mime ?? mime);
+  const d = utf8(description);
   return concat([
     u32be(type),
     u32be(m.length), m,
-    u32be(0), // no description
+    u32be(d.length), d,
     u32be(size?.width ?? 0), u32be(size?.height ?? 0), u32be(24), u32be(0),
     u32be(image.length), image,
   ]);
