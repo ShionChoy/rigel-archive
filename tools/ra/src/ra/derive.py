@@ -357,6 +357,63 @@ def poster(video: Path, sha256: str, duration: float, work: Path) -> Output:
 # ------------------------------------------------------------------ entry
 
 
+# ------------------------------------------------------------------ preview clips
+
+# site/src/lib/processing.ts TASK_VERSIONS.clip has the same number.
+CLIP_VERSION = 1
+CLIP_FADE_IN = 0.5  # seconds, when a clip does not start at the beginning of the track
+CLIP_FADE_OUT = 3.0
+
+
+@dataclass
+class ClipOutput:
+    """One preview clip as stored: a part of the track (milliseconds) in one version."""
+    from_ms: int
+    to_ms: int
+    out: Output
+
+    def report(self) -> dict:
+        return {"from_ms": self.from_ms, "to_ms": self.to_ms, **self.out.report()}
+
+
+def clips(src: Path, sha256: str, spans: list[dict], fmt: dict, lossless: bool, work: Path) -> list[ClipOutput]:
+    """Preview clips (设计文档「文件权限方案 · 试听片段」): each wanted part of the track as FLAC (lossless sources
+    only) and AAC 256 kbps, faded in when it starts inside the track and out over its last seconds. The site
+    plays only these for a track set to 「仅试听」, never the whole track."""
+    work.mkdir(parents=True, exist_ok=True)
+    bits = int(fmt.get("bits") or 16)
+    out: list[ClipOutput] = []
+    for span in spans:
+        start_ms, end_ms = int(span["from_ms"]), int(span["to_ms"])
+        if end_ms <= start_ms:
+            raise DeriveError("试听范围无效")
+        start, length = start_ms / 1000, (end_ms - start_ms) / 1000
+        fades = ([f"afade=t=in:st=0:d={CLIP_FADE_IN}"] if start_ms > 0 else []) + \
+                ([f"afade=t=out:st={length - CLIP_FADE_OUT:.3f}:d={CLIP_FADE_OUT}"] if length > 2 * CLIP_FADE_OUT else [])
+        # -ss before -i seeks fast; with re-encoding ffmpeg still starts at the exact sample.
+        base = ["-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", str(src), "-map", "0:a:0", "-map_metadata", "-1",
+                *(["-af", ",".join(fades)] if fades else [])]
+        name = f"{start_ms}-{end_ms}"
+        rate = int(fmt.get("rate") or 44100)
+        if lossless:
+            path = work / f"{name}.flac"
+            depth = ["-sample_fmt", "s32", "-bits_per_raw_sample", "24"] if bits > 16 else ["-sample_fmt", "s16"]
+            _ffmpeg(*base, "-c:a", "flac", "-compression_level", "8", *depth, str(path))
+            made = flac_layout(path)
+            info = {"codec": "flac", "bits": made.bits if made else min(bits, 24), "rate": made.rate if made else rate}
+            out.append(ClipOutput(start_ms, end_ms, _output("lossless", f"derived/clip/{sha256}/{name}.flac", path, "audio/flac", info)))
+        path = work / f"{name}.m4a"
+        args = [*base, "-c:a", "aac", "-b:a", f"{AAC_KBPS_LOSSLESS}k"]
+        if rate > 48000 or rate < 8000:
+            args += ["-ar", "48000"]
+        if int(fmt.get("channels") or 2) > 2:
+            args += ["-ac", "2"]
+        _ffmpeg(*args, "-movflags", "+faststart", str(path))
+        info = {"codec": "aac", "kbps": AAC_KBPS_LOSSLESS, "rate": 48000 if rate > 48000 or rate < 8000 else rate}
+        out.append(ClipOutput(start_ms, end_ms, _output("lossy", f"derived/clip/{sha256}/{name}.m4a", path, "audio/mp4", info)))
+    return out
+
+
 def derive(src: Path, item: dict, work: Path) -> list[Output]:
     """Make the derived files for one content. ``item`` comes from the site's task list."""
     work.mkdir(parents=True, exist_ok=True)

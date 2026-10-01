@@ -68,7 +68,7 @@ export async function storageReport(db: D1Database, media: R2Bucket, grace: numb
 
 /**
  * Delete the unreferenced content whose grace period is over, with everything made from it (derived
- * files, fingerprint, matches, task records). Rechecks references right before.
+ * files, preview clips, fingerprint, matches, task records). Rechecks references right before.
  */
 export async function purge(db: D1Database, media: R2Bucket, grace: number): Promise<{ count: number; bytes: number }> {
   const report = await storageReport(db, media, grace);
@@ -86,8 +86,12 @@ export async function purge(db: D1Database, media: R2Bucket, grace: number): Pro
       .bind(list)
       .all<{ key: string }>();
     for (let j = 0; j < results.length; j += 1000) await media.delete(results.slice(j, j + 1000).map((r) => r.key));
+    // Preview clips are cut from one content each.
+    const { results: clips } = await db.prepare('SELECT key FROM clips WHERE sha256 IN (SELECT value FROM json_each(?))').bind(list).all<{ key: string }>();
+    for (let j = 0; j < clips.length; j += 1000) await media.delete(clips.slice(j, j + 1000).map((r) => r.key));
     await db.batch([
       db.prepare('DELETE FROM derived WHERE sha256 IN (SELECT value FROM json_each(?))').bind(list),
+      db.prepare('DELETE FROM clips WHERE sha256 IN (SELECT value FROM json_each(?))').bind(list),
       db.prepare('DELETE FROM fingerprints WHERE sha256 IN (SELECT value FROM json_each(?))').bind(list),
       db.prepare('DELETE FROM media_tasks WHERE sha256 IN (SELECT value FROM json_each(?))').bind(list),
       db.prepare('DELETE FROM acoustic_matches WHERE a IN (SELECT value FROM json_each(?1)) OR b IN (SELECT value FROM json_each(?1))').bind(list),

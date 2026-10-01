@@ -94,6 +94,7 @@ export type FileView = FileRow & {
   copies: number;
   members: number;
   cover_of: 'edition' | null; // a picture chosen as its edition's cover (of its tracks, or of an edition without tracks)
+  edition_access: string | null; // JSON: its edition's access settings (lib/access.ts EditionAccessRow)
 };
 
 export async function fileView(id: string): Promise<FileView | null> {
@@ -106,7 +107,9 @@ export async function fileView(id: string): Promise<FileView | null> {
               (SELECT count(*) FROM files m WHERE m.sealed_in = f.id) AS members,
               CASE WHEN f.kind != 'image' THEN NULL
                    WHEN EXISTS (SELECT 1 FROM editions e WHERE e.id = f.edition_id AND e.cover_file_id = f.id) THEN 'edition'
-                   WHEN EXISTS (SELECT 1 FROM edition_tracks et WHERE et.edition_id = f.edition_id AND json_extract(et.cover, '$.file') = f.id) THEN 'edition' END AS cover_of
+                   WHEN EXISTS (SELECT 1 FROM edition_tracks et WHERE et.edition_id = f.edition_id AND json_extract(et.cover, '$.file') = f.id) THEN 'edition' END AS cover_of,
+              (SELECT json_object('pub_shown', e.pub_shown, 'pub_visible', e.pub_visible, 'pub_play', e.pub_play, 'pub_clip', e.pub_clip,
+                                  'pub_quality', e.pub_quality, 'pub_download', e.pub_download) FROM editions e WHERE e.id = f.edition_id) AS edition_access
        FROM files f WHERE f.id = ?`,
     )
     .bind(id)

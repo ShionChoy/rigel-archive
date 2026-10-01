@@ -136,6 +136,12 @@ function undo(batch?: string | null) {
   return run(() => undoRequest(batch));
 }
 
+/**
+ * Run another part of the page's change in this list's queue, then fetch the list and 公开站 again
+ * (scripts/edition-access.ts): its message stays, and actions never overlap.
+ */
+export const withFilesRefresh = (work: () => Promise<unknown>) => run(work, { keep: true });
+
 /** Fetch the page again and swap in the file list, the delete button and the places for 「移动到…」. */
 async function refresh() {
   const r = await fetch(location.pathname, { headers: { accept: 'text/html' } }).catch(() => null);
@@ -395,6 +401,7 @@ function menuFor(sel: Sel): MenuEntry[] {
       { label: t('设为第三方'), run: () => run(() => fileAction('rights', sel.files, { rights_value: 'third_party' }), { keep: true }) },
       { label: t('设为已授权'), run: () => run(() => fileAction('rights', sel.files, { rights_value: 'licensed' }), { keep: true }) },
       { label: t('权利改回未知'), run: () => run(() => fileAction('rights', sel.files, { rights_value: 'unknown' }), { keep: true }) },
+      { label: t('公开权限…'), run: () => window.dispatchEvent(new CustomEvent('rigel:access-select', { detail: sel.files })) },
     );
   }
   entries.push('-', {

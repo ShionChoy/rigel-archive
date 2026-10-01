@@ -9,6 +9,7 @@ import { db, parseFormat } from './db';
 import { coversFor, pictureUrl, picturesFor, readNow } from './embedded';
 import { ADMIN_URLS, imageSrc, pictureSrc, type MediaUrls } from './media';
 import { derivedFor } from './processing';
+import { OPEN_SQL } from './access';
 import { PREVIEW_EDGE } from './public/rules';
 
 export interface Cover {
@@ -53,7 +54,10 @@ export async function editionCovers(
   const ids = JSON.stringify([...new Set(editionIds)]);
   const size = opts.size ?? 640;
   const urls = opts.urls ?? ADMIN_URLS;
-  const open = opts.open ? "AND f.rights IN ('own', 'licensed')" : '';
+  // Pictures shown on the public site: picture files open there; the pictures audio files carry when the
+  // file is listed and its rights hold nothing back (a track that only lists or only previews still shows its cover).
+  const open = opts.open ? `AND ${OPEN_SQL}` : '';
+  const carried = opts.open ? "AND f.rights IN ('own', 'licensed') AND coalesce(f.pub_visible, e.pub_visible) = 1" : '';
   if (opts.read) {
     // The tracks' pictures are read from the files once; do it now for those not read yet.
     const { results } = await database
@@ -69,12 +73,14 @@ export async function editionCovers(
     ).bind(ids),
     database.prepare(
       `SELECT f.edition_id, m.cover, count(DISTINCT coalesce(f.track_id, f.id)) AS n FROM files f JOIN embedded m ON m.sha256 = f.sha256
+       JOIN editions e ON e.id = f.edition_id
        WHERE f.edition_id IN (SELECT value FROM json_each(?)) AND f.kind = 'audio' AND f.sealed_in IS NULL AND f.state != 'ignored'
-         AND f.dup_of IS NULL AND m.cover IS NOT NULL ${open}
+         AND f.dup_of IS NULL AND m.cover IS NOT NULL ${carried}
        GROUP BY f.edition_id, m.cover ORDER BY n DESC`,
     ).bind(ids),
     database.prepare(
       `SELECT f.edition_id, f.id, f.name, f.download_name, f.sha256, f.blob_key, f.folder_id, f.format, f.size, f.ext FROM files f
+       JOIN editions e ON e.id = f.edition_id
        WHERE f.edition_id IN (SELECT value FROM json_each(?)) AND f.kind = 'image' AND f.sealed_in IS NULL AND f.state != 'ignored' ${open}
          AND NOT EXISTS (SELECT 1 FROM files a WHERE a.edition_id = f.edition_id AND a.kind = 'audio' AND a.sealed_in IS NULL AND a.state != 'ignored')
        ORDER BY f.edition_id, coalesce(f.download_name, f.name)`,

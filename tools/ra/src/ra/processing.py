@@ -29,7 +29,7 @@ from .push import PART_SIZE
 from .site import SiteClient, SiteError
 
 CHECK_VERSION = 1  # uploads: verify, probe, unpack (done = files.checked_at on the site)
-TASKS = ("check", "derive", "fingerprint")
+TASKS = ("check", "derive", "fingerprint", "clip")
 IDLE_PAGES = 30  # pages in a row with nothing claimable (about a minute) end a run
 TOUCH_EVERY = 300  # seconds between renewals of a claim (the site treats 20 minutes of silence as a crash)
 
@@ -304,6 +304,58 @@ def run_derive(client: SiteClient, inputs: Inputs, workers: int = 3, limit: int 
             results += [derive_one(client, inputs, i, log, new) for i in videos]
         counts.fingerprinted += new
         for item, ok in zip(others + videos, results):
+            if ok:
+                counts.done += 1
+            else:
+                counts.fail(f"{item.get('name')}")
+    return counts
+
+
+# ------------------------------------------------------------------ preview clips
+
+
+def clip_one(client: SiteClient, inputs: Inputs, item: dict, log) -> bool:
+    """Cut the preview clips a claimed content still needs, store them and report them; False when it failed."""
+    sha = item["sha256"]
+    try:
+        with inputs.workdir() as work:
+            src = inputs.fetch(sha, item.get("ext") or "", work)
+            made = derive_mod.clips(src, sha, item["spans"], item.get("format") or {}, bool(item.get("lossless")), work / "out")
+            for c in made:
+                store_output(client, c.out)
+        client.task_result("clip", sha, derive_mod.CLIP_VERSION, clips=[c.report() for c in made])
+        log(f"     clipped  {item.get('name')}: {len(item['spans'])} part(s)")
+        return True
+    except Exception as exc:  # see derive_one
+        planned = isinstance(exc, (derive_mod.DeriveError, SiteError, OSError, subprocess.TimeoutExpired))
+        message = (str(exc) or type(exc).__name__) if planned else unexpected(exc)
+        log(f"      failed  clip {item.get('name')} ({sha[:12]}…): {message}")
+        try:
+            client.task_result("clip", sha, derive_mod.CLIP_VERSION, error=message[:500])
+        except SiteError:
+            pass
+        return False
+
+
+def run_clips(client: SiteClient, inputs: Inputs, workers: int = 3, limit: int | None = None,
+              log=lambda m: print(m, file=sys.stderr)) -> Counts:
+    """Cut the preview clips the site lists (at most ``limit`` contents)."""
+    counts = Counts()
+    while limit is None or counts.done + counts.failed < limit:
+        page = client.tasks("clip", 20)
+        if page["version"] != derive_mod.CLIP_VERSION:
+            raise SiteError(f"网站的试听片段规则版本是 {page['version']}，本程序是 {derive_mod.CLIP_VERSION}：请更新程序")
+        items = page["items"]
+        if limit is not None:
+            items = items[: limit - counts.done - counts.failed]
+        claimed = [i for i in items if client.claim("clip", i["sha256"], derive_mod.CLIP_VERSION, i.get("spec"))]
+        counts.skipped += len(items) - len(claimed)
+        if not claimed:
+            break
+        with keep_claimed(client, [("clip", i["sha256"]) for i in claimed]):
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(lambda i: clip_one(client, inputs, i, log), claimed))
+        for item, ok in zip(claimed, results):
             if ok:
                 counts.done += 1
             else:

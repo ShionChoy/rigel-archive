@@ -26,7 +26,7 @@ from .extract import MAX_DEPTH, TOP_LEVEL_EXTS, ArchiveRecord, Extractor
 from .members import archive_format
 from .model import kind_for
 from .probe import PROBE_KINDS, probe_one
-from .processing import (CHECK_VERSION, TASKS, Counts, Inputs, VideoLane, keep_claimed, run_derive,
+from .processing import (CHECK_VERSION, TASKS, Counts, Inputs, VideoLane, keep_claimed, run_clips, run_derive,
                          run_fingerprint, run_matching, unexpected)
 from .push import PushState, upload_file
 from .serve import content_type
@@ -164,7 +164,7 @@ def run_checks(client, store: Path | None, tmp_root: Path | None = None,
 def run_cycle(client, inputs: Inputs, store: Path | None, tmp_root: Path | None, tasks=TASKS, workers: int = 3,
               log=lambda msg: print(msg, file=sys.stderr), video_lane: VideoLane | None = None) -> Counts:
     """One round over the queue: all uploads, then a batch of derived files, then a batch of
-    fingerprints and their matches. Returns what was done; nothing done means the queue is empty (a
+    fingerprints and their matches, then preview clips. Returns what was done; nothing done means the queue is empty (a
     video may still be going in ``video_lane``: what it finished counts in the round that collects it)."""
     total = Counts()
     if "check" in tasks:
@@ -186,6 +186,8 @@ def run_cycle(client, inputs: Inputs, store: Path | None, tmp_root: Path | None,
         new += more
     if new and "fingerprint" in tasks:
         run_matching(client, new, log=log)
+    if "clip" in tasks:
+        total.add(run_clips(client, inputs, workers=workers, limit=60, log=log))
     return total
 
 

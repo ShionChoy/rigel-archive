@@ -10,7 +10,7 @@ import { formatClock } from '../../../lib/release-view';
 
 if (!isSiteLang(Astro.params.lang)) return new Response(null, { status: 404 });
 const { t, lang } = Astro.locals;
-const page = await songPage(db(), Astro.params.id ?? '', { t, lang, urls: publicUrls() ?? NO_MEDIA });
+const page = await songPage(db(), Astro.params.id ?? '', { t, lang, urls: (await publicUrls()) ?? NO_MEDIA });
 if (!page) return new Response(null, { status: 404 });
 const { song, lines } = page;
 const releases = new Set(lines.map((l) => l.release.id)).size;

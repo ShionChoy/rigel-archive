@@ -24,9 +24,13 @@ import { COVER_SQL } from '../../../lib/tagedit';
 import { editionContext, nameParts, preloadOriginals, taggedSource } from '../../../lib/tags';
 import { NAMING_PRESETS } from '../../../lib/naming';
 import { NEW_TYPE } from '../../../lib/types';
-import { rightsOf, setRights } from '../../../lib/rights';
+import { setRights } from '../../../lib/rights';
 import { siteLangOf } from '../../../lib/public/paths';
-import { PUBLIC_EDITION_STATUSES } from '../../../lib/public/rules';
+import { isPublicEdition, PUBLIC_EDITION_STATUSES } from '../../../lib/public/rules';
+import { parseClip, PLAYS, QUALITIES } from '../../../lib/access';
+import { accessPanel, PLAY_LABELS, QUALITY_HINTS, QUALITY_LABELS, saveEditionAccess } from '../../../lib/edition-access';
+import { wakeAfter } from '../../../lib/schedule';
+import { env } from 'cloudflare:workers';
 
 const { id } = Astro.params;
 const { t, lang } = Astro.locals;
@@ -63,6 +67,12 @@ if (Astro.request.method === 'POST') {
       case 'rights': {
         const n = await setRights(actor, release, [edition], form.get('rights'), form.get('scope') === 'all');
         msg = n ? t('已设定 {n} 个文件的权属', { n }) : t('没有改动');
+        break;
+      }
+      case 'access': {
+        msg = saved(await saveEditionAccess(actor, release, edition, form));
+        // A preview clip may be wanted now: the processing program cuts it.
+        if (form.get('pub_play') === 'clip') wakeAfter(Astro.locals, env);
         break;
       }
       case 'cover': {
@@ -167,11 +177,18 @@ const covers = withTracks ? [] : (await editionCovers([edition.id])).get(edition
 const coverChoices = images.filter((f) => /^(jpe?g|png)$/i.test(f.ext) && f.size < 12_000_000);
 const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
 // 公开站: whether the public site shows this edition (a published work, an edition collected at least in
-// part) and which of its files (by their rights, lib/public/rules.ts).
-const rights = (await rightsOf([edition.id])).get(edition.id)!;
+// part and shown) and what visitors may do with each of its files (lib/access.ts, lib/edition-access.ts).
+const panel = await accessPanel(edition, places, t);
 const workPublished = release.state === 'published';
-const editionShown = PUBLIC_EDITION_STATUSES.includes(edition.status);
+const statusShown = PUBLIC_EDITION_STATUSES.includes(edition.status);
+const editionShown = isPublicEdition(edition);
 const publicHref = `/${siteLangOf(lang)}/works/${release.id}/?edition=${edition.id}`;
+const edClip = parseClip(edition.pub_clip);
+const clipStart = edClip ? (edClip.percent ? `${edClip.start}%` : formatClockShort(edClip.start)) : '0:00';
+function formatClockShort(s: number) {
+  return `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+}
+const KIND_FILTERS: Record<string, string> = { audio: N_('音频'), image: N_('图片'), video: N_('视频'), text: N_('文字') };
 ---
 
 <Admin title={`${release.catalog_no ? `${release.catalog_no} ` : ''}${release.title} · ${label}`} wide heading={false}>
@@ -193,39 +210,129 @@ const publicHref = `/${siteLangOf(lang)}/works/${release.id}/?edition=${edition.
     </div>
   </header>
 
-  <section class="panel ed-public" id="public">
-    <h2>{t('公开站')}</h2>
+  <section class="panel ed-public" id="public" data-edition={edition.id}>
+    <div class="pub-head">
+      <h2>{t('公开站')}</h2>
+      {workPublished && editionShown && <a href={publicHref}>{t('在公开站打开 ›')}</a>}
+    </div>
     <p class="pub-line">
       {!workPublished ? (
         <><span class="chip unknown">{t('不显示')}</span> {t('作品还是草稿。')} <a href={`/admin/releases/${release.id}#info`}>{t('到作品页发布 ›')}</a></>
-      ) : !editionShown ? (
+      ) : !statusShown ? (
         <><span class="chip unknown">{t('不显示')}</span> {t('本版状态为「{status}」：只有已收录、部分缺档的版本显示在公开站。', { status: t(EDITION_STATUS_LABELS[edition.status]) })}</>
+      ) : !editionShown ? (
+        <><span class="chip unknown">{t('不显示')}</span> {t('下面「在公开站显示本版」没有勾选。')}</>
       ) : (
-        <><span class="chip collected">{t('显示中')}</span> {t('作品已发布，本版显示在作品页。')} <a href={publicHref}>{t('在公开站打开 ›')}</a></>
+        <><span class="chip collected">{t('显示中')}</span> {t('作品已发布，本版显示在作品页。')}</>
       )}
     </p>
-    {rights.total > 0 ? (
+
+    <form method="post" class="pub-box" data-pub-defaults>
+      <input type="hidden" name="section" value="access" />
+      <input type="hidden" name="anchor" value="public" />
+      <div class="pub-row">
+        <span class="pub-lbl">{t('本版')}</span>
+        <label class="inline-check"><input type="checkbox" name="pub_shown" value="1" checked={edition.pub_shown === 1} /> {t('在公开站显示本版')}</label>
+      </div>
+      <div class="pub-row">
+        <span class="pub-lbl">{t('文件默认权限')}</span>
+        <label class="pub-field">{t('可见')}
+          <select name="pub_visible"><option value="1" selected={edition.pub_visible === 1}>{t('可见')}</option><option value="0" selected={edition.pub_visible === 0}>{t('隐藏')}</option></select>
+        </label>
+        <label class="pub-field">{t('在线播放 / 查看')}
+          <select name="pub_play" data-play-select>{PLAYS.map((p) => <option value={p} selected={edition.pub_play === p}>{t(PLAY_LABELS[p])}</option>)}</select>
+        </label>
+        <span class="pub-field" data-clip-fields hidden={edition.pub_play !== 'clip'}>
+          {t('试听')} <input type="text" name="clip_start" value={clipStart} size="6" aria-label={t('试听起点')} title={t('时间（如 1:30）或曲长的百分比（如 30%）')} />
+          {t('起')} <input type="number" name="clip_length" value={edClip?.length ?? 60} min="10" max="600" aria-label={t('试听长度（秒）')} /> {t('秒')}
+        </span>
+        <label class="pub-field">{t('音质上限')}
+          <select name="pub_quality">{QUALITIES.map((q) => <option value={q} selected={edition.pub_quality === q}>{t(QUALITY_HINTS[q])}</option>)}</select>
+        </label>
+        <label class="pub-field">{t('下载')}
+          <select name="pub_download"><option value="1" selected={edition.pub_download === 1}>{t('允许')}</option><option value="0" selected={edition.pub_download === 0}>{t('不允许')}</option></select>
+        </label>
+        <button type="submit" class="primary">{t('保存')}</button>
+      </div>
+      <p class="muted small">{t('本版没有单独设置的文件都用这套默认，之后放进本版的文件也一样。第三方文件最多只列名称，权属未定的文件不显示；下载随注册功能开放。')}</p>
+    </form>
+
+    {panel.counts.total > 0 ? (
       <>
-        <p class="pub-line">
-          {t('本版 {n} 个文件的权属：', { n: rights.total })}
-          {(['own', 'licensed', 'third_party', 'unknown'] as const).filter((r) => rights[r] > 0).map((r) => <span class={`chip ${r}`}>{t(RIGHTS_LABELS[r])} {rights[r]}</span>)}
-          {rights.unknown > 0 && <b class="pub-warn">{t('权属未定的 {n} 个文件在公开站不显示。', { n: rights.unknown })}</b>}
+        <p class="pub-line small">
+          {t('本版 {n} 个文件在公开站上：', { n: panel.counts.total })}
+          {panel.counts.open > 0 && <span class="chip collected">{t('可播放 / 可查看 {n}', { n: panel.counts.open })}</span>}
+          {panel.counts.listed > 0 && <span class="chip partial">{t('只列名称 {n}', { n: panel.counts.listed })}</span>}
+          {panel.counts.hidden > 0 && <span class="chip">{t('隐藏 {n}', { n: panel.counts.hidden })}</span>}
+          {panel.counts.unknown > 0 && <b class="pub-warn">{t('权属未定的 {n} 个文件在公开站不显示。', { n: panel.counts.unknown })}</b>}
         </p>
-        <form method="post" class="inline-form pub-form">
-          <input type="hidden" name="section" value="rights" />
-          <input type="hidden" name="anchor" value="public" />
-          {t('批量设定权属：')}
-          <select name="scope" aria-label={t('哪些文件')}>
-            {rights.unknown > 0 && <option value="unknown">{t('权属未定的 {n} 个文件', { n: rights.unknown })}</option>}
-            <option value="all">{t('本版全部 {n} 个文件', { n: rights.total })}</option>
-          </select>
-          <span aria-hidden="true">→</span>
-          <select name="rights" aria-label={t('权属')}>
-            {(['own', 'licensed', 'third_party'] as const).map((r) => <option value={r}>{t(RIGHTS_LABELS[r])}</option>)}
-          </select>
-          <button type="submit" class:list={{ primary: rights.unknown > 0 }}>{t('设定')}</button>
-        </form>
-        <p class="muted small">{t('公开站播放和展示社团自有、已获授权的文件；第三方的只列名称；权属未定的不显示。单个文件可以在下面「文件」里右键设定。')}</p>
+        <div class="pub-filters" role="group" aria-label={t('筛选')}>
+          <button type="button" class="pf on" data-filter="all">{t('全部 {n}', { n: panel.counts.total })}</button>
+          {panel.kinds.filter((k) => KIND_FILTERS[k.kind]).map((k) => <button type="button" class="pf" data-filter={`kind:${k.kind}`}>{t(KIND_FILTERS[k.kind])} {k.n}</button>)}
+          {panel.kinds.some((k) => !KIND_FILTERS[k.kind]) && <button type="button" class="pf" data-filter="kind:other">{t('其他')} {panel.kinds.filter((k) => !KIND_FILTERS[k.kind]).reduce((n, k) => n + k.n, 0)}</button>}
+          <span class="pf-sep" aria-hidden="true"></span>
+          {panel.counts.own > 0 && <button type="button" class="pf" data-filter="own">{t('有单独设置 {n}', { n: panel.counts.own })}</button>}
+          {panel.counts.capped > 0 && <button type="button" class="pf" data-filter="capped">{t('受权属限制 {n}', { n: panel.counts.capped })}</button>}
+          {panel.counts.hidden > 0 && <button type="button" class="pf" data-filter="hidden">{t('隐藏 {n}', { n: panel.counts.hidden })}</button>}
+          {panel.counts.unknown > 0 && <button type="button" class="pf" data-filter="unknown">{t('权属未定 {n}', { n: panel.counts.unknown })}</button>}
+        </div>
+        <div class="pub-bar" data-pub-bar hidden>
+          <b>{t('已选')} <span data-count>0</span></b>
+          <label>{t('权属')} <select data-bar="rights"><option value="">{t('不变')}</option>{(['own', 'licensed', 'third_party', 'unknown'] as const).map((r) => <option value={r}>{t(RIGHTS_LABELS[r])}</option>)}</select></label>
+          <label>{t('可见')} <select data-bar="pub_visible"><option value="">{t('不变')}</option><option value="inherit">{t('跟随本版')}</option><option value="1">{t('可见')}</option><option value="0">{t('隐藏')}</option></select></label>
+          <label>{t('在线')} <select data-bar="pub_play"><option value="">{t('不变')}</option><option value="inherit">{t('跟随本版')}</option>{PLAYS.map((p) => <option value={p}>{t(PLAY_LABELS[p])}</option>)}</select></label>
+          <span data-bar-clip hidden>
+            <input type="text" data-bar="clip_start" value={clipStart} size="6" aria-label={t('试听起点')} title={t('时间（如 1:30）或曲长的百分比（如 30%）')} />
+            {t('起')} <input type="number" data-bar="clip_length" value={edClip?.length ?? 60} min="10" max="600" aria-label={t('试听长度（秒）')} /> {t('秒')}
+          </span>
+          <label>{t('音质上限')} <select data-bar="pub_quality"><option value="">{t('不变')}</option><option value="inherit">{t('跟随本版')}</option>{QUALITIES.map((q) => <option value={q}>{t(QUALITY_LABELS[q])}</option>)}</select></label>
+          <label>{t('下载')} <select data-bar="pub_download"><option value="">{t('不变')}</option><option value="inherit">{t('跟随本版')}</option><option value="1">{t('允许')}</option><option value="0">{t('不允许')}</option></select></label>
+          <button type="button" class="primary" data-bar-act="apply">{t('应用')}</button>
+          <span class="pub-bar-sp"></span>
+          <button type="button" class="link" data-bar-act="reset">{t('恢复跟随本版')}</button>
+          <button type="button" class="link" data-bar-act="clear">{t('取消选择')}</button>
+        </div>
+        <table class="grid pub-table">
+          <thead>
+            <tr>
+              <th class="pick"><input type="checkbox" data-pub-all aria-label={t('全选')} /></th>
+              <th>{t('文件')}</th><th>{t('权属')}</th><th>{t('可见')}</th><th>{t('在线播放 / 查看')}</th><th>{t('音质上限')}</th><th>{t('下载')}</th><th>{t('公开站上')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {panel.groups.map((g) => (
+              <>
+                <tr class="pub-group"><td></td><td colspan="7">{g.label} · {g.rows.length}</td></tr>
+                {g.rows.map((r) => {
+                  const st = r.settings;
+                  const flags = [
+                    `kind:${KIND_FILTERS[r.kind] ? r.kind : 'other'}`,
+                    Object.values(st.own).some(Boolean) ? 'own' : '', r.capped ? 'capped' : '', r.access.visible ? '' : 'hidden', r.rights === 'unknown' ? 'unknown' : '',
+                  ].filter(Boolean).join(' ');
+                  const cls = (own: boolean, locked = false) => ['pv', own ? 'own' : 'inh', locked ? 'lock' : ''].filter(Boolean).join(' ');
+                  return (
+                    <tr data-id={r.id} data-kind={r.kind} data-flags={flags} data-clip={r.clipText}>
+                      <td class="pick"><input type="checkbox" data-pub-pick aria-label={t('选择')} /></td>
+                      <td class="pub-name">{r.position && <span class="pos">{r.position}</span>}{r.name}</td>
+                      <td><button type="button" class="pv-rights" data-field="rights" data-value={r.rights}><span class={`chip ${r.rights}`}>{t(RIGHTS_LABELS[r.rights])}</span></button></td>
+                      <td><button type="button" class={cls(st.own.visible, st.visible && !r.access.visible)} data-field="pub_visible" data-value={st.visible ? '1' : '0'} title={st.visible && !r.access.visible ? t('权属未定的文件不显示') : undefined}>{st.visible ? t('可见') : t('隐藏')}{!st.own.visible && <i>{t('本版')}</i>}</button></td>
+                      <td><button type="button" class={cls(st.own.play || st.own.clip, r.access.visible && st.play !== 'none' && r.access.play === 'none')} data-field="pub_play" data-value={st.play} title={r.access.visible && st.play !== 'none' && r.access.play === 'none' ? t('第三方文件最多只列名称') : undefined}>{t(PLAY_LABELS[r.kind !== 'audio' && st.play === 'clip' ? 'full' : st.play])}{r.kind === 'audio' && st.play === 'clip' && <span class="clip-range">{r.clipText}</span>}{!(st.own.play || st.own.clip) && <i>{t('本版')}</i>}</button></td>
+                      <td>{r.kind === 'audio' ? <button type="button" class={cls(st.own.quality)} data-field="pub_quality" data-value={st.quality}>{t(QUALITY_LABELS[st.quality])}{!st.own.quality && <i>{t('本版')}</i>}</button> : <span class="muted">—</span>}</td>
+                      <td><button type="button" class={cls(st.own.download, st.download && r.access.visible && !r.access.download)} data-field="pub_download" data-value={st.download ? '1' : '0'} title={st.download && r.access.visible && !r.access.download ? t('第三方文件不能下载') : undefined}>{st.download ? t('允许') : t('不允许')}{!st.own.download && <i>{t('本版')}</i>}</button></td>
+                      <td class={`pub-site ${!r.access.visible ? 'hid' : r.access.play === 'none' ? 'listed' : 'open'}`}>{r.site}</td>
+                    </tr>
+                  );
+                })}
+              </>
+            ))}
+          </tbody>
+        </table>
+        <p class="pub-legend small muted">
+          <span><span class="pv inh">{t('允许')}<i>{t('本版')}</i></span> {t('跟随本版默认')}</span>
+          <span><span class="pv own">{t('允许')}</span> {t('单独设置')}</span>
+          <span><span class="pv lock">{t('允许')}</span> {t('受权属限制')}</span>
+          <span>{t('点单元格修改这一个文件；勾选多个后用上方的栏批量修改。')}</span>
+        </p>
       </>
     ) : <p class="muted small">{t('本版还没有文件。')}</p>}
   </section>
@@ -452,6 +559,21 @@ const publicHref = `/${siteLangOf(lang)}/works/${release.id}/?edition=${edition.
     <button class="danger" type="submit" disabled={files.length > 0}>{t('删除这个版本')}</button>
   </form>
 
+  <dialog id="dlg-clip" class="dlg">
+    <form method="dialog">
+      <h3>{t('试听片段')}</h3>
+      <p class="muted small">{t('公开站只播放这一段。起点填时间（如 1:30）或曲长的百分比（如 30%）；超出曲尾时整段往前挪。')}</p>
+      <p class="clip-inputs">
+        <label>{t('起点')} <input type="text" data-start value={clipStart} size="8" /></label>
+        <label>{t('长度')} <input type="number" data-length value={edClip?.length ?? 60} min="10" max="600" /> {t('秒')}</label>
+      </p>
+      <div class="dlg-buttons">
+        <button value="inherit" class="link">{t('用本版的试听范围')}</button>
+        <button value="cancel">{t('取消')}</button>
+        <button value="ok" class="primary">{t('确定')}</button>
+      </div>
+    </form>
+  </dialog>
   <div id="desk-menu" class="ctx-menu" role="menu" hidden></div>
   <div id="desk-drag" class="drag-label" hidden></div>
   <div id="desk-toast" class="desk-toast page-toast" role="status" aria-live="polite" hidden>
@@ -583,6 +705,7 @@ const publicHref = `/${siteLangOf(lang)}/works/${release.id}/?edition=${edition.
 <script>
   import '../../../scripts/edition';
   import '../../../scripts/edition-files';
+  import '../../../scripts/edition-access';
   for (const el of Array.from(document.querySelectorAll('[data-type-select]'))) {
     const select = el as unknown as HTMLSelectElement;
     const extra = Array.from(select.form?.querySelectorAll('[data-new-type]') ?? []) as unknown as HTMLElement[];

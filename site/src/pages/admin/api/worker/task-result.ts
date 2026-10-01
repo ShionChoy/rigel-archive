@@ -2,6 +2,7 @@ import type { APIRoute } from 'astro';
 import { env } from 'cloudflare:workers';
 import { SHA256_HEX, fail, json, readJson } from '../../../../lib/api';
 import { TASKS, checkOutputs, finishStatement, saveDerived, type Task } from '../../../../lib/processing';
+import { checkClips, saveClips } from '../../../../lib/clips';
 
 const FINGERPRINT = /^[A-Za-z0-9+/]+={0,2}$/;
 
@@ -24,6 +25,11 @@ export const POST: APIRoute = async ({ request }) => {
       const outputs = await checkOutputs(env.MEDIA, body.outputs);
       await saveDerived(env.DB, env.MEDIA, sha256, version, outputs);
       return json({ ok: true, outputs: outputs.length });
+    }
+    if (task === 'clip') {
+      const clips = await checkClips(env.MEDIA, sha256, body.clips);
+      await saveClips(env.DB, env.MEDIA, sha256, clips, finishStatement(env.DB, task, sha256, version, null));
+      return json({ ok: true, clips: clips.length });
     }
     if (task === 'fingerprint') {
       const fp = String(body.fp ?? '');

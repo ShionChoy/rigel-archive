@@ -58,6 +58,13 @@ export interface EditionRow {
   external_ids: string;
   note: string | null;
   sort: number;
+  // 文件权限 (migration 0014, lib/access.ts): shown on the public site, and its files' defaults
+  pub_shown: number;
+  pub_visible: number;
+  pub_play: string;
+  pub_clip: string;
+  pub_quality: string;
+  pub_download: number;
 }
 
 export interface EditionTrackRow {
@@ -140,6 +147,12 @@ export interface FileRow {
   edition_id: string | null;
   sealed: number;
   sealed_in: string | null;
+  // 文件权限 (migration 0014, lib/access.ts): NULL follows the edition
+  pub_visible: number | null;
+  pub_play: string | null;
+  pub_clip: string | null;
+  pub_quality: string | null;
+  pub_download: number | null;
 }
 
 /** Machine-read facts about a file (`format` column), written by the import tools. */

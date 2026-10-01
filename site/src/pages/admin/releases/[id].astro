@@ -15,7 +15,8 @@ import { LANGS, saveInfo, saveTranslations } from '../../../lib/releases';
 import { formatMs, loadTracks, sameTitleSongs, saveTracks } from '../../../lib/tracks';
 import { NEW_TYPE } from '../../../lib/types';
 import { siteLangOf } from '../../../lib/public/paths';
-import { PUBLIC_EDITION_STATUSES } from '../../../lib/public/rules';
+import { isPublicEdition } from '../../../lib/public/rules';
+import { editionAccessNotes } from '../../../lib/edition-access';
 import { RIGHTS_LABELS } from '../../../lib/constants';
 import { rightsOf, setRights } from '../../../lib/rights';
 
@@ -51,7 +52,7 @@ if (Astro.request.method === 'POST') {
         break;
       case 'rights': {
         // The files not set yet in the editions the public site shows.
-        const shown = (await loadEditions(release.id)).filter((e) => PUBLIC_EDITION_STATUSES.includes(e.status));
+        const shown = (await loadEditions(release.id)).filter(isPublicEdition);
         const n = await setRights(actor, release, shown, form.get('rights'), false);
         msg = n ? t('已设定 {n} 个文件的权属', { n }) : t('没有改动');
         break;
@@ -105,7 +106,7 @@ if (tracks.length) {
 // 公开站: what the public site shows of this release (lib/public/rules.ts) — its collected editions, less the
 // files whose rights are not set yet.
 const rightsBy = await rightsOf(editions.map((e) => e.id));
-const shownEditions = editions.filter((e) => PUBLIC_EDITION_STATUSES.includes(e.status));
+const shownEditions = editions.filter(isPublicEdition);
 const unsettledOf = (e: { id: string; status: string }) => (shownEditions.some((x) => x.id === e.id) ? rightsBy.get(e.id)?.unknown ?? 0 : 0);
 const unsettled = shownEditions.reduce((n, e) => n + unsettledOf(e), 0);
 const publicHref = `/${siteLangOf(lang)}/works/${release.id}/`;
@@ -171,6 +172,7 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
                 <a href={`/admin/editions/${e.id}`}>{editionLabel(e)}</a>
                 {e.is_default ? <span class="chip collected" title={t('公开页默认显示这个版本')}>{t('默认')}</span> : null}
                 {e.album_title && <div class="muted">{e.album_title}</div>}
+                {editionAccessNotes(e, t).length > 0 && <div class="small"><a class="muted" href={`/admin/editions/${e.id}#public`} title={t('到版本页的「公开站」修改')}>{t('公开站：')}{editionAccessNotes(e, t).join(' · ')}</a></div>}
               </td>
               <td>{e.catalog_no ?? ''}</td>
               <td>{e.release_date ?? ''}</td>

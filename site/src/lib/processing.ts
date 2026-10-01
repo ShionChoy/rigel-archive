@@ -3,9 +3,11 @@
 // fingerprints, acoustic_matches). See tools/ra/src/ra/processing.py for the other side.
 
 import { DERIVED_KEY } from './blobs';
+import { specOf, wantedSpans, type Span } from './clips';
+import { parseFormat } from './db';
 
 /** Versions of the program's rules; tools/ra has the same numbers (a test compares them). */
-export const TASK_VERSIONS = { check: 1, derive: 2, fingerprint: 1 } as const;
+export const TASK_VERSIONS = { check: 1, derive: 2, fingerprint: 1, clip: 1 } as const;
 export type Task = keyof typeof TASK_VERSIONS;
 export const TASKS = Object.keys(TASK_VERSIONS) as Task[];
 
@@ -49,7 +51,8 @@ const USABLE = `f.blob_key IS NOT NULL AND f.sha256 IS NOT NULL AND f.state != '
 const LONG_ENOUGH = `(coalesce(json_extract(f.format, '$.duration'), 0) >= ${MIN_AUDIO_SECONDS} OR f.release_id IS NOT NULL)`;
 
 /** Per task: the files whose content still needs it (one entry per SHA-256 after grouping). */
-export const WANTED: Record<Task, string> = {
+/** Per task: the files whose content still needs it. Preview clips are worked out apart (clipItems). */
+export const WANTED: Record<Exclude<Task, 'clip'>, string> = {
   check: `f.origin = 'upload' AND f.checked_at IS NULL AND f.sha256 IS NOT NULL AND f.blob_key IS NOT NULL AND NOT ${settled('check')}`,
   derive: `${USABLE} AND f.kind IN ('audio', 'video', 'image') AND (f.kind != 'audio' OR ${LONG_ENOUGH}) AND NOT ${settled('derive')}`,
   fingerprint: `${USABLE} AND f.kind IN ('audio', 'video') AND ${LONG_ENOUGH}
@@ -72,10 +75,11 @@ export const WANTED_PICTURES = `NOT EXISTS (SELECT 1 FROM files f WHERE f.sha256
 
 export async function pendingCounts(db: D1Database): Promise<Record<Task, number>> {
   const rows = await db.batch([
-    ...TASKS.map((task) => db.prepare(`SELECT count(DISTINCT f.sha256) AS n FROM files f WHERE ${WANTED[task]}`)),
+    ...SQL_TASKS.map((task) => db.prepare(`SELECT count(DISTINCT f.sha256) AS n FROM files f WHERE ${WANTED[task]}`)),
     db.prepare(`SELECT count(*) AS n FROM pictures p WHERE ${WANTED_PICTURES}`),
   ]);
-  const counts = Object.fromEntries(TASKS.map((task, i) => [task, (rows[i].results[0] as { n: number }).n])) as Record<Task, number>;
+  const counts = Object.fromEntries(SQL_TASKS.map((task, i) => [task, (rows[i].results[0] as { n: number }).n])) as Record<Task, number>;
+  counts.clip = (await clipItems(db, 1000)).length;
   counts.derive += (rows[TASKS.length].results[0] as { n: number }).n;
   return counts;
 }
@@ -95,8 +99,49 @@ export interface TaskItem {
  * videos in a lane of their own, so that a long live recording does not hold up the rest). */
 export type TaskKind = 'video' | 'other' | null;
 
+const SQL_TASKS = TASKS.filter((t): t is Exclude<Task, 'clip'> => t !== 'clip');
+
+/** A content to cut preview clips from: the parts still missing, and their spec for the claim. */
+export interface ClipItem extends TaskItem { spans: Span[]; lossless: boolean; spec: string }
+
+/**
+ * Contents with preview clips still to cut (lib/clips.ts): the parts their files want that are not stored
+ * yet, less contents being worked on, failed a moment ago, or given up on for the same parts.
+ */
+export async function clipItems(db: D1Database, limit: number): Promise<ClipItem[]> {
+  const wanted = await wantedSpans(db);
+  if (wanted.size === 0) return [];
+  const shas = JSON.stringify([...wanted.keys()]);
+  const [cut, tasks, files] = await db.batch([
+    db.prepare('SELECT sha256, from_ms, to_ms, kind FROM clips WHERE sha256 IN (SELECT value FROM json_each(?))').bind(shas),
+    db.prepare("SELECT sha256, state, attempts, spec, started_at, updated_at FROM media_tasks WHERE task = 'clip' AND sha256 IN (SELECT value FROM json_each(?))").bind(shas),
+    db.prepare(
+      `SELECT f.sha256, min(f.name) AS name, min(f.ext) AS ext, max(f.size) AS size, max(f.format) AS format FROM files f
+       WHERE f.sha256 IN (SELECT value FROM json_each(?)) AND f.blob_key IS NOT NULL GROUP BY f.sha256`,
+    ).bind(shas),
+  ]);
+  const have = new Set((cut.results as { sha256: string; from_ms: number; to_ms: number; kind: string }[]).map((c) => `${c.sha256}/${c.from_ms}-${c.to_ms}/${c.kind}`));
+  const taskOf = new Map((tasks.results as { sha256: string; state: string; attempts: number; spec: string | null; started_at: string | null; updated_at: string }[]).map((t) => [t.sha256, t]));
+  const minutesAgo = (iso: string | null) => (iso ? (Date.now() - Date.parse(iso)) / 60000 : Infinity);
+  const out: ClipItem[] = [];
+  for (const f of files.results as { sha256: string; name: string; ext: string; size: number; format: string | null }[]) {
+    const fmt = parseFormat(f.format);
+    const lossless = !!fmt.lossless || /^(wav|flac|aiff?|wv|ape|tta)$/i.test(f.ext);
+    const kinds = lossless ? ['lossless', 'lossy'] : ['lossy'];
+    const missing = (wanted.get(f.sha256) ?? []).filter((s) => kinds.some((k) => !have.has(`${f.sha256}/${s.from_ms}-${s.to_ms}/${k}`)));
+    if (missing.length === 0) continue;
+    const spec = specOf(missing);
+    const t = taskOf.get(f.sha256);
+    if (t?.state === 'running' && minutesAgo(t.started_at) < STALE_MINUTES) continue;
+    if (t?.state === 'failed' && t.spec === spec && (t.attempts >= MAX_ATTEMPTS || minutesAgo(t.updated_at) < RETRY_AFTER_MINUTES)) continue;
+    out.push({ sha256: f.sha256, name: f.name, ext: f.ext, kind: 'audio', size: f.size, format: fmt, pcm_md5: null, spans: missing, lossless, spec });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 /** The next contents for a task (uploads first, newest first). */
-export async function taskItems(db: D1Database, task: Exclude<Task, 'check'>, limit: number, kind: TaskKind = null): Promise<TaskItem[]> {
+export async function taskItems(db: D1Database, task: Exclude<Task, 'check' | 'clip'>, limit: number, kind: TaskKind = null): Promise<TaskItem[]> {
   const only = kind === 'video' ? "AND f.kind = 'video'" : kind === 'other' ? "AND f.kind != 'video'" : '';
   const { results } = await db
     .prepare(
@@ -153,21 +198,24 @@ async function pictureItems(db: D1Database, limit: number): Promise<TaskItem[]> 
   });
 }
 
-/** Take a content for a task; false when it is being worked on, done, or given up. */
-export async function claim(db: D1Database, task: Task, sha256: string, version: number): Promise<boolean> {
+/**
+ * Take a content for a task; false when it is being worked on, done, or given up. `spec` (preview clips)
+ * names what is asked for: other parts than last time make it a new task (attempts start again).
+ */
+export async function claim(db: D1Database, task: Task, sha256: string, version: number, spec: string | null = null): Promise<boolean> {
   const result = await db
     .prepare(
-      `INSERT INTO media_tasks (sha256, task, version, state, attempts, started_at, updated_at)
-       VALUES (?1, ?2, ?3, 'running', 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+      `INSERT INTO media_tasks (sha256, task, version, state, attempts, started_at, updated_at, spec)
+       VALUES (?1, ?2, ?3, 'running', 1, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?4)
        ON CONFLICT (sha256, task) DO UPDATE SET
-         attempts = CASE WHEN media_tasks.version < excluded.version THEN 1 ELSE media_tasks.attempts + 1 END,
-         version = excluded.version, state = 'running', error = NULL,
+         attempts = CASE WHEN media_tasks.version < excluded.version OR media_tasks.spec IS NOT excluded.spec THEN 1 ELSE media_tasks.attempts + 1 END,
+         version = excluded.version, state = 'running', error = NULL, spec = excluded.spec,
          started_at = excluded.started_at, updated_at = excluded.updated_at
        WHERE NOT (media_tasks.state = 'running' AND media_tasks.started_at > ${ago(STALE_MINUTES)})
-         AND NOT (media_tasks.state = 'done' AND media_tasks.version >= excluded.version)
-         AND NOT (media_tasks.attempts >= ${MAX_ATTEMPTS} AND media_tasks.version >= excluded.version)`,
+         AND NOT (media_tasks.state = 'done' AND media_tasks.version >= excluded.version AND media_tasks.spec IS excluded.spec)
+         AND NOT (media_tasks.attempts >= ${MAX_ATTEMPTS} AND media_tasks.version >= excluded.version AND media_tasks.spec IS excluded.spec)`,
     )
-    .bind(sha256, task, version)
+    .bind(sha256, task, version, spec)
     .run();
   return result.meta.changes > 0;
 }

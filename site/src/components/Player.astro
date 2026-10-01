@@ -15,9 +15,19 @@ const labels = {
   play: t('播放'),
   pause: t('暂停'),
   lossless: t('无损'),
+  original: t('原件'),
   saver: t('省流'),
-  saverTitle: t('无损播放；点一下改为省流（AAC）'),
-  losslessTitle: t('省流播放；点一下改回无损'),
+  clip: t('试听'),
+  versions: t('播放版本 · 本曲'),
+  versionsTitle: t('选择播放版本'),
+  losslessHint: t('推流用的无损压缩版，与原件逐采样一致'),
+  losslessOtherHint: t('推流用的无损版'),
+  originalHint: t('收录时的原始文件'),
+  saverHint: t('有损，流量最小'),
+  clipHint: t('只能试听这一段'),
+  locked: t('这一版本未开放'),
+  defaultMark: t('默认'),
+  remember: t('选择记在这台设备上，之后的曲目也按它挑；没有这一版本的曲目播无损。'),
   repeatOff: t('不循环'),
   repeatAll: t('循环全部'),
   repeatOne: t('单曲循环'),
@@ -63,7 +73,7 @@ const labels = {
     </div>
   </div>
   <div class="pl-side">
-    <button type="button" class="pl-quality" title={labels.saverTitle}><span class="pl-format"></span><span class="pl-mode">{labels.lossless}</span></button>
+    <button type="button" class="pl-quality" title={labels.versionsTitle} aria-haspopup="true" aria-expanded="false"><span class="pl-format"></span><span class="pl-mode">{labels.lossless}</span></button>
     <button type="button" class="pl-btn pl-queue-btn" aria-expanded="false" aria-label={t('播放队列')} title={t('播放队列')}>
       <svg viewBox="0 0 24 24" aria-hidden="true" class="line"><path d="M4 6.5h12M4 11.5h12M4 16.5h7M16.5 14.5v6l4.5-3z" /></svg>
     </button>
@@ -76,6 +86,7 @@ const labels = {
     <div class="pl-queue-head"><span>{t('播放队列')}</span><button type="button" class="pl-clear">{t('清空')}</button></div>
     <ol></ol>
   </div>
+  <div class="pl-qmenu" role="menu" hidden></div>
   <div class="pl-toast" role="status" aria-live="polite"></div>
   <audio preload="none"></audio>
 </div>
@@ -120,6 +131,22 @@ const labels = {
   .pl-quality { border: 1px solid var(--line); background: none; color: var(--muted); border-radius: 14px; padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; display: flex; gap: 6px; }
   .pl-quality .pl-mode { color: var(--accent); font-weight: 600; }
   .pl-quality.saver .pl-mode { color: var(--muted); }
+  .pl-quality[aria-expanded='true'] { border-color: var(--accent); }
+  .pl-qmenu { position: absolute; right: 16px; bottom: calc(100% + 8px); width: min(380px, calc(100vw - 32px)); background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.3); padding: 6px; z-index: 3; }
+  .pl-qmenu[hidden] { display: none; }
+  .pl-qmenu .qm-head { color: var(--muted); font-size: 12px; padding: 6px 10px 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  .pl-qmenu button { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; width: 100%; text-align: left; border: 0; background: none; color: var(--ink); padding: 8px 10px; border-radius: 7px; cursor: pointer; font: inherit; }
+  .pl-qmenu button:hover:not(:disabled), .pl-qmenu button.on { background: var(--now); }
+  .pl-qmenu button:disabled { opacity: 0.45; cursor: default; }
+  .pl-qmenu .qm-dot { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--muted); margin-top: 3px; position: relative; }
+  .pl-qmenu button.on .qm-dot { border-color: var(--accent); }
+  .pl-qmenu button.on .qm-dot::after { content: ''; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--accent); }
+  .pl-qmenu .qm-name { font-weight: 600; }
+  .pl-qmenu button.on .qm-name { color: var(--accent); }
+  .pl-qmenu .qm-spec { font-size: 12.5px; margin-left: 6px; }
+  .pl-qmenu .qm-tag { font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--muted); margin-left: 6px; }
+  .pl-qmenu .qm-hint { display: block; color: var(--muted); font-size: 12px; }
+  .pl-qmenu .qm-foot { border-top: 1px solid var(--line); margin-top: 4px; padding: 8px 10px 4px; color: var(--muted); font-size: 12px; }
   .pl-format:empty { display: none; }
   .pl-volume { width: 90px; }
   .pl-queue { position: absolute; right: 16px; bottom: calc(100% + 8px); width: min(420px, calc(100vw - 32px)); max-height: min(60vh, 520px); overflow: auto; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.25); }

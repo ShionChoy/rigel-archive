@@ -13,7 +13,7 @@ import { pagesFor } from '../../../lib/public/paths';
 if (!isSiteLang(Astro.params.lang)) return new Response(null, { status: 404 });
 const { t, lang } = Astro.locals;
 const database = db();
-const urls = publicUrls() ?? NO_MEDIA;
+const urls = (await publicUrls()) ?? NO_MEDIA;
 const [all, eras] = await Promise.all([publicWorks(database, { t, lang, urls }), publicEras(database, lang)]);
 const pages = pagesFor(lang);
 

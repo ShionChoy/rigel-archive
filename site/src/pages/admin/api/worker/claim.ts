@@ -15,7 +15,8 @@ export const POST: APIRoute = async ({ request }) => {
     const version = Number(body.version);
     if (!TASKS.includes(task) || !SHA256_HEX.test(sha256) || !Number.isInteger(version)) return fail('参数无效');
     if (body.touch === true) return json({ claimed: await touch(env.DB, task, sha256) });
-    return json({ claimed: await claim(env.DB, task, sha256, version) });
+    const spec = typeof body.spec === 'string' ? body.spec.slice(0, 2000) : null;
+    return json({ claimed: await claim(env.DB, task, sha256, version, spec) });
   } catch (e) {
     return fail(e instanceof Error ? e.message : String(e));
   }

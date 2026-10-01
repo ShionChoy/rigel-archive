@@ -84,6 +84,7 @@ npm install
 npm run db:reset        # 清空本地 D1，执行迁移并导入种子数据（整理结果也会清掉；之后要重启 npm run dev）
 npm run db:seed         # 或：只导入新文件、刷新机器读取的字段，不动已做的整理
 npm run dev             # http://localhost:4321/admin
+npm test                # 文件权限规则的单元测试（ra 的测试：cd tools/ra && uv run --with pytest pytest -q）
 ```
 
 `db:seed` 可以重复执行：新文件插入，已有文件只刷新大小、SHA-256、规格、PCM MD5 和脚本建议，

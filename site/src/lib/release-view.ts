@@ -15,14 +15,17 @@ import { formatBytes } from './format';
 import type { T } from './i18n';
 import { loadForms } from './forms';
 import { Places } from './locations';
-import { audioSources, imageSrc, pictureSrc, videoSources, type MediaUrls, type Source } from './media';
+import { imageSrc, pictureSrc, videoSources, type MediaUrls, type Source } from './media';
+import { openVersions, playVersions } from './playback';
 import { derivedFor } from './processing';
-import { isListed, isOpen, PREVIEW_EDGE, PUBLIC_EDITION_STATUSES } from './public/rules';
+import { accessOf, isListed, isOpen, isPublicEdition, PREVIEW_EDGE, type Access } from './public/rules';
+import { clipsFor } from './clips';
 import { effectiveTags, parseTags, type Tags } from './tagging/model';
 import { parseCover } from './tags';
 import { formatMs } from './tracks';
 
-type F = Pick<FileRow, 'id' | 'name' | 'download_name' | 'kind' | 'ext' | 'edition_id' | 'folder_id' | 'track_id' | 'format' | 'size' | 'sha256' | 'blob_key' | 'source_path' | 'member_path' | 'rights'>;
+type F = Pick<FileRow, 'id' | 'name' | 'download_name' | 'kind' | 'ext' | 'edition_id' | 'folder_id' | 'track_id' | 'format' | 'size' | 'sha256' | 'blob_key' | 'source_path' | 'member_path' | 'rights'
+  | 'pub_visible' | 'pub_play' | 'pub_clip' | 'pub_quality' | 'pub_download'>;
 type Row = {
   id: string; disc: number; position: number; track_id: string; tags: string; cover: string | null;
   entry_title: string; version_label: string | null; song_id: string | null; duration_ms: number | null; entry_duration: number | null;
@@ -34,6 +37,10 @@ export interface Line {
   sources: Source[] | null;
   file: string | null; // the file played (the player asks for new addresses by it)
   song: string | null; // the song's page
+  /** Only a preview clip is played: the part of the track it is (seconds). */
+  clip: [number, number] | null;
+  /** A preview clip is wanted but not cut yet. */
+  preparing: boolean;
 }
 export interface Picture { href: string; thumb: string; caption: string }
 export interface Video { name: string; poster: string | null; sources: Source[] }
@@ -60,6 +67,8 @@ export interface ChosenView {
   withTracks: boolean;
   attachments: Attachments[];
   download: string | null; // null: no download here (the public site's come with accounts, 第 3 阶段)
+  /** Some of the edition's files may be downloaded (by members, once accounts come). */
+  downloadable: boolean;
   musicbrainz: string | null;
   bandcamp: string | null;
 }
@@ -134,7 +143,8 @@ export async function loadReleaseView(
 
   // The editions shown: collected or partly collected ones (missing and to-be-confirmed ones stay in the admin).
   const all = await loadEditions(release.id, types);
-  const shown = all.filter((e) => PUBLIC_EDITION_STATUSES.includes(e.status));
+  const shown = all.filter(isPublicEdition);
+  const editionOf = new Map(all.map((e) => [e.id, e]));
   const { results: rowCounts } = await database
     .prepare('SELECT et.edition_id, count(*) AS n FROM edition_tracks et JOIN editions e ON e.id = et.edition_id WHERE e.release_id = ? GROUP BY et.edition_id')
     .bind(release.id)
@@ -146,7 +156,8 @@ export async function loadReleaseView(
   const [filesResult, titles, rowsResult, forms] = await Promise.all([
     database
       .prepare(
-        `SELECT id, name, download_name, kind, ext, edition_id, folder_id, track_id, format, size, sha256, blob_key, source_path, member_path, rights FROM files f
+        `SELECT id, name, download_name, kind, ext, edition_id, folder_id, track_id, format, size, sha256, blob_key, source_path, member_path, rights,
+                pub_visible, pub_play, pub_clip, pub_quality, pub_download FROM files f
          WHERE release_id = ? AND edition_id IS NOT NULL AND state IN ('classified', 'published') AND dup_of IS NULL AND sealed_in IS NULL
            AND NOT EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id)
          ORDER BY coalesce(download_name, name)`,
@@ -168,16 +179,31 @@ export async function loadReleaseView(
       : Promise.resolve({ results: [] as Row[] }),
     loadForms(database),
   ]);
-  // Files whose rights are not set yet are left out altogether; third-party ones are listed by name only.
-  const unsettled = chosen ? filesResult.results.filter((f) => f.edition_id === chosen.id && !isListed(f)).length : 0;
-  const files = filesResult.results.filter(isListed);
+  // What visitors may do with each file (lib/access.ts): files not listed are left out altogether; the rest
+  // are listed by name at least.
+  const accessCache = new Map<string, Access>();
+  const access = (f: F): Access => {
+    let a = accessCache.get(f.id);
+    if (!a) accessCache.set(f.id, (a = accessOf(f, f.edition_id ? editionOf.get(f.edition_id) : null)));
+    return a;
+  };
+  const listed = (f: F) => isListed(access(f));
+  const open = (f: F) => isOpen(access(f));
+  /** The pictures a file carries may be shown: listed, and its rights do not hold it back. */
+  const showsCover = (f: F) => listed(f) && access(f).ceiling === 'open';
+  const unsettled = chosen ? filesResult.results.filter((f) => f.edition_id === chosen.id && f.rights === 'unknown').length : 0;
+  const files = filesResult.results.filter(listed);
   const rows = rowsResult.results;
   const mine = chosen ? files.filter((f) => f.edition_id === chosen.id) : [];
   const audio = mine.filter((f) => f.kind === 'audio');
   // What every audio file of the shown editions carries (its tags and pictures), read now where not read yet.
-  const shownAudio = files.filter((f) => f.kind === 'audio' && isOpen(f) && shown.some((e) => e.id === f.edition_id));
+  const shownAudio = files.filter((f) => f.kind === 'audio' && showsCover(f) && shown.some((e) => e.id === f.edition_id));
   await readNow(database, media, shownAudio.map((f) => f.sha256), opts.readBudgetMs ?? 8000).catch(() => 0);
-  const [own, derived] = await Promise.all([embeddedFor(shownAudio.map((f) => f.sha256), database), derivedFor(database, files.map((f) => f.sha256))]);
+  const [own, derived, clips] = await Promise.all([
+    embeddedFor(shownAudio.map((f) => f.sha256), database),
+    derivedFor(database, files.map((f) => f.sha256)),
+    clipsFor(database, files.filter((f) => f.kind === 'audio' && access(f).play === 'clip').map((f) => f.sha256)),
+  ]);
   const derivedOf = (f: F) => (f.sha256 ? derived.get(f.sha256) : undefined);
   const tx = (field: string, code: string) => titles.results.find((x) => x.field === field && x.lang === code)?.value;
   const subtitles = (SUBTITLE_ORDER[opts.lang] ?? SUBTITLE_ORDER.zh).map((code) => tx('title', code)).filter((v): v is string => !!v && v !== release.title);
@@ -193,17 +219,18 @@ export async function loadReleaseView(
 
   // ---------------------------------------------------------------- covers
   const quality = (f: F) => audioQuality(f.format);
-  const playable = (f: F) => f.kind === 'audio' && isOpen(f) && (urls.original(f, false) !== null || !!derivedOf(f)?.get('stream'));
+  const versionsOf = (f: F) => playVersions(f, derivedOf(f), access(f), urls, f.sha256 ? clips.get(f.sha256) : undefined);
+  const playable = (f: F) => f.kind === 'audio' && open(f) && openVersions(versionsOf(f)).length > 0;
   /** An edition's files for one track, the best-sounding first. */
   const filesOfTrack = (editionId: string, trackId: string) => files.filter((f) => f.edition_id === editionId && f.track_id === trackId && f.kind === 'audio').sort((a, b) => quality(b) - quality(a));
   /** A picture's original, when it may be shown: guests see pictures up to PREVIEW_EDGE (larger ones by their previews). */
   const pictureOriginal = (f: F) => {
-    if (!isOpen(f)) return null;
+    if (!open(f)) return null;
     const fmt = parseFormat(f.format);
     const small = !!fmt.width && !!fmt.height && Math.max(fmt.width, fmt.height) <= PREVIEW_EDGE;
     return small || urls.fullPictures ? urls.original(f, true) : null;
   };
-  const imageUrl = (f: F, size: 240 | 640 | 1600) => (isOpen(f) ? imageSrc(pictureOriginal(f), derivedOf(f), size, urls) : null);
+  const imageUrl = (f: F, size: 240 | 640 | 1600) => (open(f) ? imageSrc(pictureOriginal(f), derivedOf(f), size, urls) : null);
   /** The cover a row shows: its chosen one, else the one its (best) file carries. */
   const rowCover = (editionId: string, row: { track_id: string; cover: string | null }): string | null => {
     const c = parseCover(row.cover);
@@ -212,7 +239,7 @@ export async function loadReleaseView(
       const f = files.find((x) => x.id === c.file);
       return f ? imageUrl(f, 640) : null;
     }
-    for (const f of filesOfTrack(editionId, row.track_id).filter(isOpen)) {
+    for (const f of filesOfTrack(editionId, row.track_id).filter(showsCover)) {
       const e = f.sha256 ? own.get(f.sha256) : undefined;
       if (e?.cover) return picture(e.cover);
     }
@@ -220,11 +247,11 @@ export async function loadReleaseView(
   };
   /** An edition without a track list: its chosen picture, else one named like a cover, else its first picture, else what its audio carries. */
   const editionCover = (e: EditionRow): string | null => {
-    const images = files.filter((f) => f.edition_id === e.id && f.kind === 'image' && isOpen(f));
+    const images = files.filter((f) => f.edition_id === e.id && f.kind === 'image' && open(f));
     const chosenFile = e.cover_file_id ? images.find((f) => f.id === e.cover_file_id) : undefined;
     const pick = chosenFile ?? images.find((f) => COVER_NAME.test((f.download_name || f.name).replace(/\.[^.]+$/, ''))) ?? images[0];
     if (pick) return imageUrl(pick, 640);
-    for (const f of files.filter((x) => x.edition_id === e.id && x.kind === 'audio' && isOpen(x))) {
+    for (const f of files.filter((x) => x.edition_id === e.id && x.kind === 'audio' && showsCover(x))) {
       const own1 = f.sha256 ? own.get(f.sha256) : undefined;
       if (own1?.cover) return picture(own1.cover);
     }
@@ -286,15 +313,17 @@ export async function loadReleaseView(
   });
   const raws: Raw[] = rows.length === 0 ? fileLines : rows.map((row) => {
     const list = filesOfTrack(chosen.id, row.track_id);
-    const main = list.find(isOpen) ?? list[0];
+    const main = list.find(showsCover) ?? list[0];
     const embedded = main?.sha256 ? own.get(main.sha256)?.tags ?? {} : {};
     const tags = effectiveTags(embedded, parseTags(row.tags));
     const src = list.find(playable) ?? null;
     const fmt = main ? parseFormat(main.format) : {};
     return { row, tags, src, cover: rowCover(chosen.id, row), seconds: row.duration_ms ? row.duration_ms / 1000 : fmt.duration ?? (row.entry_duration ? row.entry_duration / 1000 : null) };
   });
-  // Tracks whose audio this edition has, but not to play here (the public site's rights rules).
-  const heldBack = new Set(filesResult.results.filter((f) => f.edition_id === chosen.id && f.kind === 'audio' && f.track_id && !isOpen(f)).map((f) => f.track_id));
+  // Tracks whose audio this edition has, but not to play here (its access, or its clip not cut yet).
+  const heldBack = new Set(filesResult.results.filter((f) => f.edition_id === chosen.id && f.kind === 'audio' && f.track_id && !playable(f)).map((f) => f.track_id));
+  /** A track's file that would be played as a clip once the clip is cut. */
+  const clipWanted = (trackId: string) => filesOfTrack(chosen.id, trackId).find((f) => open(f) && access(f).play === 'clip');
   /** The one value the tracks that have the tag agree on (null when none has it or they differ). */
   const common = (name: string): string | null => {
     const values = new Set(raws.map((l) => (l.tags[name] ?? []).join('; ')).filter(Boolean));
@@ -335,7 +364,7 @@ export async function loadReleaseView(
   const groups = [...new Set(others.map((f) => folderPath(f.folder_id)))].sort((a, b) => a.localeCompare(b, 'ja', { numeric: true }));
   const attachments: Attachments[] = groups.map((g) => {
     const inGroup = others.filter((f) => folderPath(f.folder_id) === g);
-    const videos = inGroup.filter((f) => f.kind === 'video' && isOpen(f))
+    const videos = inGroup.filter((f) => f.kind === 'video' && open(f))
       .map((f) => ({ name: f.download_name || f.name, ...videoSources(urls.original(f, false), derivedOf(f), mimeFor(f.ext), urls) }))
       .filter((v) => v.sources.length > 0);
     return {
@@ -349,12 +378,12 @@ export async function loadReleaseView(
       }),
       videos,
       docs: inGroup.filter((f) => f.kind !== 'image' && f.kind !== 'audio' && !videos.some((v) => v.name === (f.download_name || f.name))).map((f) => {
-        const listed = !isOpen(f);
+        const listed = !open(f);
         return {
           name: f.download_name || f.name,
           size: listed ? t('只列条目') : formatBytes(f.size),
           view: !listed && readable(f) ? urls.original(f, false) : null,
-          download: !listed && !readable(f) ? links.fileDownload(f) : null,
+          download: !listed && !readable(f) && access(f).download ? links.fileDownload(f) : null,
           listed,
         };
       }),
@@ -382,15 +411,18 @@ export async function loadReleaseView(
       sub: [(l.tags.artist ?? []).join(' / '), l.tags.composer?.length ? t('作曲 {name}', { name: l.tags.composer.join(' / ') }) : ''].filter(Boolean).join(' · '),
       seconds: l.seconds,
       cover: l.cover,
-      sources: l.src ? audioSources(urls.original(l.src, false), derivedOf(l.src), mimeFor(l.src.ext), urls, { ...parseFormat(l.src.format), ext: l.src.ext }) : null,
+      sources: l.src ? versionsOf(l.src) : null,
       file: l.src?.id ?? null,
       song: l.row.song_id ? links.song(l.row.song_id) : null,
+      clip: l.src && access(l.src).play === 'clip' ? (versionsOf(l.src).find((v) => v.span)?.span ?? null) : null,
+      preparing: !l.src && !!l.row.track_id && !!clipWanted(l.row.track_id),
     })),
     withheld: raws.filter((l) => !l.src && heldBack.has(l.row.track_id)).length,
-    hidden: filesResult.results.filter((f) => f.edition_id === chosen.id && (!isListed(f) || (f.kind === 'audio' && !isOpen(f)))).length,
+    hidden: filesResult.results.filter((f) => f.edition_id === chosen.id && (!listed(f) || (f.kind === 'audio' && !open(f)))).length,
     withTracks,
     attachments,
-    download: links.editionDownload(chosen.id),
+    downloadable: mine.some((f) => access(f).download),
+    download: mine.some((f) => access(f).download) ? links.editionDownload(chosen.id) : null,
     musicbrainz: ids.musicbrainz_release ? `https://musicbrainz.org/release/${ids.musicbrainz_release}` : null,
     bandcamp: ids.bandcamp ?? null,
   };

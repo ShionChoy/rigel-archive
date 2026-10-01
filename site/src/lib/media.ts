@@ -47,18 +47,27 @@ export function mediaSrc(file: MediaFile, base: string): string | null {
   return null;
 }
 
-const derivedUrl = (row: DerivedRow | undefined, urls: MediaUrls) => (row ? urls.object(row.key, PICTURE_KINDS.has(row.kind)) : null);
+export const derivedUrl = (row: DerivedRow | undefined, urls: MediaUrls) => (row ? urls.object(row.key, PICTURE_KINDS.has(row.kind)) : null);
 
 export interface Source {
-  src: string;
+  src: string; // '' when locked
   type: string;
   label?: string; // «FLAC 24 bit / 48 kHz», «AAC 192 kbps» (what the player shows)
   lossless?: boolean;
+  /** The public site's versions of a track (lib/playback.ts): 无损 (the stream), 原件, 省流. */
+  kind?: 'lossless' | 'original' | 'lossy';
+  size?: number | null;
+  /** Lossless: sounds exactly like the original, sample for sample. */
+  same?: boolean;
+  /** Listed but not open here (beyond the edition's or file's quality cap). */
+  locked?: boolean;
+  /** A preview clip: the part of the track it is, in seconds. */
+  span?: [number, number];
 }
 
 interface SoundInfo { codec?: string; bits?: number; rate?: number; kbps?: number; lossless?: boolean }
 
-const info = (row: DerivedRow | undefined): SoundInfo => {
+export const info = (row: DerivedRow | undefined): SoundInfo => {
   try {
     return row?.info ? (JSON.parse(row.info) as SoundInfo) : {};
   } catch {

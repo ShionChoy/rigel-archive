@@ -3,9 +3,13 @@
 //
 // Addresses on the public site run out after a while (lib/public/media.ts); a track whose address has run
 // out, or that fails to load, gets a new one from /api/play and goes on from the same second.
-// Lossless (the stream FLAC) is played unless the browser cannot, or the visitor chose 省流 (AAC).
+// A track comes in versions (lib/playback.ts): 无损 (the stream FLAC), 原件 (the file as collected) and 省流
+// (AAC), as far as the track's access allows; a track limited to a preview clip comes as the clip only.
+// 无损 plays unless the browser cannot or the visitor picked another version in the menu (kept in this
+// browser for every track).
 
-interface Source { src: string; type: string; label?: string; lossless?: boolean }
+type Kind = 'lossless' | 'original' | 'lossy';
+interface Source { src: string; type: string; label?: string; lossless?: boolean; kind?: Kind; size?: number | null; same?: boolean; locked?: boolean; span?: [number, number] }
 interface Item {
   file: string | null;
   title: string;
@@ -17,7 +21,12 @@ interface Item {
   exp: number | null;
 }
 type Repeat = 'off' | 'all' | 'one';
-interface Saved { queue: Item[]; index: number; time: number; shuffle: boolean; repeat: Repeat; saver: boolean; volume: number }
+interface Saved { queue: Item[]; index: number; time: number; shuffle: boolean; repeat: Repeat; pref: Kind; volume: number }
+
+/** A version's kind (sources kept from before versions had one: lossless or not). */
+const kindOf = (s: Source): Kind => s.kind ?? (s.lossless === false ? 'lossy' : 'lossless');
+/** Which versions to try first for each preference. */
+const ORDER: Record<Kind, Kind[]> = { lossless: ['lossless', 'original', 'lossy'], original: ['original', 'lossless', 'lossy'], lossy: ['lossy', 'lossless', 'original'] };
 
 const KEY = 'rigel.player';
 const root = document.getElementById('player');
@@ -33,6 +42,7 @@ function setUp(root: HTMLElement) {
   const seek = $<HTMLInputElement>('.pl-seek');
   const volume = $<HTMLInputElement>('.pl-volume');
   const queueBox = $<HTMLElement>('.pl-queue');
+  const qmenu = $<HTMLElement>('.pl-qmenu');
 
   const state: Saved = restore();
   let order: number[] = [];
@@ -49,9 +59,9 @@ function setUp(root: HTMLElement) {
 
   // ------------------------------------------------------------ keeping it
   function restore(): Saved {
-    const fallback: Saved = { queue: [], index: 0, time: 0, shuffle: false, repeat: 'off', saver: false, volume: 1 };
+    const fallback: Saved = { queue: [], index: 0, time: 0, shuffle: false, repeat: 'off', pref: 'lossless', volume: 1 };
     try {
-      const raw = JSON.parse(localStorage.getItem(KEY) ?? 'null') as Partial<Saved> | null;
+      const raw = JSON.parse(localStorage.getItem(KEY) ?? 'null') as (Partial<Saved> & { saver?: boolean }) | null;
       if (!raw || !Array.isArray(raw.queue)) return fallback;
       return {
         queue: raw.queue.filter((i) => i && typeof i.title === 'string').slice(0, 500),
@@ -59,7 +69,8 @@ function setUp(root: HTMLElement) {
         time: Number(raw.time) || 0,
         shuffle: !!raw.shuffle,
         repeat: raw.repeat === 'all' || raw.repeat === 'one' ? raw.repeat : 'off',
-        saver: !!raw.saver,
+        // Before the menu there was only 省流 on or off.
+        pref: raw.pref === 'original' || raw.pref === 'lossy' || raw.pref === 'lossless' ? raw.pref : raw.saver ? 'lossy' : 'lossless',
         volume: typeof raw.volume === 'number' && raw.volume >= 0 && raw.volume <= 1 ? raw.volume : 1,
       };
     } catch {
@@ -96,10 +107,15 @@ function setUp(root: HTMLElement) {
   const current = () => state.queue[state.index] as Item | undefined;
 
   // ------------------------------------------------------------ playing
-  function pick(item: Item): Source | null {
-    const list = (item.sources ?? []).filter((s) => audio.canPlayType(s.type) !== '');
-    if (list.length === 0) return item.sources?.at(-1) ?? null;
-    if (state.saver) return list.find((s) => s.lossless === false) ?? list[0];
+  /** The version to play: the preferred kind first, among those open here that this browser plays. */
+  function pick(item: Item, prefer: Kind = state.pref): Source | null {
+    const open = (item.sources ?? []).filter((s) => s.src && !s.locked);
+    const list = open.filter((s) => audio.canPlayType(s.type) !== '');
+    if (list.length === 0) return open.at(-1) ?? null;
+    for (const kind of ORDER[prefer]) {
+      const found = list.find((s) => kindOf(s) === kind);
+      if (found) return found;
+    }
     return list[0];
   }
 
@@ -236,10 +252,12 @@ function setUp(root: HTMLElement) {
     repeat.setAttribute('aria-label', repeat.title);
     const quality = $<HTMLButtonElement>('.pl-quality');
     const shown = loaded === state.index && source ? source : pick(item);
-    quality.classList.toggle('saver', state.saver);
-    quality.title = state.saver ? L.losslessTitle : L.saverTitle;
-    $('.pl-format').textContent = shown?.label ?? '';
-    $('.pl-mode').textContent = shown && shown.lossless === false ? L.saver : L.lossless;
+    const kind = shown ? kindOf(shown) : state.pref;
+    quality.classList.toggle('saver', kind === 'lossy');
+    // A clip's range as the album page writes it (whole seconds, rounded).
+    $('.pl-format').textContent = shown?.span ? `${clock(Math.round(shown.span[0]))}–${clock(Math.round(shown.span[1]))}` : shown?.label ?? '';
+    $('.pl-mode').textContent = shown?.span ? L.clip : kind === 'original' ? L.original : kind === 'lossy' ? L.saver : L.lossless;
+    if (!qmenu.hidden) drawVersions();
     if (loaded !== state.index) {
       $('.pl-cur').textContent = clock(state.time);
       $('.pl-dur').textContent = '';
@@ -370,8 +388,71 @@ function setUp(root: HTMLElement) {
     render();
     save(true);
   });
-  $('.pl-quality').addEventListener('click', () => {
-    state.saver = !state.saver;
+  // The versions menu: what this track offers, the one playing marked; picking one switches over at the
+  // same second and becomes the preference for the tracks after it.
+  function drawVersions() {
+    const item = current();
+    const list = item?.sources ?? [];
+    const playing = loaded === state.index && source ? source : item ? pick(item) : null;
+    const head = document.createElement('div');
+    head.className = 'qm-head';
+    head.textContent = L.versions;
+    const rows = list.map((s) => {
+      const kind = kindOf(s);
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('role', 'menuitemradio');
+      const on = !!playing && s.src === playing.src && !s.locked;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-checked', String(on));
+      b.disabled = !!s.locked || !s.src;
+      b.dataset.kind = kind;
+      const dot = document.createElement('span');
+      dot.className = 'qm-dot';
+      const text = document.createElement('span');
+      const name = document.createElement('span');
+      name.className = 'qm-name';
+      name.textContent = s.span ? `${L.clip} · ${kind === 'lossy' ? L.saver : L.lossless}` : kind === 'original' ? L.original : kind === 'lossy' ? L.saver : L.lossless;
+      const spec = document.createElement('span');
+      spec.className = 'qm-spec';
+      spec.textContent = [s.label, s.size ? `${(s.size / 1048576).toFixed(1)} MB` : ''].filter(Boolean).join(' · ');
+      text.appendChild(name);
+      text.appendChild(spec);
+      if (!s.locked && !s.span && kind === 'lossless') {
+        const tag = document.createElement('span');
+        tag.className = 'qm-tag';
+        tag.textContent = L.defaultMark;
+        text.appendChild(tag);
+      }
+      const hint = document.createElement('span');
+      hint.className = 'qm-hint';
+      hint.textContent = s.locked ? L.locked : s.span ? L.clipHint : kind === 'original' ? L.originalHint : kind === 'lossy' ? L.saverHint : s.same ? L.losslessHint : L.losslessOtherHint;
+      text.appendChild(hint);
+      b.appendChild(dot);
+      b.appendChild(text);
+      return b;
+    });
+    const foot = document.createElement('div');
+    foot.className = 'qm-foot';
+    foot.textContent = L.remember;
+    qmenu.replaceChildren(head, ...rows, foot);
+  }
+  function closeVersions() {
+    qmenu.hidden = true;
+    $('.pl-quality').setAttribute('aria-expanded', 'false');
+  }
+  $('.pl-quality').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!qmenu.hidden) return closeVersions();
+    drawVersions();
+    qmenu.hidden = false;
+    $('.pl-quality').setAttribute('aria-expanded', 'true');
+  });
+  qmenu.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-kind]');
+    if (!b || b.disabled) return;
+    state.pref = b.dataset.kind as Kind;
     const item = current();
     // Switch the playing track over at the same second.
     if (item && loaded === state.index) {
@@ -384,8 +465,15 @@ function setUp(root: HTMLElement) {
         if (wasPlaying) audio.play().catch(() => render());
       }
     }
+    closeVersions();
     render();
     save(true);
+  });
+  document.addEventListener('click', (e) => {
+    if (!qmenu.hidden && !(e.target as HTMLElement).closest('.pl-qmenu')) closeVersions();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !qmenu.hidden) closeVersions();
   });
   seek.addEventListener('input', () => {
     seeking = true;

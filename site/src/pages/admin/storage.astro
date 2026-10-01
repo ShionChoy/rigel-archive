@@ -111,7 +111,7 @@ const [report, gone, wanted, stored, derived, pending, taskCounts, failed, runs,
     .first<{ n: number; failed: number | null; covers: number | null; pictures: number; bytes: number }>(),
 ]);
 const purgeable = report?.unreferenced.filter((o) => o.purgeable) ?? [];
-const TASK_NAMES: Record<string, string> = { check: N_('核对上传'), derive: N_('推流版与预览'), fingerprint: N_('声学指纹') };
+const TASK_NAMES: Record<string, string> = { check: N_('核对上传'), derive: N_('推流版与预览'), fingerprint: N_('声学指纹'), clip: N_('试听片段') };
 const count = (task: string, state: string) => taskCounts.results.find((r) => r.task === task && r.state === state)?.n ?? 0;
 const running = status.state === 'running' || status.state === 'healthy';
 const STATE_NAMES: Record<string, string> = {
@@ -176,7 +176,7 @@ const lastOk = runs.results.find((r) => r.ok === 1);
     <table class="grid">
       <thead><tr><th>{t('工作')}</th><th class="num">{t('等待中')}</th><th class="num">{t('已完成')}</th><th class="num">{t('失败')}</th></tr></thead>
       <tbody>
-        {(['check', 'derive', 'fingerprint'] as const).map((task) => (
+        {(['check', 'derive', 'fingerprint', 'clip'] as const).map((task) => (
           <tr>
             <td>{t(TASK_NAMES[task])}</td>
             <td class="num">{pending[task]}</td>

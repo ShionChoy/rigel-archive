@@ -18,7 +18,7 @@ export const FILE_COLUMNS = [
   'id', 'origin', 'source_path', 'dir', 'member_of', 'member_path', 'name', 'ext', 'size', 'mtime', 'sha256',
   'blob_key', 'kind', 'format', 'pcm_md5', 'rights', 'state', 'release_id', 'slot', 'track_id', 'role', 'dup_of',
   'suggest', 'download_name', 'note', 'uploaded_by', 'created_at', 'updated_at', 'checked_at', 'source_seen',
-  'replaces', 'folder_id', 'edition_id', 'sealed', 'sealed_in',
+  'replaces', 'folder_id', 'edition_id', 'sealed', 'sealed_in', 'pub_visible', 'pub_play', 'pub_clip', 'pub_quality', 'pub_download',
 ] as const;
 
 export const ENTITIES = {
@@ -41,7 +41,7 @@ export const ENTITIES = {
     key: ['id'],
     fields: [
       'release_id', 'slot', 'track_id', 'role', 'rights', 'state', 'dup_of', 'download_name', 'note', 'folder_id',
-      'edition_id', 'sealed', 'sealed_in',
+      'edition_id', 'sealed', 'sealed_in', 'pub_visible', 'pub_play', 'pub_clip', 'pub_quality', 'pub_download',
     ],
     columns: FILE_COLUMNS,
     touch: true,
@@ -62,6 +62,7 @@ export const ENTITIES = {
     fields: [
       'release_id', 'slot', 'name', 'catalog_no', 'release_date', 'source', 'status', 'based_on', 'is_default',
       'track_count', 'album_title', 'cover_file_id', 'external_ids', 'note', 'sort',
+      'pub_shown', 'pub_visible', 'pub_play', 'pub_clip', 'pub_quality', 'pub_download',
     ],
     touch: true,
   },
@@ -132,6 +133,8 @@ const ROW_DEFAULTS: Partial<Record<EntityName, Record<string, string>>> = {
   folder: { type: "'plain'", name: "''", sort: '0' },
   edition_type: { missing_board: '1' },
   edition_track: { tags: "'{}'" },
+  // 0014: rows made or recorded without them open everything (lib/access.ts OPEN_EDITION).
+  edition: { pub_shown: '1', pub_visible: '1', pub_play: "'full'", pub_clip: "'0+60'", pub_quality: "'original'", pub_download: '1' },
 };
 /**
  * Columns since dropped (folders.extras in 0011, edition_tracks.title in 0012): older revisions of them are
@@ -150,6 +153,28 @@ const ID_CHUNK = 2000;
 // Rows (patches, new rows) per JSON parameter: a few hundred KB.
 const ROW_CHUNK = 1000;
 const NOW = "strftime('%Y-%m-%dT%H:%M:%SZ','now')";
+
+// What visitors can reach is decided when a page is made, and the media addresses it hands out stay good for
+// a while (lib/public/media.ts). A change to something the public site may be showing counts up
+// meta.media_epoch, which every public address carries, so that the addresses handed out before stop
+// working at once. The checks are loose on purpose (a published work is enough): counting up too often only
+// makes visitors fetch their thumbnails again.
+/** Columns whose change can close what the public site shows. */
+const MEDIA_FIELDS: Partial<Record<EntityName, readonly string[]>> = {
+  file: ['rights', 'state', 'edition_id', 'release_id', 'dup_of', 'sealed_in', 'pub_visible', 'pub_play', 'pub_clip', 'pub_quality', 'pub_download'],
+  edition: ['status', 'release_id', 'pub_shown', 'pub_visible', 'pub_play', 'pub_clip', 'pub_quality', 'pub_download'],
+  release: ['state'],
+};
+/** SQL on `files` (unaliased): in an edition of a published work, rights set. */
+export const FILE_ON_SITE = `files.rights != 'unknown' AND files.edition_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM editions ge JOIN releases gr ON gr.id = ge.release_id WHERE ge.id = files.edition_id AND gr.state = 'published')`;
+const ON_SITE: Partial<Record<EntityName, string>> = {
+  file: FILE_ON_SITE,
+  edition: "EXISTS (SELECT 1 FROM releases gr WHERE gr.id = editions.release_id AND gr.state = 'published')",
+  release: "releases.state = 'published'",
+};
+const BUMP_MEDIA = "UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'media_epoch'";
+const touchesMedia = (entity: EntityName, fields: readonly string[]) => fields.some((f) => MEDIA_FIELDS[entity]?.includes(f));
 
 function spec(entity: EntityName): EntitySpec {
   return ENTITIES[entity];
@@ -228,6 +253,18 @@ export class ChangeSet {
     return this.actor;
   }
 
+  /** Count up the media epoch when `exists` (an SQL query) finds a row, checked before what follows changes it. */
+  guardMedia(exists: string, binds: unknown[]) {
+    this.statements.push(this.db.prepare(`${BUMP_MEDIA} AND EXISTS (${exists})`).bind(...binds));
+  }
+
+  /** The same for one row of a table the public site may show. */
+  private guardRow(entity: EntityName, key: Row) {
+    const cond = ON_SITE[entity];
+    if (!cond) return;
+    this.guardMedia(`SELECT 1 FROM ${spec(entity).table} WHERE ${keyWhere(entity)} AND ${cond}`, keyValues(entity, key));
+  }
+
   private revision(entity: EntityName, id: string, action: 'create' | 'update' | 'delete', before: Row | null, after: Row | null) {
     this.statements.push(
       this.db
@@ -268,6 +305,7 @@ export class ChangeSet {
     const after = Object.fromEntries(changed.map((f) => [f, patch[f] ?? null]));
     const sets = changed.map((f) => `${f} = ?`);
     if (s.touch) sets.push(`updated_at = ${NOW}`);
+    if (touchesMedia(entity, changed)) this.guardRow(entity, key);
     this.statements.push(
       this.db
         .prepare(`UPDATE ${s.table} SET ${sets.join(', ')} WHERE ${keyWhere(entity)}`)
@@ -294,6 +332,7 @@ export class ChangeSet {
   async delete(entity: EntityName, key: Row): Promise<boolean> {
     const current = await this.read(entity, key);
     if (!current) return false;
+    this.guardRow(entity, key);
     this.statements.push(
       this.db.prepare(`DELETE FROM ${spec(entity).table} WHERE ${keyWhere(entity)}`).bind(...keyValues(entity, key)),
     );
@@ -326,6 +365,7 @@ export class ChangeSet {
     const beforeJson = `json_object(${fields.map((f) => `'${f}', ${f}`).join(', ')})`;
     const afterJson = `json_object(${fields.map((f) => `'${f}', ?`).join(', ')})`;
     const condition = `(${where}) AND NOT (${unchanged})`;
+    if (touchesMedia('file', fields)) this.guardMedia(`SELECT 1 FROM files WHERE ${condition} AND ${FILE_ON_SITE}`, [...binds, ...values]);
     this.statements.push(
       this.db
         .prepare(
@@ -349,6 +389,10 @@ export class ChangeSet {
    */
   deleteFiles(levels: string[][]) {
     const row = `json_object(${FILE_COLUMNS.map((c) => `'${c}', ${c}`).join(', ')})`;
+    const all = levels.flat();
+    for (let i = 0; i < all.length; i += ID_CHUNK) {
+      this.guardMedia(`SELECT 1 FROM files WHERE id IN (SELECT value FROM json_each(?)) AND ${FILE_ON_SITE}`, [JSON.stringify(all.slice(i, i + ID_CHUNK))]);
+    }
     for (const ids of levels) {
       for (let i = 0; i < ids.length; i += CHUNK) {
         const chunk = ids.slice(i, i + CHUNK);
@@ -382,6 +426,8 @@ export class ChangeSet {
     const key = s.key[0];
     const k = binds.length;
     const row = `json_object(${rowColumns(entity).map((c) => `'${c}', t.${c}`).join(', ')})`;
+    const onSite = ON_SITE[entity];
+    if (onSite) this.guardMedia(`SELECT 1 FROM ${s.table} AS t WHERE ${where} AND t.${key} IN (SELECT ${key} FROM ${s.table} WHERE ${onSite})`, binds);
     this.statements.push(
       this.db
         .prepare(
@@ -453,7 +499,7 @@ export class ChangeSet {
         const chunk = JSON.stringify(rows.slice(i, i + ROW_CHUNK).map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null]))));
         out.push(
           this.db
-            .prepare(`INSERT INTO ${s.table} (${cols.join(', ')}) SELECT ${cols.map((c) => `json_extract(j.value, '$.${c}')`).join(', ')} FROM json_each(?) j ORDER BY j.key`)
+            .prepare(`INSERT INTO ${s.table} (${cols.join(', ')}) SELECT ${cols.map(fromJson('j.value', ROW_DEFAULTS[entity] ?? {})).join(', ')} FROM json_each(?) j ORDER BY j.key`)
             .bind(chunk),
           this.db
             .prepare(
@@ -491,6 +537,9 @@ export class ChangeSet {
       const afterJson = `json_object(${fields.map((f) => `'${f}', ${value(f)}`).join(', ')})`;
       for (let i = 0; i < rows.length; i += ROW_CHUNK) {
         const chunk = JSON.stringify(rows.slice(i, i + ROW_CHUNK));
+        if (touchesMedia('file', fields)) {
+          this.guardMedia(`SELECT 1 FROM json_each(?) j JOIN files ON files.id = json_extract(j.value, '$.id') WHERE NOT (${unchangedHere}) AND ${FILE_ON_SITE}`, [chunk]);
+        }
         this.statements.push(
           this.db
             .prepare(
@@ -770,6 +819,7 @@ async function undoFiles(db: D1Database, cs: ChangeSet, batchId: string, media?:
   }
 
   const row = `json_object(${FILE_COLUMNS.map((c) => `'${c}', f.${c}`).join(', ')})`;
+  cs.guardMedia(`SELECT 1 FROM files WHERE id IN (SELECT entity_id FROM revisions WHERE batch_id = ? AND entity = 'file') AND ${FILE_ON_SITE}`, [batchId]);
   // The inverse revisions, in the original order so a later undo of this undo restores parents first.
   cs.push(
     db

@@ -17,7 +17,8 @@
     "db:seed:remote": "wrangler d1 execute DB --remote --yes --file .seed/seed.sql",
     "db:backup": "mkdir -p \"${RA_WORKSPACE:-/mnt/d/documents/projects/rigel-archive}/backups\" && wrangler d1 export DB --remote --output \"${RA_WORKSPACE:-/mnt/d/documents/projects/rigel-archive}/backups/d1-$(date -u +%Y%m%d-%H%M).sql\"",
     "check:i18n": "node scripts/i18n-check.mjs",
-    "secrets:backup": "node scripts/secrets-backup.mjs"
+    "secrets:backup": "node scripts/secrets-backup.mjs",
+    "test": "node --test \"tests/*.test.ts\""
   },
   "dependencies": {
     "@astrojs/cloudflare": "^14.3.3",

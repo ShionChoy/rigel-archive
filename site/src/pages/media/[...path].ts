@@ -5,7 +5,7 @@ import { checkAddress } from '../../lib/public/media';
 
 /**
  * The public site's stored files, at the signed addresses its pages hand out (lib/public/media.ts):
- * /media/i/<sig>/<key> for pictures, /media/s/<exp>/<sig>/<key> for sound, video and text.
+ * /media/i/<epoch>/<sig>/<key> for pictures, /media/s/<epoch>/<exp>/<sig>/<key> for sound, video and text.
  * Requests sent from other sites' pages (Referer) are refused, so the files cannot be embedded elsewhere.
  */
 const TYPES: Record<string, string> = { flac: 'audio/flac', m4a: 'audio/mp4', mp4: 'video/mp4', webp: 'image/webp', jpg: 'image/jpeg', json: 'application/json' };
@@ -21,10 +21,11 @@ const handler: APIRoute = async ({ request, params, url }) => {
     }
     if (origin !== url.origin) return new Response('Forbidden', { status: 403, headers: { 'cache-control': 'no-store' } });
   }
-  const checked = checkAddress(params.path ?? '');
+  const checked = await checkAddress(params.path ?? '');
   if ('error' in checked) {
     // 410 tells the player to ask for a new address (scripts/player.ts); anything else is simply not here.
-    return checked.error === 'expired'
+    // A picture of an older media epoch is gone for good: its page is made again with new addresses.
+    return checked.error === 'expired' && !checked.lasting
       ? new Response('Expired', { status: 410, headers: { 'cache-control': 'no-store' } })
       : new Response('Not found', { status: 404, headers: { 'cache-control': 'no-store' } });
   }

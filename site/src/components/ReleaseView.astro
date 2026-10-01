@@ -116,7 +116,7 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
                   {chosen.lines.some((l) => l.sources) && <button type="button" class="primary" data-play-all="#tracks">{t('▶ 播放全部')}</button>}
                   {chosen.download
                     ? <a href={chosen.download}>{chosen.withTracks ? t('下载本版（带标签）') : t('下载本版')}</a>
-                    : <button type="button" disabled title={t('下载将随注册功能开放')}>{t('登录后下载')}</button>}
+                    : chosen.downloadable && <button type="button" disabled title={t('下载将随注册功能开放')}>{t('登录后下载')}</button>}
                   {chosen.musicbrainz && <a href={chosen.musicbrainz} target="_blank" rel="noopener">MusicBrainz ↗</a>}
                   {chosen.bandcamp && <a href={chosen.bandcamp} target="_blank" rel="noopener">Bandcamp ↗</a>}
                 </div>
@@ -132,7 +132,12 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
                       <tr data-track={l.sources ? item(l) : undefined} data-file={l.file ?? undefined}>
                         <td class="n">{chosen.multiDisc ? `${l.disc}-` : ''}{String(l.position).padStart(2, '0')}</td>
                         {chosen.differentCovers && <td class="cv">{l.cover ? <img src={l.cover} alt="" loading="lazy" /> : null}</td>}
-                        <td>{l.song ? <a class="song" href={l.song}>{l.title}</a> : l.title}{l.sub && <div class="tsub">{l.sub}</div>}</td>
+                        <td>
+                          {l.song ? <a class="song" href={l.song}>{l.title}</a> : l.title}
+                          {l.clip && <span class="clip-mark" title={t('只能试听这一段')}>{t('试听 {from}–{to}', { from: formatClock(l.clip[0]), to: formatClock(l.clip[1]) })}</span>}
+                          {l.preparing && <span class="clip-mark muted">{t('试听准备中')}</span>}
+                          {l.sub && <div class="tsub">{l.sub}</div>}
+                        </td>
                         <td class="time">{l.seconds ? formatClock(l.seconds) : ''}</td>
                         <td class="play">{l.sources ? <button type="button" class="play" data-play aria-label={t('播放 {title}', { title: l.title })}><svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg><svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" /></svg></button> : null}</td>
                       </tr>
@@ -249,6 +254,8 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
   .release a.song { color: inherit; text-decoration: none; }
   .release a.song:hover { text-decoration: underline; }
   .release .tsub { color: var(--muted); font-size: 13px; }
+  .release .clip-mark { display: inline-block; margin-left: 8px; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 11px; color: var(--accent); white-space: nowrap; vertical-align: 1px; }
+  .release .clip-mark.muted { color: var(--muted); }
   .release button.play { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 50%; width: 32px; height: 32px; cursor: pointer; display: inline-grid; place-items: center; padding: 0; }
   .release button.play svg { width: 16px; height: 16px; fill: currentColor; }
   .release button.play .i-pause, .release tr.playing button.play .i-play { display: none; }

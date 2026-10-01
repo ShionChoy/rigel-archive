@@ -2,15 +2,17 @@
 // the public rules (rules.ts), with pictures and sound at the public site's signed addresses (media.ts).
 // The album page itself comes from lib/release-view.ts, shared with the admin's preview.
 
-import { mimeFor } from '../constants';
 import { editionCovers } from '../covers';
 import { parseFormat, type EditionRow, type FileRow, type ReleaseRow } from '../db';
 import { sortEditions, trackTitle } from '../editions';
 import { embeddedFor } from '../embedded';
 import { loadForms } from '../forms';
 import type { SiteLang, T } from '../i18n';
-import { audioSources, imageSrc, pictureSrc, type MediaUrls, type Source } from '../media';
+import { imageSrc, pictureSrc, type MediaUrls, type Source } from '../media';
+import { openVersions, playVersions } from '../playback';
 import { derivedFor } from '../processing';
+import { accessOf, OPEN_EDITION } from '../access';
+import { clipsFor } from '../clips';
 import { audioQuality } from '../release-view';
 import { effectiveTags, parseTags } from '../tagging/model';
 import { parseCover } from '../tags';
@@ -162,7 +164,25 @@ interface LineRow {
   slot: string; edition_name: string; edition_date: string | null; edition_catalog: string | null;
   release_id: string; release_title: string; catalog_no: string | null; release_date: string | null;
 }
-type AudioFile = Pick<FileRow, 'id' | 'edition_id' | 'track_id' | 'format' | 'ext' | 'sha256' | 'blob_key' | 'name' | 'source_path' | 'member_path' | 'rights'>;
+type AudioFile = Pick<FileRow, 'id' | 'edition_id' | 'track_id' | 'format' | 'ext' | 'sha256' | 'blob_key' | 'name' | 'source_path' | 'member_path' | 'rights' | 'kind' | 'size'
+  | 'pub_visible' | 'pub_play' | 'pub_clip' | 'pub_quality' | 'pub_download'> & Pick<EditionRow, 'pub_shown'> & {
+  e_visible: number; e_play: string; e_clip: string; e_quality: string; e_download: number;
+};
+/** The columns of a public audio file and its edition's defaults (on files f and editions e). */
+const AUDIO_COLUMNS = `f.id, f.edition_id, f.track_id, f.format, f.ext, f.sha256, f.blob_key, f.name, f.source_path, f.member_path, f.rights, f.kind, f.size,
+  f.pub_visible, f.pub_play, f.pub_clip, f.pub_quality, f.pub_download,
+  e.pub_shown, e.pub_visible AS e_visible, e.pub_play AS e_play, e.pub_clip AS e_clip, e.pub_quality AS e_quality, e.pub_download AS e_download`;
+const accessOfAudio = (f: AudioFile) => accessOf(f, {
+  ...OPEN_EDITION, pub_shown: f.pub_shown, pub_visible: f.e_visible, pub_play: f.e_play, pub_clip: f.e_clip, pub_quality: f.e_quality, pub_download: f.e_download,
+});
+/** A public audio file's versions to play (lib/playback.ts). */
+async function versionsOf(database: D1Database, files: AudioFile[], urls: MediaUrls): Promise<Map<string, Source[]>> {
+  const [derived, clips] = await Promise.all([
+    derivedFor(database, files.map((f) => f.sha256)),
+    clipsFor(database, files.filter((f) => accessOfAudio(f).play === 'clip').map((f) => f.sha256)),
+  ]);
+  return new Map(files.map((f) => [f.id, playVersions(f, f.sha256 ? derived.get(f.sha256) : undefined, accessOfAudio(f), urls, f.sha256 ? clips.get(f.sha256) : undefined)]));
+}
 
 /** Rows of public editions' track lists matching `where` (on edition_tracks et, editions e, releases r, tracks t). */
 async function trackLines(database: D1Database, ctx: Context, where: string, binds: unknown[], tail: string): Promise<TrackLine[]> {
@@ -182,7 +202,7 @@ async function trackLines(database: D1Database, ctx: Context, where: string, bin
   const pairs = new Set(rows.map((r) => `${r.edition_id}/${r.track_id}`));
   const { results: found } = await database
     .prepare(
-      `SELECT f.id, f.edition_id, f.track_id, f.format, f.ext, f.sha256, f.blob_key, f.name, f.source_path, f.member_path, f.rights FROM files f
+      `SELECT ${AUDIO_COLUMNS} FROM files f JOIN editions e ON e.id = f.edition_id
        WHERE f.kind = 'audio' AND ${OPEN_FILE} AND f.edition_id IN (SELECT value FROM json_each(?)) AND f.track_id IN (SELECT value FROM json_each(?))`,
     )
     .bind(JSON.stringify([...new Set(rows.map((r) => r.edition_id))]), JSON.stringify([...new Set(rows.map((r) => r.track_id))]))
@@ -191,17 +211,18 @@ async function trackLines(database: D1Database, ctx: Context, where: string, bin
   const coverFiles = rows.map((r) => parseCover(r.cover)?.file).filter((id): id is string => !!id);
   const { results: coverRows } = coverFiles.length
     ? await database
-      .prepare(`SELECT f.id, f.sha256, f.blob_key, f.format FROM files f WHERE f.id IN (SELECT value FROM json_each(?)) AND f.kind = 'image' AND ${OPEN_FILE}`)
+      .prepare(`SELECT f.id, f.sha256, f.blob_key, f.format FROM files f JOIN editions e ON e.id = f.edition_id WHERE f.id IN (SELECT value FROM json_each(?)) AND f.kind = 'image' AND ${OPEN_FILE}`)
       .bind(JSON.stringify(coverFiles))
       .all<Pick<FileRow, 'id' | 'sha256' | 'blob_key' | 'format'>>()
     : { results: [] };
-  const [types, own] = await Promise.all([loadTypes(database), embeddedFor(files.map((f) => f.sha256), database)]);
+  const [types, own, versions] = await Promise.all([loadTypes(database), embeddedFor(files.map((f) => f.sha256), database), versionsOf(database, files, urls)]);
   const pictures = [...[...own.values()].map((e) => e.cover), ...rows.map((r) => parseCover(r.cover)?.picture)].filter((x): x is string => !!x);
   const derived = await derivedFor(database, [...files.map((f) => f.sha256), ...coverRows.map((f) => f.sha256), ...pictures]);
   const picture = (sha256: string) => pictureSrc(sha256, derived.get(sha256), 640, urls);
   const pages = pagesFor(lang);
+  // The best-sounding file of the track that plays here.
   const best = (r: LineRow) => files
-    .filter((f) => f.edition_id === r.edition_id && f.track_id === r.track_id)
+    .filter((f) => f.edition_id === r.edition_id && f.track_id === r.track_id && openVersions(versions.get(f.id)).length > 0)
     .sort((a, b) => audioQuality(b.format) - audioQuality(a.format))[0];
   const pictureOf = (r: LineRow, f: AudioFile | undefined): string | null => {
     const chosen = parseCover(r.cover);
@@ -223,7 +244,7 @@ async function trackLines(database: D1Database, ctx: Context, where: string, bin
     const tags = effectiveTags(embedded, parseTags(r.tags));
     const editionName = types.editionLabel({ slot: r.slot, name: r.edition_name }, t);
     const fmt = f ? parseFormat(f.format) : {};
-    const sources = f ? audioSources(urls.original(f, false), f.sha256 ? derived.get(f.sha256) : undefined, mimeFor(f.ext), urls, { ...fmt, ext: f.ext }) : [];
+    const sources = f ? versions.get(f.id) ?? [] : [];
     return {
       file: f?.id ?? null,
       title: tags.title?.[0] ?? trackTitle({ entry_title: r.entry_title, version_label: r.version_label, tags: r.tags }),
@@ -231,7 +252,7 @@ async function trackLines(database: D1Database, ctx: Context, where: string, bin
       album: `${r.release_title} · ${editionName}`,
       cover: pictureOf(r, f),
       href: pages.work(r.release_id, r.edition_id),
-      sources: sources.length ? sources : null,
+      sources: openVersions(sources).length ? sources : null,
       exp: urls.expires,
       seconds: r.duration_ms ? r.duration_ms / 1000 : fmt.duration ?? (r.entry_duration ? r.entry_duration / 1000 : null),
       position: r.disc > 1 ? `${r.disc}-${r.position}` : String(r.position),
@@ -278,14 +299,13 @@ export async function publicCounts(database: D1Database): Promise<{ works: numbe
 export async function playSources(database: D1Database, fileId: string, urls: MediaUrls & { expires: number }): Promise<{ sources: Source[]; exp: number } | null> {
   const f = await database
     .prepare(
-      `SELECT f.id, f.edition_id, f.track_id, f.format, f.ext, f.sha256, f.blob_key, f.name, f.source_path, f.member_path, f.rights
+      `SELECT ${AUDIO_COLUMNS}
        FROM files f JOIN editions e ON e.id = f.edition_id JOIN releases r ON r.id = e.release_id
        WHERE f.id = ? AND f.kind = 'audio' AND ${OPEN_FILE} AND ${PUBLIC_EDITION} AND ${PUBLIC_RELEASE}`,
     )
     .bind(fileId)
     .first<AudioFile>();
   if (!f) return null;
-  const derived = await derivedFor(database, [f.sha256]);
-  const sources = audioSources(urls.original(f, false), f.sha256 ? derived.get(f.sha256) : undefined, mimeFor(f.ext), urls, { ...parseFormat(f.format), ext: f.ext });
-  return sources.length ? { sources, exp: urls.expires } : null;
+  const sources = (await versionsOf(database, [f], urls)).get(f.id) ?? [];
+  return openVersions(sources).length ? { sources, exp: urls.expires } : null;
 }

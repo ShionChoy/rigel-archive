@@ -68,7 +68,7 @@ def test_task_versions_match_the_site():
     ts = (REPO / "site" / "src" / "lib" / "processing.ts").read_text(encoding="utf-8")
     versions = dict(re.findall(r"(\w+): (\d+)", ts.split("TASK_VERSIONS = {", 1)[1].split("}", 1)[0]))
     assert versions == {"check": str(CHECK_VERSION), "derive": str(derive.DERIVE_VERSION),
-                        "fingerprint": str(fp.FINGERPRINT_VERSION)}
+                        "fingerprint": str(fp.FINGERPRINT_VERSION), "clip": str(derive.CLIP_VERSION)}
 
 
 def test_derived_keys_match_the_site_pattern():
@@ -76,7 +76,8 @@ def test_derived_keys_match_the_site_pattern():
     pattern = re.search(r"DERIVED_KEY = /(.+)/;", ts).group(1).replace("\\/", "/")
     s = "a" * 64
     for key in (f"derived/stream/{s}.flac", f"derived/stream/{s}.m4a", f"derived/wave/{s}.json",
-                f"derived/img/{s}/240.webp", f"derived/video/{s}/720p.mp4", f"derived/video/{s}/poster.webp"):
+                f"derived/img/{s}/240.webp", f"derived/video/{s}/720p.mp4", f"derived/video/{s}/poster.webp",
+                f"derived/clip/{s}/30000-75000.flac", f"derived/clip/{s}/0-60000.m4a"):
         assert re.fullmatch(pattern, key), key
     assert not re.fullmatch(pattern, f"derived/stream/{s}/../x")
 
@@ -227,7 +228,7 @@ class QueueSite:
         body = json.loads(request.content) if request.headers.get("content-type") == "application/json" else None
         if path == "tasks":
             task = request.url.params["task"]
-            version = derive.DERIVE_VERSION if task == "derive" else fp.FINGERPRINT_VERSION
+            version = {"derive": derive.DERIVE_VERSION, "clip": derive.CLIP_VERSION}.get(task, fp.FINGERPRINT_VERSION)
             kind = request.url.params.get("kind")
             items = [i for i in self.items.get(task, []) if (task, i["sha256"]) not in self.results
                      and (task, i["sha256"]) not in self.running
@@ -263,6 +264,35 @@ class QueueSite:
             self.pairs += body["pairs"]
             return httpx.Response(200, json={"saved": len(body["pairs"])})
         return httpx.Response(404, json={"error": path})
+
+
+@needs_ffmpeg
+def test_preview_clips_are_cut_faded_and_reported(tmp_path):
+    from ra.processing import Inputs, run_clips
+
+    src = write_wav(tmp_path / "song.wav", music(20, seed=7))
+    item = {"sha256": sha(src), "name": "song.wav", "ext": "wav", "kind": "audio", "lossless": True,
+            "format": {"codec": "pcm_s16le", "bits": 16, "rate": 44100, "channels": 2, "duration": 20},
+            "spans": [{"from_ms": 5000, "to_ms": 15000}], "spec": "5000-15000"}
+    site = QueueSite({"clip": [item]})
+    site.blobs = {sha(src): src.read_bytes()}
+    counts = run_clips(site.client(), Inputs(site.client(), tmp_path / "tmp"), workers=1, log=lambda m: None)
+    assert counts.done == 1
+    report = site.results[("clip", sha(src))]["clips"]
+    assert sorted(c["kind"] for c in report) == ["lossless", "lossy"]
+    for c in report:
+        assert (c["from_ms"], c["to_ms"]) == (5000, 15000)
+        assert c["key"].startswith(f"derived/clip/{sha(src)}/5000-15000.") and c["key"] in site.objects
+        assert c["size"] == len(site.objects[c["key"]])
+    flac = tmp_path / "clip.flac"
+    flac.write_bytes(site.objects[next(c["key"] for c in report if c["kind"] == "lossless")])
+    pcm = np.frombuffer(subprocess.run(["ffmpeg", "-v", "error", "-i", str(flac), "-f", "s16le", "-ac", "1", "pipe:1"],
+                                       capture_output=True, check=True).stdout, dtype="<i2").astype(float)
+    assert abs(len(pcm) / 44100 - 10) < 0.05  # ten seconds
+    level = lambda a: float(np.sqrt(np.mean(a ** 2)))  # noqa: E731
+    middle = level(pcm[4 * 44100:6 * 44100])
+    assert level(pcm[:441]) < middle * 0.2  # faded in (it starts inside the track)
+    assert level(pcm[-2205:]) < middle * 0.2  # faded out
 
 
 def test_derive_queue_claims_stores_and_reports(tmp_path):

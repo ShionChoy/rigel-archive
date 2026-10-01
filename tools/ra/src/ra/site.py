@@ -176,9 +176,10 @@ class SiteClient:
         params = {"task": task, "limit": limit} | ({"kind": kind} if kind else {})
         return self.request("GET", "/admin/api/worker/tasks", params=params).json()
 
-    def claim(self, task: str, sha256: str, version: int) -> bool:
-        """Take a content for a task; False when someone else is on it or it is done already."""
-        body = {"task": task, "sha256": sha256, "version": version}
+    def claim(self, task: str, sha256: str, version: int, spec: str | None = None) -> bool:
+        """Take a content for a task; False when someone else is on it or it is done already. ``spec`` names
+        what is asked for (the parts of preview clips): other parts than last time make it a new task."""
+        body = {"task": task, "sha256": sha256, "version": version} | ({"spec": spec} if spec else {})
         return bool(self.request("POST", "/admin/api/worker/claim", json=body).json()["claimed"])
 
     def touch(self, task: str, sha256: str) -> bool:

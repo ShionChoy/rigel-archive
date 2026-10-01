@@ -7,7 +7,7 @@ import { publicUrls } from '../../lib/public/media';
 
 /** A queue of random public tracks (首页 「随机播放」): /api/random?lang=<the page's html lang>. */
 export const GET: APIRoute = async ({ url, request }) => {
-  const urls = publicUrls();
+  const urls = await publicUrls();
   const asked = (url.searchParams.get('lang') ?? '').toLowerCase();
   const lang: SiteLang = asked.startsWith('ja') ? 'ja' : asked.startsWith('en') ? 'en' : asked.startsWith('zh') ? 'zh' : siteLangFromHeader(request.headers.get('accept-language'));
   const lines = urls ? await randomQueue(db(), { t: translator(lang), lang, urls }) : [];

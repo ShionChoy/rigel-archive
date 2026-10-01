@@ -24,7 +24,7 @@ const view = await loadReleaseView(database, env.MEDIA, {
   editionId: Astro.url.searchParams.get('edition'),
   compare: Astro.url.searchParams.get('view') === 'compare',
   t, lang,
-  urls: publicUrls() ?? NO_MEDIA,
+  urls: (await publicUrls()) ?? NO_MEDIA,
   links: { song: (songId) => pages.song(songId), editionDownload: () => null, fileDownload: () => null },
   readBudgetMs: 2000,
 });

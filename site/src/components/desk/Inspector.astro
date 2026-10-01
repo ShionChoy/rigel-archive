@@ -10,6 +10,8 @@ import { parseFormat } from '../../lib/db';
 import { EDITION_STATUS_LABELS } from '../../lib/editions';
 import { FOLDER_COLORS, FOLDER_COLOR_LABELS, FOLDER_TYPE_LABELS, isArchive, type Places } from '../../lib/locations';
 import type { FilesSummary, FileView, FolderView } from '../../lib/desk';
+import { accessOf, type EditionAccessRow } from '../../lib/access';
+import { accessNote } from '../../lib/edition-access';
 import type { Derived } from '../../lib/media';
 import type { FileTagView } from '../../lib/tagedit';
 import { tagLabel } from '../../lib/tagging/names';
@@ -205,6 +207,16 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
             <select data-act="rights" data-files={f.id} aria-label={t('权利')}>
               {RIGHTS.map((r) => <option value={r} selected={f.rights === r}>{t(RIGHTS_LABELS[r])}</option>)}
             </select>
+            {f.edition_id && f.edition_access && (() => {
+              const a = accessOf(f, JSON.parse(f.edition_access) as EditionAccessRow);
+              const own = Object.values(a.own).some(Boolean);
+              return (
+                <p class="small muted">
+                  {t('公开站：')}{accessNote(a, f.kind, t)}{own && ` · ${t('有单独设置')}`}{' · '}
+                  <a href={`/admin/editions/${f.edition_id}#public`}>{t('在版本页修改')}</a>
+                </p>
+              );
+            })()}
           </section>
           {archive && (
             <section class="insp-sec">
