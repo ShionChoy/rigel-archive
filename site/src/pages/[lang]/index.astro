@@ -1,0 +1,82 @@
+---
+// 首页 (设计文档「公开站方案 · 页面与网址」): what the site is, the newest works, the four names the circle
+// has worked under, and a button that plays something at random. S2 adds the latest news and the next event.
+import Site from '../../layouts/Site.astro';
+import WorkCard from '../../components/site/WorkCard.astro';
+import { db } from '../../lib/db';
+import { isSiteLang } from '../../lib/i18n';
+import { publicCounts, publicEras, publicWorks } from '../../lib/public/catalog';
+import { NO_MEDIA, publicUrls } from '../../lib/public/media';
+import { pagesFor } from '../../lib/public/paths';
+
+if (!isSiteLang(Astro.params.lang)) return new Response(null, { status: 404 });
+const { t, lang } = Astro.locals;
+const database = db();
+const urls = publicUrls() ?? NO_MEDIA;
+const [works, eras, counts] = await Promise.all([publicWorks(database, { t, lang, urls }), publicEras(database, lang), publicCounts(database)]);
+const pages = pagesFor(lang);
+const latest = works.slice(0, 6);
+---
+
+<Site title={null} section="home">
+  <div class="page home">
+    <section class="hero">
+      <h1>{t('Rigël Theatre 全作品档案')}</h1>
+      <p class="hero-text">{t('Rigël Theatre 是东京的同人音乐厂牌，以天使、妖精、星辰与消逝的记忆为主题创作幻想民谣。本站收录 2003 年至今各个名义下的作品，所有人都可以在线收听无损全曲。')}</p>
+      <div class="hero-actions">
+        {counts.tracks > 0 && (
+          <button type="button" class="button primary" data-play-random>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg>{t('随机播放')}
+          </button>
+        )}
+        <a class="button" href={pages.works()}>{t('浏览全部作品')}</a>
+      </div>
+      {counts.works > 0 && <p class="hero-count muted">{t('已收录 {works} 个作品 · {tracks} 首可以播放', { works: counts.works, tracks: counts.tracks })}</p>}
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2 class="diamond">{t('最新作品')}</h2>
+        {works.length > latest.length && <a href={pages.works()}>{t('全部 {n} 个作品 →', { n: works.length })}</a>}
+      </div>
+      {latest.length ? (
+        <div class="works-grid">{latest.map((w) => <WorkCard work={w} />)}</div>
+      ) : (
+        <p class="muted">{t('作品正在整理中，整理好的作品会陆续公开。')}</p>
+      )}
+    </section>
+
+    <section class="section">
+      <div class="section-head"><h2 class="diamond">{t('名义')}</h2></div>
+      <div class="eras">
+        {eras.map((e) => (
+          <a class="era" href={pages.works({ era: e.id })}>
+            <div class="era-name">{e.name}</div>
+            {e.years && <div class="era-years">{e.years}</div>}
+            {e.description && <p>{e.description}</p>}
+            <div class="era-count">{e.works ? t('{n} 个作品', { n: e.works }) : t('作品整理中')}</div>
+          </a>
+        ))}
+      </div>
+    </section>
+  </div>
+</Site>
+
+<style>
+  .hero { padding: 36px 0 8px; max-width: 760px; }
+  .hero h1 { font-size: 40px; line-height: 1.15; margin: 0 0 14px; letter-spacing: 0.01em; }
+  .hero-text { font-size: 16px; color: var(--ink); opacity: 0.88; margin: 0 0 22px; }
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .hero-count { margin: 14px 0 0; font-size: 13px; }
+  .eras { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+  .era { display: block; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); color: var(--ink); text-decoration: none; }
+  .era:hover { border-color: var(--accent); color: var(--ink); }
+  .era-name { font-weight: 700; font-size: 17px; }
+  .era-years { color: var(--accent); font-size: 13px; }
+  .era p { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+  .era-count { margin-top: 10px; font-size: 12px; color: var(--muted); }
+  @media (max-width: 640px) {
+    .hero { padding-top: 16px; }
+    .hero h1 { font-size: 30px; }
+  }
+</style>

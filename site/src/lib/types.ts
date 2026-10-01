@@ -18,9 +18,9 @@ export interface EditionType {
   missing_board: number; // editions of this type are listed on the 缺档看板
 }
 
-/** The name of a type in the admin's language (the Japanese one falls back to the Chinese). */
-export function typeName(type: Pick<EditionType, 'name_zh' | 'name_ja'>, t: T): string {
-  return t.lang === 'ja' ? type.name_ja || type.name_zh : type.name_zh;
+/** The name of a type in the page's language (the Japanese and English ones fall back to the Chinese). */
+export function typeName(type: Pick<EditionType, 'name_zh' | 'name_ja' | 'name_en'>, t: T): string {
+  return t.lang === 'ja' ? type.name_ja || type.name_zh : t.lang === 'en' ? type.name_en || type.name_zh : type.name_zh;
 }
 
 /** The types in their order, loaded once per request. */

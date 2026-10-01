@@ -4,3 +4,5 @@
 WORKER_TOKEN=
 # Where `uv run ra serve` serves the local copy of the 合辑 (leave empty when there is none).
 MEDIA_DEV_BASE=http://127.0.0.1:4322
+# Signs the public site's media addresses; leave empty in development (a fixed development key is used).
+MEDIA_KEY=

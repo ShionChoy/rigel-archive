@@ -525,6 +525,10 @@ export class ChangeSet {
     this.queued.clear();
     if (this.statements.length === 0) return 0;
     if (this.retitled) this.statements.push(this.db.prepare('UPDATE revisions SET summary = ? WHERE batch_id = ?').bind(this.summary, this.batchId));
+    // The public site's cached pages are kept per catalogue version (lib/public/cache.ts): any change starts a new one.
+    this.statements.push(this.db.prepare(
+      "INSERT INTO meta (key, value) VALUES ('public_version', '1') ON CONFLICT (key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
+    ));
     const results = await this.db.batch(this.statements);
     const bulk = this.countedUpdates.reduce((n, i) => n + (results[i]?.meta.changes ?? 0), 0);
     return this.rowChanges + bulk;

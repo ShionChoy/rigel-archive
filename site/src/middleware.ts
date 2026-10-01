@@ -2,6 +2,9 @@ import { defineMiddleware } from 'astro:middleware';
 import { env } from 'cloudflare:workers';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { isLang, langFromHeader, translator, type Lang } from './lib/i18n';
+import { cachedPage } from './lib/public/cache';
+import { langOfPath } from './lib/public/paths';
+import { SITE } from './lib/site';
 
 type Admin = NonNullable<App.Locals['admin']>;
 
@@ -50,11 +53,30 @@ function workerToken(request: Request): boolean {
   return diff === 0;
 }
 
+/** Headers of every public page: never framed by other sites, file names not leaked, kept out of search engines until launch. */
+function publicHeaders(given: Response): Response {
+  // A copy: responses from the edge cache and redirects have headers that cannot be changed.
+  const response = new Response(given.body, given);
+  response.headers.set('x-frame-options', 'SAMEORIGIN');
+  response.headers.set('referrer-policy', 'strict-origin-when-cross-origin');
+  response.headers.set('x-content-type-options', 'nosniff');
+  if (SITE.noindex) response.headers.set('x-robots-tag', 'noindex');
+  return response;
+}
+
 export const onRequest = defineMiddleware(async (context, next) => {
   const path = context.url.pathname;
   context.locals.lang = langFromHeader(context.request.headers.get('accept-language'));
   context.locals.t = translator(context.locals.lang);
-  if (path !== '/admin' && !path.startsWith('/admin/')) return next();
+
+  // The public site: /zh/…, /ja/…, /en/… (lib/public/paths.ts), kept at the edge (lib/public/cache.ts).
+  const siteLang = langOfPath(path);
+  if (siteLang) {
+    context.locals.lang = siteLang;
+    context.locals.t = translator(siteLang);
+    return publicHeaders(await cachedPage(context.request, context.url, context.locals.cfContext?.waitUntil.bind(context.locals.cfContext), () => next()));
+  }
+  if (path !== '/admin' && !path.startsWith('/admin/')) return publicHeaders(await next());
 
   if (path.startsWith('/admin/api/worker/')) {
     // In production Cloudflare Access also sits in front; the worker passes a service token there.

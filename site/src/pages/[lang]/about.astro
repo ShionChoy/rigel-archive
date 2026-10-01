@@ -1,0 +1,111 @@
+---
+// 关于 (设计文档「公开站方案」「八、版权与权限」): what the site is and is not, the names the circle has worked
+// under (from the catalogue), the unofficial notice, and how to ask for something to be taken down.
+// The page is prose, so each language has its own text here rather than a sentence-by-sentence table.
+import Site from '../../layouts/Site.astro';
+import { db } from '../../lib/db';
+import { isSiteLang, type SiteLang } from '../../lib/i18n';
+import { publicEras } from '../../lib/public/catalog';
+import { pagesFor } from '../../lib/public/paths';
+import { SITE } from '../../lib/site';
+
+if (!isSiteLang(Astro.params.lang)) return new Response(null, { status: 404 });
+const { t, lang } = Astro.locals;
+const eras = await publicEras(db(), lang);
+const pages = pagesFor(lang);
+
+interface Text { title: string; lead: string; what: [string, string[]]; eras: string; unofficial: [string, string]; buy: [string, string]; takedown: [string, string, string] }
+const TEXT: Record<SiteLang, Text> = {
+  zh: {
+    title: '关于本站',
+    lead: '本站是 Rigël Theatre 的非官方粉丝档案站，由社团的海外发行代表与粉丝整理和维护，收录社团 2003 年至今在各个名义下发表的作品与资料。',
+    what: ['本站做什么', [
+      '收录 CD、官方数字版、DEMO 与 DL 卡、网络发表的单曲、PV、扫图，以及当年网页的存档，并标明每个版本的来源。',
+      '所有人都可以在线收听已收录作品的无损全曲，音质与原件相同。',
+      '下载将随注册账号一起开放。',
+      '他社合辑、游戏原声等第三方的资料只列出条目，不提供文件。',
+    ]],
+    eras: '名义沿革',
+    unofficial: ['非官方声明', '本站由粉丝运营，尚未获 Rigël Theatre 官方认可。新作情报与贩售请以官方网站为准。'],
+    buy: ['支持社团', '喜欢的作品，请到 Bandcamp、BOOTH 或委托书店购买，支持社团继续创作。'],
+    takedown: ['下架申请与联系', '如果您是权利人，希望撤下本站的某些内容，或发现资料有误，请联系：', '收到申请后，我们会在 48 小时内先将相关文件下线，再与您协商。'],
+  },
+  ja: {
+    title: 'このサイトについて',
+    lead: '当サイトは Rigël Theatre の非公式ファンアーカイブです。サークルの海外頒布担当とファンが整理・運営し、2003 年から現在まで、各名義で発表された作品と資料を収録しています。',
+    what: ['当サイトでできること', [
+      'CD、公式配信版、DEMO・DL カード、ネットで公開された楽曲、PV、スキャン、当時のウェブサイトのアーカイブを、形態ごとの出典とあわせて収録しています。',
+      '収録済みの作品は、どなたでもロスレスでフル試聴できます。音質は原本と同じです。',
+      'ダウンロードはアカウント登録とあわせて公開する予定です。',
+      '他サークルのコンピレーションやゲームのサウンドトラックなど、第三者の資料は項目のみを掲載し、ファイルは提供しません。',
+    ]],
+    eras: '名義の変遷',
+    unofficial: ['非公式であることについて', '当サイトはファンが運営する非公式アーカイブで、Rigël Theatre 公式の承認は受けていません。新作情報や頒布については公式サイトをご確認ください。'],
+    buy: ['サークルの応援', '気に入った作品は、Bandcamp、BOOTH、委託書店でお買い求めいただき、サークルの活動を応援してください。'],
+    takedown: ['削除依頼・お問い合わせ', '権利者の方で掲載の取り下げを希望される場合や、情報の誤りを見つけた場合は、こちらまでご連絡ください：', 'ご連絡をいただいてから 48 時間以内に該当ファイルを非公開にし、その後ご相談いたします。'],
+  },
+  en: {
+    title: 'About this site',
+    lead: 'This is an unofficial fan archive of Rigël Theatre, kept by the circle’s overseas distribution representative and fans. It collects the works and materials the circle has released under each of its names from 2003 to today.',
+    what: ['What you will find here', [
+      'CDs, official digital releases, demos and download cards, songs published online, music videos, scans, and archived copies of the old websites — each edition with where it came from.',
+      'Everyone can listen to every collected work in full, lossless, at the same quality as the originals.',
+      'Downloads will open together with user accounts.',
+      'Third-party material (other circles’ compilations, game soundtracks and the like) is listed by name only; no files are offered.',
+    ]],
+    eras: 'Names over the years',
+    unofficial: ['Unofficial notice', 'This site is run by fans and is not endorsed by Rigël Theatre. For new releases and where to buy, please see the official website.'],
+    buy: ['Support the circle', 'If you enjoy a work, please buy it on Bandcamp, BOOTH or from the circle’s shops to support their music.'],
+    takedown: ['Takedown requests and contact', 'If you hold rights to something on this site and want it removed, or you found a mistake, please contact:', 'We take the files concerned offline within 48 hours of a request, then talk it through with you.'],
+  },
+};
+const text = TEXT[lang];
+---
+
+<Site title={text.title} section="about" description={text.lead}>
+  <article class="page page-narrow about">
+    <h1>{text.title}</h1>
+    <p class="lead-text">{text.lead}</p>
+
+    <h2 class="diamond">{text.what[0]}</h2>
+    <ul>{text.what[1].map((line) => <li>{line}</li>)}</ul>
+
+    <h2 class="diamond">{text.eras}</h2>
+    <dl class="eras">
+      {eras.map((e) => (
+        <>
+          <dt><a href={pages.works({ era: e.id })}>{e.name}</a>{e.years && <span class="years">{e.years}</span>}</dt>
+          <dd>{e.description ?? ''}</dd>
+        </>
+      ))}
+    </dl>
+
+    <h2 class="diamond">{text.unofficial[0]}</h2>
+    <p>{text.unofficial[1]} <a href={SITE.official} target="_blank" rel="noopener">{t('Rigël Theatre 官方网站')} ↗</a></p>
+
+    <h2 class="diamond">{text.buy[0]}</h2>
+    <p>{text.buy[1]}</p>
+
+    <h2 class="diamond">{text.takedown[0]}</h2>
+    <p>
+      {text.takedown[1]}
+      {SITE.contact ? <a href={SITE.contact.includes('@') && !SITE.contact.startsWith('http') ? `mailto:${SITE.contact}` : SITE.contact}>{SITE.contact}</a> : <strong>{t('联系方式待定')}</strong>}
+    </p>
+    <p>{text.takedown[2]}</p>
+  </article>
+</Site>
+
+<style>
+  .about h2 { font-size: 19px; margin: 34px 0 10px; }
+  .lead-text { font-size: 16px; }
+  .about ul { padding-left: 1.2em; }
+  .about li { margin: 4px 0; }
+  .eras { display: grid; grid-template-columns: max-content 1fr; gap: 10px 20px; margin: 0; }
+  .eras dt { font-weight: 600; }
+  .eras .years { display: block; font-weight: 400; font-size: 13px; color: var(--muted); }
+  .eras dd { margin: 0; color: var(--muted); }
+  @media (max-width: 640px) {
+    .eras { grid-template-columns: 1fr; gap: 2px; }
+    .eras dd { margin-bottom: 10px; }
+  }
+</style>

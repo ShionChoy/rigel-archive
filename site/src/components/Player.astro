@@ -1,0 +1,153 @@
+---
+// The player at the bottom of the page (设计文档「公开站方案 · 播放器」). On the public site it lives in
+// layouts/Site.astro with transition:persist, so it keeps playing while visitors move between pages; the
+// admin's 预览公开页 has one too. Pages offer tracks with data attributes (components/ReleaseView.astro):
+//
+//   [data-queue]                a list of tracks; its [data-track] rows are the queue when one is played
+//   [data-track]='{…}'          a track: file, title, sub, album, cover, href, sources, exp
+//   [data-play]                 plays the track it is in (from there to the end of its list)
+//   [data-play-all="#sel"]      plays the list `sel` from the start
+//   [data-play-random]          plays a random track (/api/random)
+//
+// What it does lives in scripts/player.ts; the texts it needs come with it (data-labels), in the page's language.
+const { t } = Astro.locals;
+const labels = {
+  play: t('播放'),
+  pause: t('暂停'),
+  lossless: t('无损'),
+  saver: t('省流'),
+  saverTitle: t('无损播放；点一下改为省流（AAC）'),
+  losslessTitle: t('省流播放；点一下改回无损'),
+  repeatOff: t('不循环'),
+  repeatAll: t('循环全部'),
+  repeatOne: t('单曲循环'),
+  shuffleOn: t('随机播放：开'),
+  shuffleOff: t('随机播放：关'),
+  failed: t('这一首无法播放，已跳到下一首'),
+  nothing: t('没有可以播放的曲目'),
+};
+---
+
+<div id="player" class="player" transition:persist="player" data-labels={JSON.stringify(labels)} hidden>
+  <div class="pl-now">
+    <img class="pl-cover" alt="" />
+    <div class="pl-text">
+      <div class="pl-title"></div>
+      <div class="pl-sub"></div>
+    </div>
+  </div>
+  <div class="pl-center">
+    <div class="pl-buttons">
+      <button type="button" class="pl-btn pl-shuffle" aria-pressed="false" title={labels.shuffleOff} aria-label={labels.shuffleOff}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="line"><path d="M4 7h3.2c2 0 3.2 1 4.5 3l1.6 2.5c1.3 2 2.5 3 4.5 3H20M4 17h3.2c1.1 0 2-.3 2.7-1M13.9 8c.8-.6 1.7-1 2.9-1H20M17.5 4.5 20 7l-2.5 2.5M17.5 13 20 15.5 17.5 18" /></svg>
+      </button>
+      <button type="button" class="pl-btn pl-prev" aria-label={t('上一首')} title={t('上一首')}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h2v12H6zM9.5 12 18 6v12z" /></svg>
+      </button>
+      <button type="button" class="pl-btn pl-toggle" aria-label={labels.play}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="i-play"><path d="M8 5.5v13l10.5-6.5z" /></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="i-pause"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" /></svg>
+      </button>
+      <button type="button" class="pl-btn pl-next" aria-label={t('下一首')} title={t('下一首')}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 6h2v12h-2zM6 6l8.5 6L6 18z" /></svg>
+      </button>
+      <button type="button" class="pl-btn pl-repeat" data-mode="off" title={labels.repeatOff} aria-label={labels.repeatOff}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="line"><path d="M5 11V9.5A3.5 3.5 0 0 1 8.5 6H19M16.5 3.5 19 6l-2.5 2.5M19 13v1.5a3.5 3.5 0 0 1-3.5 3.5H5M7.5 20.5 5 18l2.5-2.5" /></svg>
+        <span class="pl-one" aria-hidden="true">1</span>
+      </button>
+    </div>
+    <div class="pl-bar">
+      <span class="pl-time pl-cur">0:00</span>
+      <input class="pl-seek" type="range" min="0" max="1000" value="0" step="1" aria-label={t('播放进度')} />
+      <span class="pl-time pl-dur">0:00</span>
+    </div>
+  </div>
+  <div class="pl-side">
+    <button type="button" class="pl-quality" title={labels.saverTitle}><span class="pl-format"></span><span class="pl-mode">{labels.lossless}</span></button>
+    <button type="button" class="pl-btn pl-queue-btn" aria-expanded="false" aria-label={t('播放队列')} title={t('播放队列')}>
+      <svg viewBox="0 0 24 24" aria-hidden="true" class="line"><path d="M4 6.5h12M4 11.5h12M4 16.5h7M16.5 14.5v6l4.5-3z" /></svg>
+    </button>
+    <input class="pl-volume" type="range" min="0" max="1" step="0.02" value="1" aria-label={t('音量')} title={t('音量')} />
+    <button type="button" class="pl-btn pl-close" aria-label={t('关闭播放器')} title={t('关闭播放器')}>
+      <svg viewBox="0 0 24 24" aria-hidden="true" class="line"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" /></svg>
+    </button>
+  </div>
+  <div class="pl-queue" hidden>
+    <div class="pl-queue-head"><span>{t('播放队列')}</span><button type="button" class="pl-clear">{t('清空')}</button></div>
+    <ol></ol>
+  </div>
+  <div class="pl-toast" role="status" aria-live="polite"></div>
+  <audio preload="none"></audio>
+</div>
+
+<style is:global>
+  body:has(#player:not([hidden])) { padding-bottom: 92px; }
+  .player {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) minmax(0, 1fr); align-items: center; gap: 16px;
+    padding: 8px 16px calc(8px + env(safe-area-inset-bottom));
+    background: var(--player-bg, var(--card)); color: var(--ink); border-top: 1px solid var(--line);
+    box-shadow: 0 -8px 28px rgb(0 0 0 / 0.18); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    font-size: 14px;
+  }
+  .player[hidden] { display: none; }
+  .player a { color: inherit; text-decoration: none; }
+  .pl-now { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: center; min-width: 0; }
+  .pl-cover { width: 52px; height: 52px; border-radius: 6px; object-fit: cover; display: block; background: var(--blank); }
+  .pl-cover:not([src]) { visibility: hidden; }
+  .pl-text { min-width: 0; }
+  .pl-title { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pl-title a:hover { text-decoration: underline; }
+  .pl-sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pl-center { display: grid; gap: 2px; justify-items: center; min-width: 0; }
+  .pl-buttons { display: flex; align-items: center; gap: 6px; }
+  .pl-btn { position: relative; width: 36px; height: 36px; border: 0; border-radius: 50%; background: none; color: var(--ink); display: grid; place-items: center; cursor: pointer; padding: 0; }
+  .pl-btn:hover { background: var(--now); }
+  .pl-btn svg { width: 20px; height: 20px; fill: currentColor; }
+  .pl-btn svg.line { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .pl-toggle { width: 42px; height: 42px; background: var(--accent); color: var(--on-accent); }
+  .pl-toggle:hover { background: var(--accent); filter: brightness(1.08); }
+  .pl-toggle .i-pause, .player.playing .pl-toggle .i-play { display: none; }
+  .player.playing .pl-toggle .i-pause { display: block; }
+  .pl-shuffle[aria-pressed='true'], .pl-repeat:not([data-mode='off']) { color: var(--accent); }
+  .pl-one { position: absolute; right: 5px; bottom: 5px; font-size: 9px; font-weight: 700; display: none; }
+  .pl-repeat[data-mode='one'] .pl-one { display: block; }
+  .pl-bar { display: grid; grid-template-columns: 3.2em minmax(0, 1fr) 3.2em; gap: 8px; align-items: center; width: 100%; max-width: 560px; }
+  .pl-time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .pl-cur { text-align: right; }
+  .pl-seek, .pl-volume { accent-color: var(--accent); width: 100%; margin: 0; }
+  .pl-side { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+  .pl-quality { border: 1px solid var(--line); background: none; color: var(--muted); border-radius: 14px; padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; display: flex; gap: 6px; }
+  .pl-quality .pl-mode { color: var(--accent); font-weight: 600; }
+  .pl-quality.saver .pl-mode { color: var(--muted); }
+  .pl-format:empty { display: none; }
+  .pl-volume { width: 90px; }
+  .pl-queue { position: absolute; right: 16px; bottom: calc(100% + 8px); width: min(420px, calc(100vw - 32px)); max-height: min(60vh, 520px); overflow: auto; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.25); }
+  .pl-queue-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--card); }
+  .pl-clear { border: 0; background: none; color: var(--accent); cursor: pointer; font: inherit; }
+  .pl-queue ol { list-style: none; margin: 0; padding: 4px; }
+  .pl-queue li button { display: grid; grid-template-columns: 1.8em minmax(0, 1fr); gap: 6px; width: 100%; text-align: left; border: 0; background: none; color: var(--ink); padding: 6px 8px; border-radius: 6px; cursor: pointer; font: inherit; }
+  .pl-queue li button:hover { background: var(--now); }
+  .pl-queue li.on button { background: var(--now); color: var(--accent); font-weight: 600; }
+  .pl-queue .q-n { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .pl-queue .q-sub { display: block; color: var(--muted); font-size: 12px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pl-toast { position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 6px 14px; border-radius: 16px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity 0.2s; white-space: nowrap; }
+  .pl-toast.on { opacity: 1; }
+  @media (max-width: 760px) {
+    body:has(#player:not([hidden])) { padding-bottom: 76px; }
+    .player { grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; padding: 10px 10px calc(8px + env(safe-area-inset-bottom)); }
+    .pl-now { grid-template-columns: 44px minmax(0, 1fr); }
+    .pl-cover { width: 44px; height: 44px; }
+    .pl-center { display: contents; }
+    .pl-buttons { gap: 2px; }
+    .pl-shuffle, .pl-repeat, .pl-volume, .pl-close, .pl-format { display: none !important; }
+    .pl-bar { position: absolute; left: 0; right: 0; top: -8px; max-width: none; grid-template-columns: minmax(0, 1fr); }
+    .pl-bar .pl-time { display: none; }
+    .pl-side { gap: 2px; }
+    .pl-quality { padding: 3px 8px; }
+  }
+</style>
+
+<script>
+  import '../scripts/player';
+</script>

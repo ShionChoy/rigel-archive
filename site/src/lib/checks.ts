@@ -6,6 +6,7 @@ import { titleKey } from './tracks';
 import { parseTags } from './tagging/model';
 import { VISIBLE } from './locations';
 import { loadTypes, type TypeList } from './types';
+import { FILED_FILE, PUBLIC_EDITION, PUBLIC_RELEASE } from './public/rules';
 
 export interface CheckItem {
   label: string;
@@ -40,7 +41,7 @@ const NO_COVER = `e.cover_file_id IS NULL
 export async function runChecks(t: T): Promise<Check[]> {
   const database = db();
   const types = await loadTypes(database);
-  const [counts, noLog, dirs, unlinked, noCover, sure, tagRows, emptyFolders] = await database.batch([
+  const [counts, noLog, dirs, unlinked, noCover, sure, tagRows, emptyFolders, unsettled, bare] = await database.batch([
     // Editions whose track order has another number of tracks than published.
     database.prepare(
       `SELECT e.id, e.slot, e.name, e.release_id, r.catalog_no, r.title, e.track_count AS declared,
@@ -83,6 +84,19 @@ export async function runChecks(t: T): Promise<Check[]> {
       `SELECT id, name FROM folders fd WHERE fd.type = 'plain' AND NOT EXISTS (SELECT 1 FROM files f WHERE f.folder_id = fd.id)
          AND NOT EXISTS (SELECT 1 FROM folders c WHERE c.parent_id = fd.id)`,
     ),
+    // The public site: published works' collected editions with files whose rights are not set (not shown there).
+    database.prepare(
+      `SELECT e.id, e.slot, e.name, e.release_id, r.catalog_no, r.title, count(*) AS n
+       FROM files f JOIN editions e ON e.id = f.edition_id JOIN releases r ON r.id = e.release_id
+       WHERE ${PUBLIC_RELEASE} AND ${PUBLIC_EDITION} AND ${FILED_FILE} AND f.rights = 'unknown'
+       GROUP BY e.id ORDER BY r.release_date DESC`,
+    ),
+    // Published works without a collected edition: only their information is public.
+    database.prepare(
+      `SELECT r.id, r.catalog_no, r.title FROM releases r
+       WHERE ${PUBLIC_RELEASE} AND NOT EXISTS (SELECT 1 FROM editions e WHERE e.release_id = r.id AND ${PUBLIC_EDITION})
+       ORDER BY r.release_date DESC`,
+    ),
   ]);
 
   const checks: Check[] = [];
@@ -119,6 +133,14 @@ export async function runChecks(t: T): Promise<Check[]> {
   checks.push({
     id: 'sure', title: N_('把握度高的建议还没确认'), hint: N_('这些文件的建议把握度在 80% 以上，可以在整理台「按建议归档」。'),
     ...cap((sure.results as { dir: string; n: number }[]).map((d) => ({ label: d.dir || '/', href: `/admin/inbox?view=unplaced&dir=${encodeURIComponent(d.dir)}`, detail: t('{n} 个', { n: d.n }) }))),
+  });
+  checks.push({
+    id: 'unsettled', title: N_('已发布的作品里有权属未定的文件'), hint: N_('公开站不显示权属未定的文件：在整理台选中这些文件，设为社团自有、已获授权或第三方。'),
+    ...cap((unsettled.results as (EditionInfo & { n: number })[]).map((e) => edItem(e, t('{n} 个', { n: e.n })))),
+  });
+  checks.push({
+    id: 'bare', title: N_('已发布的作品没有已收录的版本'), hint: N_('公开站上只显示这些作品的资料，没有可以播放或查看的内容。'),
+    ...cap((bare.results as { id: string; catalog_no: string | null; title: string }[]).map((r) => ({ label: r.catalog_no ? `${r.catalog_no} ${r.title}` : r.title, href: `/admin/releases/${r.id}` }))),
   });
   checks.push({
     id: 'empty', title: N_('空文件夹'), hint: N_('没有文件也没有子文件夹；不需要的话在整理台删除。'),

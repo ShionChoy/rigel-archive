@@ -1,16 +1,12 @@
 ---
-// Public site comes later; for now only the admin exists.
----
+// `/`: the public site in the visitor's language — the one they used last (cookie site_lang, set by
+// scripts/site.ts), else the first of their browser's languages the site has, else English.
+import { isSiteLang, siteLangFromHeader } from '../lib/i18n';
 
-<!doctype html>
-<html lang="ja">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="robots" content="noindex" />
-    <title>Rigël Archive</title>
-  </head>
-  <body style="font-family:system-ui,sans-serif;padding:40px;line-height:1.8">
-    <p>サイト準備中です。<br />站点建设中。<br />Under construction.</p>
-  </body>
-</html>
+const saved = Astro.cookies.get('site_lang')?.value;
+const lang = isSiteLang(saved) ? saved : siteLangFromHeader(Astro.request.headers.get('accept-language'));
+return new Response(null, {
+  status: 302,
+  headers: { location: `/${lang}/`, vary: 'accept-language, cookie', 'cache-control': 'private, no-cache' },
+});
+---

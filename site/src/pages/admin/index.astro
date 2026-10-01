@@ -9,8 +9,9 @@ import { originalGone } from '../../lib/deletion';
 import { formatTime, percent } from '../../lib/format';
 import { summaryText } from '../../lib/i18n';
 import { duplicateGroups, viewCounts } from '../../lib/inbox';
+import { siteLangOf } from '../../lib/public/paths';
 
-const { t } = Astro.locals;
+const { t, lang } = Astro.locals;
 const database = db();
 const [counts, checks, dups, other, recent] = await Promise.all([
   viewCounts(),
@@ -19,12 +20,13 @@ const [counts, checks, dups, other, recent] = await Promise.all([
   database
     .prepare(
       `SELECT (SELECT count(*) FROM releases) AS releases, (SELECT count(*) FROM editions) AS editions,
+              (SELECT count(*) FROM releases WHERE state = 'published') AS published,
               (SELECT count(*) FROM editions WHERE status IN ('missing', 'partial', 'unknown')) AS waiting,
               (SELECT count(*) FROM files WHERE sealed_in IS NOT NULL) AS hidden,
               (SELECT count(*) FROM files WHERE ${originalGone('files')}) AS gone,
               (SELECT count(DISTINCT sha256) FROM media_tasks WHERE state = 'failed') AS failed`,
     )
-    .first<{ releases: number; editions: number; waiting: number; hidden: number; gone: number; failed: number }>(),
+    .first<{ releases: number; editions: number; published: number; waiting: number; hidden: number; gone: number; failed: number }>(),
   database
     .prepare(
       `SELECT batch_id, min(at) AS at, actor, summary, count(*) AS n, max(reverted_by_batch) AS reverted
@@ -55,6 +57,7 @@ const problems = checks.map((c) => ({ id: c.id, title: t(c.title), n: c.items.le
     <a class="stat" href="/admin/inbox?view=suggested"><span class="stat-n">{counts.suggested.toLocaleString()}</span><span class="stat-label">{t('可按建议归档')}</span></a>
     <a class="stat" href="/admin/inbox?view=p:sealed"><span class="stat-n">{(other?.hidden ?? 0).toLocaleString()}</span><span class="stat-label">{t('整体收藏的包内文件')}</span></a>
     <a class="stat" href="/admin/releases"><span class="stat-n">{other?.releases ?? 0}</span><span class="stat-label">{t('作品 · {n} 个版本', { n: other?.editions ?? 0 })}</span></a>
+    <a class="stat" href={`/${siteLangOf(lang)}/`}><span class="stat-n">{other?.published ?? 0}</span><span class="stat-label">{t('个作品已在公开站发布')}</span></a>
   </div>
 
   <div class="overview-cols">
@@ -95,6 +98,7 @@ const problems = checks.map((c) => ({ id: c.id, title: t(c.title), n: c.items.le
     <a class="button" href="/admin/upload">{t('上传')}</a>
     <a class="button" href="/admin/releases/new">{t('新建作品')}</a>
     <a class="button" href="/admin/types">{t('作品形式与版本类型')}</a>
+    <a class="button" href={`/${siteLangOf(lang)}/`}>{t('打开公开站')}</a>
     <span class="muted small">{t('在任何页面按 Ctrl+K 可以跳到作品、版本、乐曲或文件。')}</span>
   </section>
 </Admin>

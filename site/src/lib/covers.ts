@@ -7,8 +7,9 @@
 import { env } from 'cloudflare:workers';
 import { db, parseFormat } from './db';
 import { coversFor, pictureUrl, picturesFor, readNow } from './embedded';
-import { imageSrc } from './media';
+import { ADMIN_URLS, imageSrc, pictureSrc, type MediaUrls } from './media';
 import { derivedFor } from './processing';
+import { PREVIEW_EDGE } from './public/rules';
 
 export interface Cover {
   src: string; // for showing it (a WebP preview when there is one)
@@ -39,13 +40,20 @@ interface ImageRow {
   ext: string;
 }
 
-/** The covers of these editions (in order: the chosen one; or the tracks' ones, most used first; or a picture). */
-export async function editionCovers(editionIds: string[], opts: { read?: boolean; size?: 240 | 640 | 1600 } = {}): Promise<Map<string, Cover[]>> {
+/**
+ * The covers of these editions (in order: the chosen one; or the tracks' ones, most used first; or a picture).
+ * `urls` addresses them (the admin's by default); `open` keeps to files the public site shows.
+ */
+export async function editionCovers(
+  editionIds: string[], opts: { read?: boolean; size?: 240 | 640 | 1600; urls?: MediaUrls; open?: boolean } = {},
+): Promise<Map<string, Cover[]>> {
   const out = new Map<string, Cover[]>();
   if (editionIds.length === 0) return out;
   const database = db();
   const ids = JSON.stringify([...new Set(editionIds)]);
   const size = opts.size ?? 640;
+  const urls = opts.urls ?? ADMIN_URLS;
+  const open = opts.open ? "AND f.rights IN ('own', 'licensed')" : '';
   if (opts.read) {
     // The tracks' pictures are read from the files once; do it now for those not read yet.
     const { results } = await database
@@ -57,17 +65,17 @@ export async function editionCovers(editionIds: string[], opts: { read?: boolean
   const [chosen, embedded, images] = await database.batch([
     database.prepare(
       `SELECT e.id AS edition_id, f.id, f.name, f.download_name, f.sha256, f.blob_key, f.folder_id, f.format, f.size, f.ext
-       FROM editions e JOIN files f ON f.id = e.cover_file_id WHERE e.id IN (SELECT value FROM json_each(?))`,
+       FROM editions e JOIN files f ON f.id = e.cover_file_id WHERE e.id IN (SELECT value FROM json_each(?)) ${open}`,
     ).bind(ids),
     database.prepare(
       `SELECT f.edition_id, m.cover, count(DISTINCT coalesce(f.track_id, f.id)) AS n FROM files f JOIN embedded m ON m.sha256 = f.sha256
        WHERE f.edition_id IN (SELECT value FROM json_each(?)) AND f.kind = 'audio' AND f.sealed_in IS NULL AND f.state != 'ignored'
-         AND f.dup_of IS NULL AND m.cover IS NOT NULL
+         AND f.dup_of IS NULL AND m.cover IS NOT NULL ${open}
        GROUP BY f.edition_id, m.cover ORDER BY n DESC`,
     ).bind(ids),
     database.prepare(
       `SELECT f.edition_id, f.id, f.name, f.download_name, f.sha256, f.blob_key, f.folder_id, f.format, f.size, f.ext FROM files f
-       WHERE f.edition_id IN (SELECT value FROM json_each(?)) AND f.kind = 'image' AND f.sealed_in IS NULL AND f.state != 'ignored'
+       WHERE f.edition_id IN (SELECT value FROM json_each(?)) AND f.kind = 'image' AND f.sealed_in IS NULL AND f.state != 'ignored' ${open}
          AND NOT EXISTS (SELECT 1 FROM files a WHERE a.edition_id = f.edition_id AND a.kind = 'audio' AND a.sealed_in IS NULL AND a.state != 'ignored')
        ORDER BY f.edition_id, coalesce(f.download_name, f.name)`,
     ).bind(ids),
@@ -75,13 +83,15 @@ export async function editionCovers(editionIds: string[], opts: { read?: boolean
   const chosenRows = chosen.results as ImageRow[];
   const embeddedRows = embedded.results as { edition_id: string; cover: string; n: number }[];
   const imageRows = images.results as ImageRow[];
-  const derived = await derivedFor(database, [...chosenRows, ...imageRows].map((r) => r.sha256));
+  const derived = await derivedFor(database, [...chosenRows.map((r) => r.sha256), ...imageRows.map((r) => r.sha256), ...embeddedRows.map((r) => r.cover)]);
   const pictures = await picturesFor(embeddedRows.map((r) => r.cover));
   const fromFile = (r: ImageRow, source: Cover['source']): Cover => {
-    const original = r.blob_key ? `/admin/media/${r.blob_key}` : '';
     const fmt = parseFormat(r.format);
+    // The public site shows large pictures by their previews only.
+    const small = !!fmt.width && !!fmt.height && Math.max(fmt.width, fmt.height) <= PREVIEW_EDGE;
+    const original = (r.blob_key && (urls.fullPictures || small) ? urls.object(r.blob_key, true) : null) ?? '';
     return {
-      src: imageSrc(original || null, r.sha256 ? derived.get(r.sha256) : undefined, size) ?? original, full: original, source,
+      src: imageSrc(original || null, r.sha256 ? derived.get(r.sha256) : undefined, size, urls) ?? original, full: original, source,
       file: { id: r.id, name: r.download_name || r.name, folder_id: r.folder_id },
       width: fmt.width ?? null, height: fmt.height ?? null, mime: r.ext.toLowerCase() === 'png' ? 'image/png' : `image/${r.ext.toLowerCase()}`, size: r.size,
     };
@@ -91,8 +101,10 @@ export async function editionCovers(editionIds: string[], opts: { read?: boolean
     if (chosenRows.some((c) => c.edition_id === r.edition_id)) continue;
     const p = pictures.get(r.cover);
     const list = out.get(r.edition_id) ?? [];
+    // Shown by its preview (the processing program makes them for embedded pictures too); `full` is the picture itself.
+    const src = pictureSrc(r.cover, derived.get(r.cover), size, urls) ?? '';
     list.push({
-      src: pictureUrl(r.cover), full: pictureUrl(r.cover), source: 'embedded', picture: r.cover, tracks: r.n,
+      src, full: opts.urls ? src : pictureUrl(r.cover), source: 'embedded', picture: r.cover, tracks: r.n,
       width: p?.width ?? null, height: p?.height ?? null, mime: p?.mime ?? null, size: p?.size ?? null,
     });
     out.set(r.edition_id, list);

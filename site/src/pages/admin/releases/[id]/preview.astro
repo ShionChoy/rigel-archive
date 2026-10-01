@@ -1,12 +1,15 @@
 ---
 // 预览公开页: the public album page as it will look (components/ReleaseView.astro, data from
-// lib/release-view.ts), with a bar at the top back to the admin. Only collected editions are listed (缺档、
-// 待确认 stay in the admin); each plays only its own files.
+// lib/release-view.ts, under the same public rules), with a bar at the top back to the admin. It works for
+// drafts too, reads files through the admin's addresses and offers the admin's downloads.
 import { env } from 'cloudflare:workers';
+import Player from '../../../../components/Player.astro';
 import ReleaseView from '../../../../components/ReleaseView.astro';
 import { db } from '../../../../lib/db';
 import { HTML_LANG } from '../../../../lib/i18n';
+import { adminUrls } from '../../../../lib/media';
 import { loadReleaseView } from '../../../../lib/release-view';
+import { siteLangOf } from '../../../../lib/public/paths';
 
 const { id } = Astro.params;
 const { t, lang } = Astro.locals;
@@ -14,10 +17,17 @@ const view = await loadReleaseView(db(), env.MEDIA, {
   releaseId: id ?? '',
   editionId: Astro.url.searchParams.get('edition'),
   compare: Astro.url.searchParams.get('view') === 'compare',
-  t, lang, base: env.MEDIA_DEV_BASE ?? '',
+  t, lang,
+  urls: adminUrls(env.MEDIA_DEV_BASE ?? ''),
+  links: {
+    song: (songId) => `/admin/songs/${songId}`,
+    editionDownload: (editionId) => `/admin/editions/${editionId}/zip`,
+    fileDownload: (f) => (f.blob_key ? `/admin/media/${f.blob_key}?download=${encodeURIComponent(f.name)}` : null),
+  },
 });
 if (!view) return new Response(t('找不到作品'), { status: 404 });
 const { release, chosen } = view;
+const publicHref = release.state === 'published' ? `/${siteLangOf(lang)}/works/${release.id}/${chosen ? `?edition=${chosen.id}` : ''}` : null;
 ---
 
 <!doctype html>
@@ -47,6 +57,7 @@ const { release, chosen } = view;
       a { color: var(--accent); }
       .bar { background: var(--bar); color: #fff; padding: 8px 16px; font-size: 13px; }
       .bar a { color: var(--bar-link); }
+      .bar .warn { color: #ffd479; }
     </style>
   </head>
   <body>
@@ -54,8 +65,10 @@ const { release, chosen } = view;
       {t('后台预览：公开站的作品页会是这个样子。只列出已收录的版本（缺档、待确认的不显示），每个版本只播放自己的文件。')}
       <a href={`/admin/releases/${release.id}`}>{t('← 回到作品编辑')}</a>
       {chosen && <> · <a href={`/admin/editions/${chosen.id}`}>{t('编辑这个版本')}</a></>}
-      {release.state !== 'published' && ` · ${t('本作品还是草稿，不会公开')}`}
+      {publicHref ? <> · <a href={publicHref}>{t('在公开站打开')}</a></> : ` · ${t('本作品还是草稿，不会公开')}`}
+      {view.unsettled > 0 && <> · <span class="warn">{t('这个版本有 {n} 个文件权属未定，公开站不显示', { n: view.unsettled })}</span></>}
     </div>
     <ReleaseView view={view} url={Astro.url} />
+    <Player />
   </body>
 </html>

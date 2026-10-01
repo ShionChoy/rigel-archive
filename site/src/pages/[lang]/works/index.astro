@@ -1,0 +1,141 @@
+---
+// 作品库 (设计文档「公开站方案 · 页面与网址」): every published work, as a grid of covers or a timeline by
+// year, narrowed by name (名义), form, series and year. Filters are plain links and a GET form, so the page
+// works without scripts and every view has its own address.
+import Site from '../../../layouts/Site.astro';
+import WorkCard from '../../../components/site/WorkCard.astro';
+import { db } from '../../../lib/db';
+import { isSiteLang } from '../../../lib/i18n';
+import { publicEras, publicWorks } from '../../../lib/public/catalog';
+import { NO_MEDIA, publicUrls } from '../../../lib/public/media';
+import { pagesFor } from '../../../lib/public/paths';
+
+if (!isSiteLang(Astro.params.lang)) return new Response(null, { status: 404 });
+const { t, lang } = Astro.locals;
+const database = db();
+const urls = publicUrls() ?? NO_MEDIA;
+const [all, eras] = await Promise.all([publicWorks(database, { t, lang, urls }), publicEras(database, lang)]);
+const pages = pagesFor(lang);
+
+const q = Astro.url.searchParams;
+const view = q.get('view') === 'timeline' ? 'timeline' : 'grid';
+const era = eras.some((e) => e.id === q.get('era')) ? q.get('era') : null;
+const form = q.get('form') || null;
+const series = q.get('series') || null;
+const year = /^\d{4}$/.test(q.get('year') ?? '') ? q.get('year') : null;
+const works = all.filter((w) => (!era || w.eraId === era) && (!form || w.formId === form) && (!series || w.series === series) && (!year || w.year === year));
+
+const forms = [...new Map(all.filter((w) => w.formId).map((w) => [w.formId!, w.form])).entries()];
+const seriesList = [...new Set(all.map((w) => w.series).filter((s): s is string => !!s))].sort();
+const years = [...new Set(all.map((w) => w.year).filter((y): y is string => !!y))].sort().reverse();
+const here = { era, form, series, year, view: view === 'grid' ? null : view };
+const link = (change: Partial<typeof here>) => pages.works({ ...here, ...change });
+const byYear = [...new Set(works.map((w) => w.year ?? ''))].map((y) => ({ year: y, works: works.filter((w) => (w.year ?? '') === y) }));
+const filtered = !!(era || form || series || year);
+---
+
+<Site title={t('作品')} section="works" description={t('Rigël Theatre 各个名义下的全部作品：专辑、单曲、DEMO 与网络发表。')}>
+  <div class="page">
+    <h1>{t('作品')}</h1>
+    <p class="lead">{filtered ? t('{n} 个作品符合条件（共 {total} 个）', { n: works.length, total: all.length }) : t('共 {n} 个作品', { n: all.length })}</p>
+
+    <div class="filters">
+      <nav class="chips" aria-label={t('名义')}>
+        <a href={link({ era: null })} aria-current={!era ? 'true' : undefined}>{t('全部名义')}</a>
+        {eras.filter((e) => e.works > 0).map((e) => <a href={link({ era: e.id })} aria-current={era === e.id ? 'true' : undefined}>{e.name}</a>)}
+      </nav>
+      <form method="get" class="selects" data-auto-submit>
+        {era && <input type="hidden" name="era" value={era} />}
+        {view !== 'grid' && <input type="hidden" name="view" value={view} />}
+        <label>
+          <span class="sr-only">{t('形式')}</span>
+          <select name="form">
+            <option value="">{t('全部形式')}</option>
+            {forms.map(([id, label]) => <option value={id} selected={form === id}>{label}</option>)}
+          </select>
+        </label>
+        {seriesList.length > 0 && (
+          <label>
+            <span class="sr-only">{t('系列')}</span>
+            <select name="series">
+              <option value="">{t('全部系列')}</option>
+              {seriesList.map((s) => <option value={s} selected={series === s}>{s}</option>)}
+            </select>
+          </label>
+        )}
+        <label>
+          <span class="sr-only">{t('年份')}</span>
+          <select name="year">
+            <option value="">{t('全部年份')}</option>
+            {years.map((y) => <option value={y} selected={year === y}>{y}</option>)}
+          </select>
+        </label>
+        <noscript><button class="button" type="submit">{t('筛选')}</button></noscript>
+      </form>
+      <div class="views" role="group" aria-label={t('显示方式')}>
+        <a href={link({ view: null })} aria-current={view === 'grid' ? 'true' : undefined}>{t('网格')}</a>
+        <a href={link({ view: 'timeline' })} aria-current={view === 'timeline' ? 'true' : undefined}>{t('年表')}</a>
+      </div>
+    </div>
+
+    {works.length === 0 ? (
+      <p class="muted empty">{all.length ? t('没有符合条件的作品。') : t('作品正在整理中，整理好的作品会陆续公开。')}</p>
+    ) : view === 'grid' ? (
+      <div class="works-grid">{works.map((w) => <WorkCard work={w} />)}</div>
+    ) : (
+      <div class="timeline">
+        {byYear.map((g) => (
+          <section>
+            <h2 class="year">{g.year || t('年份不详')}</h2>
+            <ol>
+              {g.works.map((w) => (
+                <li>
+                  <a href={pages.work(w.id)}>
+                    <span class="thumb">{w.cover ? <img src={w.cover} alt="" loading="lazy" decoding="async" width="56" height="56" /> : <span aria-hidden="true">◆</span>}</span>
+                    <span class="date">{w.date && w.date.length > 4 ? w.date.slice(5) : ''}</span>
+                    <span class="what">
+                      <span class="name">{w.title}</span>
+                      {w.subtitle && <span class="sub">{w.subtitle}</span>}
+                    </span>
+                    <span class="facts">{[w.catalog, w.form, w.era].filter(Boolean).join(' · ')}</span>
+                  </a>
+                </li>
+              ))}
+            </ol>
+          </section>
+        ))}
+      </div>
+    )}
+  </div>
+</Site>
+
+<style>
+  .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 4px 0 26px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chips a, .views a { padding: 4px 12px; border: 1px solid var(--line); border-radius: 16px; color: var(--ink); text-decoration: none; font-size: 14px; background: var(--card); }
+  .chips a[aria-current='true'], .views a[aria-current='true'] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  .selects { display: flex; flex-wrap: wrap; gap: 8px; }
+  .selects select { font: inherit; font-size: 14px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; max-width: 12em; }
+  .views { display: flex; gap: 6px; margin-left: auto; }
+  .empty { margin-top: 30px; }
+  .timeline section { margin-bottom: 28px; }
+  .timeline .year { font-size: 22px; margin: 0 0 8px; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .timeline ol { list-style: none; margin: 0; padding: 0; border-left: 2px solid var(--line); }
+  .timeline li a { display: grid; grid-template-columns: 56px 3.2em minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 8px 12px; margin-left: 12px; border-radius: 8px; color: var(--ink); text-decoration: none; position: relative; }
+  .timeline li a::before { content: '◆'; position: absolute; left: -21px; color: var(--accent); font-size: 10px; }
+  .timeline li a:hover { background: var(--card); }
+  .timeline .thumb { width: 56px; height: 56px; border-radius: 6px; overflow: hidden; background: var(--blank); display: grid; place-items: center; color: var(--muted); }
+  .timeline .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .timeline .date { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .timeline .what { min-width: 0; }
+  .timeline .name { display: block; font-weight: 600; overflow-wrap: anywhere; }
+  .timeline .sub { display: block; color: var(--muted); font-size: 13px; }
+  .timeline .facts { color: var(--muted); font-size: 13px; text-align: right; }
+  @media (max-width: 640px) {
+    .views { margin-left: 0; }
+    .timeline li a { grid-template-columns: 48px minmax(0, 1fr); gap: 10px; }
+    .timeline .thumb { width: 48px; height: 48px; }
+    .timeline .date { display: none; }
+    .timeline .facts { grid-column: 2; text-align: left; margin-top: -6px; }
+  }
+</style>

@@ -1,0 +1,89 @@
+---
+// 乐曲页 (设计文档「公开站方案」): one piece of music across the circle's works — every public recording of it,
+// oldest first, each playable and linked to its edition's page. Lyrics and music-game appearances come in S3.
+import Site from '../../../layouts/Site.astro';
+import { db } from '../../../lib/db';
+import { isSiteLang } from '../../../lib/i18n';
+import { songPage } from '../../../lib/public/catalog';
+import { NO_MEDIA, publicUrls } from '../../../lib/public/media';
+import { formatClock } from '../../../lib/release-view';
+
+if (!isSiteLang(Astro.params.lang)) return new Response(null, { status: 404 });
+const { t, lang } = Astro.locals;
+const page = await songPage(db(), Astro.params.id ?? '', { t, lang, urls: publicUrls() ?? NO_MEDIA });
+if (!page) return new Response(null, { status: 404 });
+const { song, lines } = page;
+const releases = new Set(lines.map((l) => l.release.id)).size;
+const cover = lines.find((l) => l.cover)?.cover ?? null;
+const item = (l: (typeof lines)[number]) => JSON.stringify({ file: l.file, title: l.title, sub: l.sub, album: l.album, cover: l.cover, href: l.href, sources: l.sources, exp: l.exp });
+---
+
+<Site title={song.title} section="works" image={cover} description={t('「{title}」的全部收录版本', { title: song.title })}>
+  <div class="page song">
+    <div class="song-head">
+      {cover ? <img class="song-cover" src={cover} alt="" width="160" height="160" /> : <div class="song-cover none" aria-hidden="true">◆</div>}
+      <div>
+        <div class="kicker">{t('乐曲')}</div>
+        <h1>{song.title}</h1>
+        <p class="lead">{t('{n} 个收录版本，出自 {m} 个作品', { n: lines.length, m: releases })}</p>
+        {lines.some((l) => l.sources) && (
+          <button type="button" class="button primary" data-play-all="#versions">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg>{t('依次播放全部版本')}
+          </button>
+        )}
+      </div>
+    </div>
+
+    <section class="section">
+      <div class="section-head"><h2 class="diamond">{t('收录版本')}</h2></div>
+      <table id="versions" class="versions" data-queue>
+        <thead>
+          <tr><th class="play"><span class="sr-only">{t('播放')}</span></th><th>{t('标题')}</th><th>{t('作品 · 版本')}</th><th class="date">{t('发行日')}</th><th class="time">{t('时长')}</th></tr>
+        </thead>
+        <tbody>
+          {lines.map((l) => (
+            <tr data-track={l.sources ? item(l) : undefined} data-file={l.file ?? undefined}>
+              <td class="play">
+                {l.sources ? (
+                  <button type="button" class="play" data-play aria-label={t('播放 {title}', { title: l.title })}><svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg><svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" /></svg></button>
+                ) : <span class="muted" title={t('这一版的音频还没有收录')}>—</span>}
+              </td>
+              <td>{l.title}{l.sub && <div class="muted small">{l.sub}</div>}</td>
+              <td>
+                <a href={l.href}>{l.release.title}</a>
+                <div class="muted small">{[l.edition.name, l.release.catalog, t('第 {n} 曲', { n: l.position })].filter(Boolean).join(' · ')}</div>
+              </td>
+              <td class="date">{l.edition.date ?? ''}</td>
+              <td class="time">{l.seconds ? formatClock(l.seconds) : ''}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  </div>
+</Site>
+
+<style>
+  .song-head { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 24px; align-items: center; }
+  .song-cover { width: 160px; height: 160px; object-fit: cover; border-radius: 8px; background: var(--blank); box-shadow: var(--shadow); display: block; }
+  .song-cover.none { display: grid; place-items: center; color: var(--muted); font-size: 32px; }
+  .kicker { color: var(--accent); font-size: 13px; letter-spacing: 0.08em; }
+  .versions { width: 100%; border-collapse: collapse; }
+  .versions th { text-align: left; font-weight: 500; color: var(--muted); font-size: 13px; padding: 6px; border-bottom: 1px solid var(--line); }
+  .versions td { padding: 10px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  .versions .play { width: 44px; }
+  .versions .date { width: 7.5em; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .versions .time { width: 4.5em; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .versions .small { font-size: 13px; }
+  .versions tr.now td { background: var(--now); }
+  button.play { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 50%; width: 32px; height: 32px; cursor: pointer; display: inline-grid; place-items: center; padding: 0; }
+  button.play svg { width: 16px; height: 16px; fill: currentColor; }
+  tr.now button.play { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  button.play .i-pause, tr.playing button.play .i-play { display: none; }
+  tr.playing button.play .i-pause { display: block; }
+  @media (max-width: 640px) {
+    .song-head { grid-template-columns: 96px minmax(0, 1fr); gap: 14px; }
+    .song-cover { width: 96px; height: 96px; }
+    .versions .date, .versions thead { display: none; }
+  }
+</style>

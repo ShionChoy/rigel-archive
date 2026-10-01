@@ -2,7 +2,8 @@
 
 设计文档：https://claude.ai/code/artifact/5ee23162-4144-4a62-9504-ab7e28d2607d
 
-线上预览（Cloudflare Access 保护，只有管理组能进）：https://rigel-archive.shionchoy.workers.dev/admin
+线上预览（Cloudflare Access 保护，只有管理组能进）：https://rigel-archive.shionchoy.workers.dev/admin ；
+公开站（开发中，正式上线前同样只有管理组能进）：https://rigel-archive.shionchoy.workers.dev/zh/
 整理工作都在线上进行。上传后的核对与解包、推流版与预览、声学指纹，都由 Cloudflare 容器里的
 处理程序自动完成（每晚的加密备份也由它做，但 B2 尚未开通，见「加密备份」），本机不需要常驻任何程序；
 本机只在导入新的合辑文件时用 `ra push` 把原件传上去。
@@ -43,7 +44,7 @@
 | 容器 | `rigel-archive-processor`（standard-4：4 vCPU、12 GiB、20 GB 磁盘，最多 1 个实例），由 Durable Object `Processor` 启停 |
 | 定时任务 | 每 10 分钟：有待处理的工作就唤醒容器；每天 19:17 UTC（日本 4:17）：备份（设置好 B2 后才运行，现在跳过） |
 | Access | 团队 `rigel-archive.cloudflareaccess.com`；Worker 级保护；服务令牌 `ra-worker` 走 Service Auth 策略 |
-| 密钥 | `WORKER_TOKEN`（`wrangler secret put`），与 `cloud.env` 里的 `RA_WORKER_TOKEN` 相同；备份用的 5 个见下文「加密备份」 |
+| 密钥 | `WORKER_TOKEN`（`wrangler secret put`），与 `cloud.env` 里的 `RA_WORKER_TOKEN` 相同；`MEDIA_KEY`：公开站媒体地址的签名密钥（任意长随机串，见「公开站」）；备份用的 5 个见下文「加密备份」 |
 
 ```sh
 cd site
@@ -148,7 +149,7 @@ cd ../../site && npm run db:reset && npm run dev
 | --- | --- |
 | 无损音频（WAV、FLAC、AIFF 等） | 推流 FLAC（与原件逐采样一致：生成后核对 PCM MD5；每 10 秒一个定位点；去掉内嵌图片以加快起播）、AAC 256 kbps、波形；自带定位表的 FLAC 原件直接用原件推流 |
 | 有损音频 | MP3、AAC 直接用原件推流；Vorbis、TwinVQ（VQF）、WMA 等另转 AAC；波形 |
-| 图片 | WebP 240 / 640 / 1600 px（不放大原图） |
+| 图片 | WebP 240 / 640 / 1600 px（不放大原图）；音频文件里内嵌的封面（`pictures/`）也按图片生成，页面显示预览、不直接送原图 |
 | 视频 | MP4（H.264 + AAC，最高 1080p）：已是浏览器能播的 H.264 就只换封装，否则转码；封面帧 WebP |
 
 解码后音频相同的文件（如 WAV 与 FLAC）共用一套推流文件。短于 30 秒且没有归入作品的音频（多为 BMS 键音）不生成。
@@ -200,6 +201,26 @@ rclone copy vault:db/2026/<某天>.sql.gz .   # 取回一份导出
 gunzip <某天>.sql.gz && npx wrangler d1 execute <新数据库> --remote --file <某天>.sql
 rclone copy vault:blobs ./blobs           # 取回全部原件（文件名就是 SHA-256，可逐个核对）
 ```
+
+## 公开站
+
+方案见设计文档的标签页「公开站方案」。页面在 `site/src/pages/[lang]/`，每页有中、日、英三个网址（`/zh/…`、`/ja/…`、`/en/…`），
+打开 `/` 时按上次选的语言，否则按浏览器语言。外框是 `layouts/Site.astro`（深色星空，访客可切浅色，记在 `rigel.site.theme`），
+作品页与后台「预览公开页」共用 `components/ReleaseView.astro` 和 `lib/release-view.ts`，播放器 `components/Player.astro`
+（换页不中断、队列、随机、循环、锁屏控制、无损 / 省流，记在 `rigel.player`）。
+
+- **公开规则**集中在 `site/src/lib/public/rules.ts`：作品要改为「已发布」才出现；版本只列已收录与部分缺档；文件按权属——
+  社团自有、已获授权的可看可听，第三方只列条目，**权属未定的不显示**（检查清单「已发布的作品里有权属未定的文件」列出）。
+- **媒体地址**（`lib/public/media.ts`，`pages/media/[...path].ts`）：页面给出的地址都带签名，别的地址一律 404。图片预览与封面是
+  长期地址；声音、视频、文字是 2 小时内有效的地址，过期后播放器向 `/api/play` 要新地址接着播。带其他网站 Referer 的请求返回 403。
+  签名密钥是 `MEDIA_KEY`：线上 `wrangler secret put MEDIA_KEY`（`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`），
+  本地开发没有设置时用固定的开发密钥。线上没有这个密钥时页面照常显示，但没有可播放、可查看的内容。换密钥会让所有旧地址失效。
+- **缓存**（`lib/public/cache.ts`）：页面按「网址 + 目录版本 + 构建」存进 Workers 缓存 10 分钟；后台每次保存让目录版本加一
+  （`meta.public_version`），所以改动立即可见。workers.dev 上 Cache API 不起作用，绑定正式域名后才生效。
+- **界面文字**：代码里写中文，日文在 `i18n-ja.ts`，英文在 `site/src/lib/i18n-en.ts`（只需公开站用到的文字）；
+  `npm run check:i18n` 同时检查公开站文字缺不缺英文。英文可按数字选词：`{n} {n:track|tracks}`。
+- 站名、官网链接、联系方式、是否禁止搜索引擎收录都在 `site/src/lib/site.ts` 一处（站名与域名定下之前全站 noindex）。
+- 本地查看：在后台把作品改为「已发布」，打开 http://localhost:4321/zh/ 。
 
 ## 界面语言
 

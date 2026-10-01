@@ -1,8 +1,9 @@
 ---
-// The public album page (公开页) of a release, drawn from lib/release-view.ts: on the left the collected
-// editions (each with its own address), on the right the chosen one — covers, information, tracks that play
-// only its own files, attachments — or 「版本对照」. On a phone the editions become a row of buttons above.
-// The page around it (its <html>, colours, a bar at the top) is the caller's; see pages/admin/releases/[id]/preview.astro.
+// The album page (作品页) of a release, drawn from lib/release-view.ts: on the left the collected editions
+// (each with its own address), on the right the chosen one — covers, information, tracks that play only its
+// own files, attachments — or 「版本对照」. On a phone the editions become a row of buttons above.
+// The page around it (its <html>, colours, the player) is the caller's: the public site's layouts/Site.astro,
+// or the admin's pages/admin/releases/[id]/preview.astro. Tracks play in components/Player.astro.
 import { RELATION_MARK, RELATION_TEXT } from '../lib/editions';
 import { withParams } from '../lib/format';
 import { formatClock, type ReleaseView } from '../lib/release-view';
@@ -10,18 +11,31 @@ import { formatClock, type ReleaseView } from '../lib/release-view';
 interface Props {
   view: ReleaseView;
   url: URL; // this page's address (the editions link to it with ?edition= / ?view=compare)
+  eraHref?: string | null; // the era's page (the public site's works list for it)
+  links?: { label: string; href: string }[]; // the release's official and shop pages
 }
 
-const { view, url } = Astro.props;
+const { view, url, eraHref = null, links = [] } = Astro.props;
 const { t } = Astro.locals;
 const { release, chosen, compare } = view;
 const editionHref = (id: string) => withParams(url, { edition: id, view: null });
+// What the player shows of this edition's tracks (components/Player.astro reads it).
+const album = chosen ? `${release.title}${chosen.name ? ` · ${chosen.name}` : ''}` : release.title;
+const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify({
+  file: l.file, title: l.title, sub: l.sub, album, cover: l.cover ?? chosen?.covers[0]?.src ?? null,
+  href: chosen ? editionHref(chosen.id) : url.pathname, sources: l.sources, exp: view.expires,
+});
 ---
 
-<main>
-  <div class="kicker">{release.era_name} · {view.formLabel}</div>
+<main class="release">
+  <div class="kicker">{eraHref ? <a href={eraHref}>{release.era_name}</a> : release.era_name} · {view.formLabel}</div>
   <h1>{release.title}</h1>
   <div class="sub">{view.subline}</div>
+  {links.length > 0 && (
+    <div class="release-links">
+      {links.map((l) => <a href={l.href} target="_blank" rel="noopener">{l.label} ↗</a>)}
+    </div>
+  )}
 
   {view.editions.length === 0 ? (
     <p class="muted" style="margin-top:24px">{t('这个作品还没有已收录的版本。')}</p>
@@ -77,7 +91,7 @@ const editionHref = (id: string) => withParams(url, { edition: id, view: null })
           <>
             <div class="ed-head">
               <div>
-                {chosen.covers[0] ? <img class="cover" id="big-cover" src={chosen.covers[0].src} alt="" /> : <div class="nocover">{t('无封面')}</div>}
+                {chosen.covers[0] ? <img class="cover" id="big-cover" src={chosen.covers[0].src} alt="" width="640" height="640" fetchpriority="high" /> : <div class="nocover">{t('无封面')}</div>}
                 {chosen.covers.length > 1 && (
                   <div class="thumbs">
                     {chosen.covers.map((c, i) => <button type="button" class:list={{ on: i === 0 }} data-cover={c.src} title={t('用于 {n} 首', { n: c.n })}><img src={c.src} alt="" /></button>)}
@@ -92,30 +106,36 @@ const editionHref = (id: string) => withParams(url, { edition: id, view: null })
                   {chosen.status === 'partial' && <> · <span class="muted">{t('部分缺档')}</span></>}
                 </div>
                 {chosen.credits.length > 0 && <dl class="credits">{chosen.credits.map(([k, v]) => <><dt>{k}</dt><dd>{v}</dd></>)}</dl>}
-                {chosen.description && <p style="white-space:pre-wrap">{chosen.description}</p>}
-                {chosen.note && <p style="white-space:pre-wrap">{chosen.note}</p>}
+                {chosen.description && (
+                  <p class="description">
+                    {chosen.descriptionOriginal && <span class="original-mark">{t('原文')}</span>}
+                    {chosen.description}
+                  </p>
+                )}
+                {chosen.note && <p class="description">{chosen.note}</p>}
                 <div class="actions">
-                  {chosen.lines.some((l) => l.sources) && <button class="primary" id="play-all">{t('▶ 播放全部')}</button>}
-                  <a href={chosen.download}>{chosen.withTracks ? t('下载本版（带标签）') : t('下载本版')}</a>
+                  {chosen.lines.some((l) => l.sources) && <button type="button" class="primary" data-play-all="#tracks">{t('▶ 播放全部')}</button>}
+                  {chosen.download
+                    ? <a href={chosen.download}>{chosen.withTracks ? t('下载本版（带标签）') : t('下载本版')}</a>
+                    : <button type="button" disabled title={t('下载将随注册功能开放')}>{t('登录后下载')}</button>}
                   {chosen.musicbrainz && <a href={chosen.musicbrainz} target="_blank" rel="noopener">MusicBrainz ↗</a>}
                   {chosen.bandcamp && <a href={chosen.bandcamp} target="_blank" rel="noopener">Bandcamp ↗</a>}
                 </div>
-                <p class="muted" style="font-size:12px">{t('公开站上，下载只提供给注册用户；第三方的文件只列条目。')}</p>
               </div>
             </div>
 
             {chosen.withTracks && (
               <section>
                 <h2 class="sec">{t('曲目')}</h2>
-                <table id="tracks">
+                <table id="tracks" class="tracks" data-queue>
                   <tbody>
-                    {chosen.lines.map((l, i) => (
-                      <tr data-sources={l.sources ? JSON.stringify(l.sources) : undefined} data-title={l.title} data-index={i}>
+                    {chosen.lines.map((l) => (
+                      <tr data-track={l.sources ? item(l) : undefined} data-file={l.file ?? undefined}>
                         <td class="n">{chosen.multiDisc ? `${l.disc}-` : ''}{String(l.position).padStart(2, '0')}</td>
                         {chosen.differentCovers && <td class="cv">{l.cover ? <img src={l.cover} alt="" loading="lazy" /> : null}</td>}
-                        <td>{l.title}{l.sub && <div class="tsub">{l.sub}</div>}</td>
+                        <td>{l.song ? <a class="song" href={l.song}>{l.title}</a> : l.title}{l.sub && <div class="tsub">{l.sub}</div>}</td>
                         <td class="time">{l.seconds ? formatClock(l.seconds) : ''}</td>
-                        <td class="play">{l.sources ? <button class="play" aria-label={t('播放')}>▶</button> : null}</td>
+                        <td class="play">{l.sources ? <button type="button" class="play" data-play aria-label={t('播放 {title}', { title: l.title })}><svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg><svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" /></svg></button> : null}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -130,6 +150,18 @@ const editionHref = (id: string) => withParams(url, { edition: id, view: null })
                 {chosen.attachments.map((g) => (
                   <>
                     {g.label && <div class="group">{g.label}</div>}
+                    {g.videos.length > 0 && (
+                      <div class="videos">
+                        {g.videos.map((v) => (
+                          <figure>
+                            <video controls preload="none" poster={v.poster ?? undefined} playsinline>
+                              {v.sources.map((s) => <source src={s.src} type={s.type} />)}
+                            </video>
+                            <figcaption>{v.name}</figcaption>
+                          </figure>
+                        ))}
+                      </div>
+                    )}
                     {g.pictures.length > 0 && (
                       <div class="gallery">
                         {g.pictures.map((p) => ('href' in p ? (
@@ -163,142 +195,140 @@ const editionHref = (id: string) => withParams(url, { edition: id, view: null })
     </div>
   )}
 </main>
-<footer class="player">
-  <span id="now" class="muted">{t('未在播放')}</span>
-  <audio id="audio" controls preload="none"></audio>
-</footer>
 <dialog class="lightbox" id="lightbox"></dialog>
 
 <style is:global>
-  main { max-width: 1240px; margin: 0 auto; padding: 20px 16px; }
-  .kicker { color: var(--muted); font-size: 14px; }
-  h1 { margin: 2px 0 2px; font-size: 30px; line-height: 1.25; }
-  .sub { color: var(--muted); }
-  .layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 28px; margin-top: 20px; align-items: start; }
-  nav.editions { position: sticky; top: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
-  nav.editions h2 { font-size: 13px; color: var(--muted); margin: 0 0 6px; font-weight: 500; }
-  nav.editions a { display: grid; grid-template-columns: 44px 1fr; gap: 10px; align-items: center; padding: 6px; border-radius: 8px; color: var(--ink); text-decoration: none; }
-  nav.editions a:hover { background: var(--now); }
-  nav.editions a.on { background: var(--now); box-shadow: inset 3px 0 0 var(--accent); }
-  nav.editions img, nav.editions .blank { width: 44px; height: 44px; object-fit: cover; border-radius: 4px; background: var(--blank); display: block; }
-  nav.editions .name { font-size: 14px; line-height: 1.35; }
-  nav.editions .meta { font-size: 12px; color: var(--muted); }
-  nav.editions hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
-  nav.editions .compare-link .blank { display: grid; place-items: center; color: var(--muted); background: none; }
-  .ed-head { display: grid; grid-template-columns: minmax(200px, 360px) 1fr; gap: 28px; align-items: start; }
-  .cover { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; background: var(--blank); display: block; box-shadow: 0 6px 22px rgb(0 0 0 / 0.14); }
-  .nocover { width: 100%; aspect-ratio: 1; border-radius: 8px; background: var(--blank); display: grid; place-items: center; color: var(--muted); }
-  .thumbs { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-  .thumbs button { border: 2px solid transparent; padding: 0; border-radius: 6px; background: none; cursor: pointer; }
-  .thumbs button.on { border-color: var(--accent); }
-  .thumbs img { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; display: block; }
-  .ed-kind { color: var(--accent); font-weight: 600; }
-  .ed-title { font-size: 26px; margin: 2px 0 6px; line-height: 1.3; }
-  dl.credits { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 12px 0; }
-  dl.credits dt { color: var(--muted); }
-  dl.credits dd { margin: 0; }
-  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-  .actions a, .actions button { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 6px; padding: 7px 14px; text-decoration: none; cursor: pointer; font: inherit; }
-  .actions .primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
-  section { margin-top: 30px; }
-  h2.sec { font-size: 18px; border-bottom: 1px solid var(--line); padding-bottom: 6px; margin: 0 0 4px; }
-  table { width: 100%; border-collapse: collapse; }
-  td, th { padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; text-align: left; }
-  td.n { width: 3.2em; color: var(--muted); }
-  td.cv { width: 42px; } td.cv img { width: 36px; height: 36px; object-fit: cover; border-radius: 3px; display: block; }
-  td.time { width: 4.5em; color: var(--muted); text-align: right; }
-  td.play { width: 3.4em; text-align: right; }
-  .tsub { color: var(--muted); font-size: 13px; }
-  button.play { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 50%; width: 32px; height: 32px; cursor: pointer; }
-  tr.now td { background: var(--now); }
-  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-top: 10px; }
-  .gallery a { display: block; color: var(--muted); font-size: 12px; text-decoration: none; }
-  .gallery img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 6px; background: var(--blank); display: block; margin-bottom: 4px; }
-  .group { margin-top: 14px; font-size: 13px; color: var(--muted); }
-  .docs td { font-size: 14px; }
-  footer.player { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card); border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 12px; align-items: center; }
-  footer.player audio { flex: 1; min-width: 0; }
-  .muted { color: var(--muted); }
-  .compare { overflow-x: auto; }
-  .compare td, .compare th { font-size: 12px; white-space: nowrap; text-align: center; }
-  .compare td:first-child, .compare th:first-child { text-align: left; white-space: normal; }
-  .r-new { background: var(--r-new); } .r-same, .r-master { background: var(--r-same); } .r-remix { background: var(--r-remix); } .r-part { background: var(--r-part); } .r-other { background: var(--r-other); }
+  .release { max-width: 1240px; margin: 0 auto; padding: 20px 16px; }
+  .release .kicker { color: var(--muted); font-size: 14px; }
+  .release .kicker a { color: inherit; }
+  .release h1 { margin: 2px 0 2px; font-size: 30px; line-height: 1.25; }
+  .release .sub { color: var(--muted); }
+  .release-links { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 14px; }
+  .release .layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 28px; margin-top: 20px; align-items: start; }
+  .release nav.editions { position: sticky; top: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .release nav.editions h2 { font-size: 13px; color: var(--muted); margin: 0 0 6px; font-weight: 500; }
+  .release nav.editions a { display: grid; grid-template-columns: 44px 1fr; gap: 10px; align-items: center; padding: 6px; border-radius: 8px; color: var(--ink); text-decoration: none; }
+  .release nav.editions a:hover { background: var(--now); }
+  .release nav.editions a.on { background: var(--now); box-shadow: inset 3px 0 0 var(--accent); }
+  .release nav.editions img, .release nav.editions .blank { width: 44px; height: 44px; object-fit: cover; border-radius: 4px; background: var(--blank); display: block; }
+  .release nav.editions .name { font-size: 14px; line-height: 1.35; }
+  .release nav.editions .meta { font-size: 12px; color: var(--muted); }
+  .release nav.editions hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
+  .release nav.editions .compare-link .blank { display: grid; place-items: center; color: var(--muted); background: none; }
+  .release .ed-head { display: grid; grid-template-columns: minmax(200px, 360px) 1fr; gap: 28px; align-items: start; }
+  .release .cover { width: 100%; height: auto; aspect-ratio: 1; object-fit: cover; border-radius: 8px; background: var(--blank); display: block; box-shadow: 0 6px 22px rgb(0 0 0 / 0.14); }
+  .release .nocover { width: 100%; aspect-ratio: 1; border-radius: 8px; background: var(--blank); display: grid; place-items: center; color: var(--muted); }
+  .release .thumbs { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .release .thumbs button { border: 2px solid transparent; padding: 0; border-radius: 6px; background: none; cursor: pointer; }
+  .release .thumbs button.on { border-color: var(--accent); }
+  .release .thumbs img { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; display: block; }
+  .release .ed-kind { color: var(--accent); font-weight: 600; }
+  .release .ed-title { font-size: 26px; margin: 2px 0 6px; line-height: 1.3; }
+  .release dl.credits { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 12px 0; }
+  .release dl.credits dt { color: var(--muted); }
+  .release dl.credits dd { margin: 0; }
+  .release .description { white-space: pre-wrap; }
+  .release .original-mark { display: inline-block; font-size: 11px; line-height: 1; padding: 3px 5px; margin-right: 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); vertical-align: 2px; }
+  .release .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .release .actions a, .release .actions button { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 6px; padding: 7px 14px; text-decoration: none; cursor: pointer; font: inherit; }
+  .release .actions button:disabled { cursor: not-allowed; color: var(--muted); }
+  .release .actions .primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  .release section { margin-top: 30px; }
+  .release h2.sec { font-size: 18px; border-bottom: 1px solid var(--line); padding-bottom: 6px; margin: 0 0 4px; }
+  .release table { width: 100%; border-collapse: collapse; }
+  .release td, .release th { padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; text-align: left; }
+  .release td.n { width: 3.2em; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .release td.cv { width: 42px; } .release td.cv img { width: 36px; height: 36px; object-fit: cover; border-radius: 3px; display: block; }
+  .release td.time { width: 4.5em; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .release td.play { width: 3.4em; text-align: right; }
+  .release a.song { color: inherit; text-decoration: none; }
+  .release a.song:hover { text-decoration: underline; }
+  .release .tsub { color: var(--muted); font-size: 13px; }
+  .release button.play { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 50%; width: 32px; height: 32px; cursor: pointer; display: inline-grid; place-items: center; padding: 0; }
+  .release button.play svg { width: 16px; height: 16px; fill: currentColor; }
+  .release button.play .i-pause, .release tr.playing button.play .i-play { display: none; }
+  .release tr.playing button.play .i-pause { display: block; }
+  .release tr.now td { background: var(--now); }
+  .release tr.now button.play { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  .release .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-top: 10px; }
+  .release .gallery a { display: block; color: var(--muted); font-size: 12px; text-decoration: none; overflow-wrap: anywhere; }
+  .release .gallery img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 6px; background: var(--blank); display: block; margin-bottom: 4px; }
+  .release .videos { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-top: 10px; }
+  .release .videos figure { margin: 0; }
+  .release .videos video { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; display: block; }
+  .release .videos figcaption { color: var(--muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+  .release .group { margin-top: 14px; font-size: 13px; color: var(--muted); }
+  .release .docs td { font-size: 14px; overflow-wrap: anywhere; }
+  .release .muted { color: var(--muted); }
+  .release .compare { overflow-x: auto; }
+  .release .compare td, .release .compare th { font-size: 12px; white-space: nowrap; text-align: center; }
+  .release .compare td:first-child, .release .compare th:first-child { text-align: left; white-space: normal; }
+  .release .r-new { background: var(--r-new); } .release .r-same, .release .r-master { background: var(--r-same); } .release .r-remix { background: var(--r-remix); } .release .r-part { background: var(--r-part); } .release .r-other { background: var(--r-other); }
   .lightbox { border: 0; padding: 0; background: transparent; max-width: 96vw; max-height: 96vh; }
   .lightbox::backdrop { background: rgb(0 0 0 / 0.8); }
   .lightbox img { max-width: 94vw; max-height: 90vh; display: block; }
   .lightbox pre { background: var(--card); color: var(--ink); padding: 16px; max-width: 90vw; max-height: 86vh; overflow: auto; white-space: pre-wrap; margin: 0; border-radius: 8px; font-size: 13px; }
   @media (max-width: 860px) {
-    .layout { grid-template-columns: 1fr; gap: 14px; }
-    nav.editions { position: static; display: flex; gap: 6px; overflow-x: auto; padding: 0; border: 0; background: none; scrollbar-width: none; }
-    nav.editions h2, nav.editions hr, nav.editions .meta, nav.editions img, nav.editions .blank, nav.editions br { display: none; }
-    nav.editions a { display: block; white-space: nowrap; border: 1px solid var(--line); border-radius: 18px; padding: 4px 12px; background: var(--card); flex: none; }
-    nav.editions a.on { background: var(--accent); color: var(--on-accent); box-shadow: none; border-color: var(--accent); }
-    .ed-head { grid-template-columns: 1fr; gap: 14px; }
-    h1 { font-size: 24px; }
+    .release .layout { grid-template-columns: 1fr; gap: 14px; }
+    .release nav.editions { position: static; display: flex; align-items: flex-start; gap: 6px; overflow-x: auto; padding: 0; border: 0; border-radius: 0; background: none; scrollbar-width: none; }
+    .release nav.editions h2, .release nav.editions hr, .release nav.editions .meta, .release nav.editions img, .release nav.editions .blank, .release nav.editions .compare-link .blank, .release nav.editions br { display: none; }
+    .release nav.editions a { display: block; white-space: nowrap; border: 1px solid var(--line); border-radius: 18px; padding: 4px 12px; background: var(--card); flex: none; }
+    .release nav.editions a.on { background: var(--accent); color: var(--on-accent); box-shadow: none; border-color: var(--accent); }
+    .release .ed-head { grid-template-columns: 1fr; gap: 14px; }
+    .release .ed-head .cover, .release .ed-head .nocover { max-width: 360px; }
+    .release h1 { font-size: 24px; }
+    .release td.cv { display: none; }
   }
-
 </style>
 
 <script>
-  const audio = document.querySelector<HTMLAudioElement>('#audio')!;
-  const now = document.querySelector<HTMLElement>('#now')!;
-  const rows = Array.from(document.querySelectorAll<HTMLTableRowElement>('#tracks tr[data-sources]'));
-  let current = -1;
-  // The first source this browser plays: the lossless stream (FLAC), else AAC, else the original.
-  const pick = (row: HTMLTableRowElement) => {
-    const sources = JSON.parse(row.dataset.sources!) as { src: string; type: string }[];
-    return (sources.find((s) => audio.canPlayType(s.type) !== '') ?? sources[sources.length - 1]).src;
-  };
-  const play = (i: number) => {
-    const row = rows[i];
-    if (!row) return;
-    rows.forEach((r) => r.classList.remove('now'));
-    row.classList.add('now');
-    current = i;
-    audio.src = pick(row);
-    now.textContent = `${row.querySelector('td')?.textContent ?? ''} ${row.dataset.title ?? ''}`;
-    audio.play().catch(() => undefined);
-  };
-  rows.forEach((row, i) => row.querySelector('button.play')?.addEventListener('click', () => play(i)));
-  document.querySelector('#play-all')?.addEventListener('click', () => play(0));
-  audio.addEventListener('ended', () => play(current + 1));
-  // The covers of an edition whose tracks carry different ones.
-  for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>('[data-cover]'))) {
-    b.addEventListener('click', () => {
-      (document.querySelector('#big-cover') as HTMLImageElement).src = b.dataset.cover!;
-      document.querySelectorAll('[data-cover]').forEach((x) => x.classList.toggle('on', x === b));
-    });
-  }
-  // Pictures and text files open over the page.
-  const box = document.querySelector<HTMLDialogElement>('#lightbox')!;
+  // Once per visit (pages may be swapped in place by the public site's router), so everything listens on
+  // the document. Tracks are played by components/Player.astro.
   document.addEventListener('click', async (e) => {
-    const a = (e.target as HTMLElement).closest('a[data-view]') as HTMLAnchorElement | null;
-    if (!a) return;
+    const target = e.target as HTMLElement;
+    // The covers of an edition whose tracks carry different ones.
+    const thumb = target.closest<HTMLButtonElement>('[data-cover]');
+    if (thumb) {
+      const big = document.querySelector<HTMLImageElement>('#big-cover');
+      if (big) big.src = thumb.dataset.cover!;
+      document.querySelectorAll('[data-cover]').forEach((x) => x.classList.toggle('on', x === thumb));
+      return;
+    }
+    // Pictures and text files open over the page.
+    const a = target.closest<HTMLAnchorElement>('a[data-view]');
+    const box = document.querySelector<HTMLDialogElement>('#lightbox');
+    if (!a || !box) return;
     e.preventDefault();
     box.innerHTML = '';
     if (a.dataset.view === 'image') {
       const img = document.createElement('img');
       img.src = a.href;
+      img.alt = '';
       box.appendChild(img);
-    } else {
-      const pre = document.createElement('pre');
-      pre.textContent = '…';
-      box.appendChild(pre);
-      const bytes = new Uint8Array(await (await fetch(a.href)).arrayBuffer());
-      let text = new TextDecoder('utf-8').decode(bytes);
-      if (text.includes('�')) {
-        for (const enc of ['utf-16le', 'shift_jis']) {
-          try {
-            text = new TextDecoder(enc, { fatal: true }).decode(bytes);
-            break;
-          } catch {
-            // next
-          }
+      box.showModal();
+      return;
+    }
+    const pre = document.createElement('pre');
+    pre.textContent = '…';
+    box.appendChild(pre);
+    box.showModal();
+    const bytes = new Uint8Array(await (await fetch(a.href)).arrayBuffer());
+    let text = new TextDecoder('utf-8').decode(bytes);
+    if (text.includes('\uFFFD')) {
+      for (const enc of ['utf-16le', 'shift_jis']) {
+        try {
+          text = new TextDecoder(enc, { fatal: true }).decode(bytes);
+          break;
+        } catch {
+          // next
         }
       }
-      pre.textContent = text;
     }
-    box.showModal();
+    pre.textContent = text;
   });
-  box.addEventListener('click', () => box.close());
+  document.addEventListener('click', (e) => {
+    // A click outside the text, or on the picture, closes it.
+    const box = (e.target as HTMLElement).closest<HTMLDialogElement>('dialog.lightbox');
+    if (box && (e.target === box || (e.target as HTMLElement).tagName === 'IMG')) box.close();
+  });
 </script>

@@ -28,6 +28,9 @@ function devConfigPath() {
 
 export default defineConfig({
   output: 'server',
+  // Each build's own id: the public pages cached at the edge are kept per build (src/lib/public/cache.ts), since
+  // a page from an earlier build names script and style files that a new deployment no longer has.
+  vite: { define: { __BUILD_ID__: JSON.stringify(Date.now().toString(36)) } },
   adapter: cloudflare({ imageService: 'passthrough', configPath: devConfigPath() }),
   // Admin auth comes from Cloudflare Access, not Astro sessions, so no KV binding is needed.
   session: false,

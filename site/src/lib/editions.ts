@@ -425,7 +425,8 @@ function mergedOrder(tracks: TrackRow[], editions: EditionRow[], rowsOf: Map<str
   return order.map((id) => byId.get(id)).filter((t): t is TrackRow => !!t);
 }
 
-export async function comparison(releaseId: string): Promise<Matrix> {
+/** The 版本对照 of a release; `keep` limits it to some of its editions (the public page: the collected ones). */
+export async function comparison(releaseId: string, keep?: (e: EditionRow) => boolean): Promise<Matrix> {
   const database = db();
   const [tracks, allEditions, etRows, fileRows] = await Promise.all([
     loadTracks(releaseId),
@@ -449,7 +450,7 @@ export async function comparison(releaseId: string): Promise<Matrix> {
   for (const f of fileRows.results) filesOf.set(`${f.edition_id}/${f.track_id}`, [...(filesOf.get(`${f.edition_id}/${f.track_id}`) ?? []), f]);
   // Columns: editions with a track order or linked audio, oldest first.
   const editions = allEditions
-    .filter((e) => rowsOf.has(e.id) || fileRows.results.some((f) => f.edition_id === e.id))
+    .filter((e) => (!keep || keep(e)) && (rowsOf.has(e.id) || fileRows.results.some((f) => f.edition_id === e.id)))
     .sort((a, b) => (a.release_date ?? '9999').localeCompare(b.release_date ?? '9999') || allEditions.indexOf(a) - allEditions.indexOf(b));
 
   const shas = [...new Set(fileRows.results.map((f) => f.sha256).filter(Boolean))] as string[];

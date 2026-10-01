@@ -1,0 +1,19 @@
+---
+// A work in a grid (首页, 作品库): its picture, title, the translated title and a line of facts.
+import type { Work } from '../../lib/public/catalog';
+import { pagesFor } from '../../lib/public/paths';
+
+interface Props { work: Work }
+const { work } = Astro.props;
+const { lang } = Astro.locals;
+const meta = [work.catalog, work.year, work.form].filter(Boolean).join(' · ');
+---
+
+<a class="work-card" href={pagesFor(lang).work(work.id)}>
+  <div class="art">
+    {work.cover ? <img src={work.cover} alt="" loading="lazy" decoding="async" width="320" height="320" /> : <span class="none" aria-hidden="true">◆</span>}
+  </div>
+  <div class="title">{work.title}</div>
+  {work.subtitle && <div class="subtitle">{work.subtitle}</div>}
+  <div class="meta">{meta}</div>
+</a>

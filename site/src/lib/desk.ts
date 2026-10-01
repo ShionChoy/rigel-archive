@@ -34,7 +34,7 @@ function releaseView(
 ): FolderView['release'] {
   if (!r) return undefined;
   const { name_zh, name_ja, ...rest } = r;
-  return { ...rest, form: name_zh ? formName({ name_zh, name_ja: name_ja ?? '' }, t) : r.form || t('未设置') };
+  return { ...rest, form: name_zh ? formName({ name_zh, name_ja: name_ja ?? '', name_en: '' }, t) : r.form || t('未设置') };
 }
 
 export async function folderView(places: Places, id: string, t: T, pinned: boolean): Promise<FolderView | null> {

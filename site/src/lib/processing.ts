@@ -56,11 +56,28 @@ export const WANTED: Record<Task, string> = {
     AND json_extract(f.format, '$.duration') > 0 AND NOT ${settled('fingerprint')}`,
 };
 
+/**
+ * Pictures carried inside audio files (covers; table pictures, lib/embedded.ts) get the same WebP previews
+ * as image files, so pages need not send an 800 px original where a 240 or 640 px copy will do. They go
+ * through the same derive task: to the processing program they are images like any other (the worker's
+ * blob route hands out pictures/<sha256> too), so tools/ra needs no change. A picture that is also stored
+ * as a file is derived as that file.
+ */
+export const WANTED_PICTURES = `NOT EXISTS (SELECT 1 FROM files f WHERE f.sha256 = p.sha256 AND f.blob_key IS NOT NULL)
+  AND NOT EXISTS (SELECT 1 FROM media_tasks t WHERE t.sha256 = p.sha256 AND t.task = 'derive' AND (
+    (t.state = 'done' AND t.version >= 1)
+    OR (t.attempts >= ${MAX_ATTEMPTS} AND t.version >= 1)
+    OR (t.state = 'running' AND t.started_at > ${ago(STALE_MINUTES)})
+    OR (t.state = 'failed' AND t.updated_at > ${ago(RETRY_AFTER_MINUTES)})))`;
+
 export async function pendingCounts(db: D1Database): Promise<Record<Task, number>> {
-  const rows = await db.batch(
-    TASKS.map((task) => db.prepare(`SELECT count(DISTINCT f.sha256) AS n FROM files f WHERE ${WANTED[task]}`)),
-  );
-  return Object.fromEntries(TASKS.map((task, i) => [task, (rows[i].results[0] as { n: number }).n])) as Record<Task, number>;
+  const rows = await db.batch([
+    ...TASKS.map((task) => db.prepare(`SELECT count(DISTINCT f.sha256) AS n FROM files f WHERE ${WANTED[task]}`)),
+    db.prepare(`SELECT count(*) AS n FROM pictures p WHERE ${WANTED_PICTURES}`),
+  ]);
+  const counts = Object.fromEntries(TASKS.map((task, i) => [task, (rows[i].results[0] as { n: number }).n])) as Record<Task, number>;
+  counts.derive += (rows[TASKS.length].results[0] as { n: number }).n;
+  return counts;
 }
 
 export interface TaskItem {
@@ -92,6 +109,7 @@ export async function taskItems(db: D1Database, task: Exclude<Task, 'check'>, li
     .all<Omit<TaskItem, 'format'> & { format: string | null }>();
   const items: TaskItem[] = results.map((r) => ({ ...r, format: r.format ? JSON.parse(r.format) : null }));
   if (task !== 'derive') return items;
+  if (kind !== 'video' && items.length < limit) items.push(...(await pictureItems(db, limit - items.length)));
 
   // Contents with the same decoded audio share one set of stream files: hand over what already exists.
   const pcm = [...new Set(items.map((i) => i.pcm_md5).filter((p): p is string => !!p))];
@@ -114,6 +132,25 @@ export async function taskItems(db: D1Database, task: Exclude<Task, 'check'>, li
     );
   }
   return items;
+}
+
+/** Embedded pictures still to derive (WANTED_PICTURES), as image contents. */
+async function pictureItems(db: D1Database, limit: number): Promise<TaskItem[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT p.sha256, p.mime, p.size, p.width, p.height FROM pictures p WHERE ${WANTED_PICTURES}
+       ORDER BY p.created_at DESC LIMIT ?`,
+    )
+    .bind(limit)
+    .all<{ sha256: string; mime: string; size: number; width: number | null; height: number | null }>();
+  const EXT: Record<string, string> = { 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'image/bmp': 'bmp' };
+  return results.map((p) => {
+    const ext = EXT[p.mime] ?? 'jpg';
+    return {
+      sha256: p.sha256, name: `embedded-picture-${p.sha256.slice(0, 12)}.${ext}`, ext, kind: 'image', size: p.size,
+      format: { width: p.width, height: p.height }, pcm_md5: null,
+    };
+  });
 }
 
 /** Take a content for a task; false when it is being worked on, done, or given up. */

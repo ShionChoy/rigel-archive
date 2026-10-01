@@ -14,6 +14,8 @@ import { Places } from '../../../lib/locations';
 import { LANGS, saveInfo, saveTranslations } from '../../../lib/releases';
 import { formatMs, loadTracks, sameTitleSongs, saveTracks } from '../../../lib/tracks';
 import { NEW_TYPE } from '../../../lib/types';
+import { siteLangOf } from '../../../lib/public/paths';
+import { FILED_FILE, PUBLIC_EDITION } from '../../../lib/public/rules';
 
 const { id } = Astro.params;
 const { t, lang } = Astro.locals;
@@ -91,6 +93,16 @@ if (tracks.length) {
     .all<{ id: string; title: string; n: number }>();
   for (const s of results) songTitles.set(s.id, s.n > 1 ? t('{title}（{n} 个版本）', { title: s.title, n: s.n }) : s.title);
 }
+// 公开站: what the public site shows of this release (lib/public/rules.ts) — its collected editions, less the
+// files whose rights are not set yet.
+const publicState = await database
+  .prepare(
+    `SELECT (SELECT count(*) FROM editions e WHERE e.release_id = ?1 AND ${PUBLIC_EDITION}) AS editions,
+            (SELECT count(*) FROM files f JOIN editions e ON e.id = f.edition_id WHERE e.release_id = ?1 AND ${PUBLIC_EDITION} AND ${FILED_FILE} AND f.rights = 'unknown') AS unsettled`,
+  )
+  .bind(release.id)
+  .first<{ editions: number; unsettled: number }>();
+const publicHref = `/${siteLangOf(lang)}/works/${release.id}/`;
 const tr = (field: string, code: string) => translations.results.find((x) => x.field === field && x.lang === code)?.value ?? '';
 const LANG_NAMES: Record<string, string> = { zh: N_('中文'), ja: N_('日文'), en: N_('英文') };
 const editionLabel = (e: { slot: string; name: string }) => places.editionLabel(e, t);
@@ -108,8 +120,15 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
   <p class="muted">
     {(await loadForms()).label(release.form, t)} · {release.release_date ?? t('日期未知')} ·
     <a href={`/admin/releases/${release.id}/preview`}>{t('预览公开页')}</a> ·
+    {release.state === 'published' && <><a href={publicHref}>{t('在公开站打开')}</a> ·</>}
     <a href={`/admin/history?release=${release.id}`}>{t('这个作品的修改记录')}</a> ·
     <a href={`/admin/inbox?loc=rel:${release.id}`}>{t('在整理台打开这个作品的文件夹')}</a>
+  </p>
+
+  <p class="muted small public-state">
+    {release.state === 'published' ? t('公开站：已发布') : t('公开站：草稿，不公开')} ·
+    {t('{n} 个版本可以公开（已收录或部分缺档）', { n: publicState?.editions ?? 0 })}
+    {(publicState?.unsettled ?? 0) > 0 && <> · <a href="/admin/checks#unsettled">{t('{n} 个文件权属未定，公开站不显示', { n: publicState?.unsettled ?? 0 })}</a></>}
   </p>
 
   <h2 id="editions">{t('版本')}</h2>

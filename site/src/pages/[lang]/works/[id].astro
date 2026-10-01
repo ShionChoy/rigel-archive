@@ -1,0 +1,55 @@
+---
+// 作品页 (设计文档「公开站方案」): the album page shared with the admin's 预览公开页 (components/ReleaseView.astro,
+// lib/release-view.ts), for published works only, with the public site's signed addresses and no downloads
+// yet (they come with accounts, 第 3 阶段). ?edition= chooses an edition, ?view=compare shows 版本对照.
+import { env } from 'cloudflare:workers';
+import Site from '../../../layouts/Site.astro';
+import ReleaseView from '../../../components/ReleaseView.astro';
+import { db } from '../../../lib/db';
+import { isSiteLang } from '../../../lib/i18n';
+import { publicEras } from '../../../lib/public/catalog';
+import { NO_MEDIA, publicUrls } from '../../../lib/public/media';
+import { pagesFor } from '../../../lib/public/paths';
+import { loadReleaseView } from '../../../lib/release-view';
+
+if (!isSiteLang(Astro.params.lang)) return new Response(null, { status: 404 });
+const { t, lang } = Astro.locals;
+const database = db();
+const id = Astro.params.id ?? '';
+const published = await database.prepare("SELECT id, links FROM releases WHERE id = ? AND state = 'published'").bind(id).first<{ id: string; links: string }>();
+if (!published) return new Response(null, { status: 404 });
+const pages = pagesFor(lang);
+const view = await loadReleaseView(database, env.MEDIA, {
+  releaseId: published.id,
+  editionId: Astro.url.searchParams.get('edition'),
+  compare: Astro.url.searchParams.get('view') === 'compare',
+  t, lang,
+  urls: publicUrls() ?? NO_MEDIA,
+  links: { song: (songId) => pages.song(songId), editionDownload: () => null, fileDownload: () => null },
+  readBudgetMs: 2000,
+});
+if (!view) return new Response(null, { status: 404 });
+const eras = await publicEras(database, lang);
+view.release.era_name = eras.find((e) => e.id === view.release.era_id)?.name ?? view.release.era_name;
+
+// The release's own pages: the circle's special page, shops, streaming.
+const LINK_LABELS: Record<string, string> = {
+  official: t('官方特设页'), bandcamp: 'Bandcamp', booth: 'BOOTH', dlsite: 'DLsite', melonbooks: 'メロンブックス',
+  alicebooks: 'アリスブックス', diverse: 'Diverse Direct', youtube: 'YouTube', soundcloud: 'SoundCloud', spotify: 'Spotify', apple: 'Apple Music',
+};
+let raw: Record<string, unknown> = {};
+try {
+  raw = JSON.parse(published.links || '{}') as Record<string, unknown>;
+} catch {
+  // no links
+}
+const links = Object.entries(raw)
+  .filter((e): e is [string, string] => typeof e[1] === 'string' && /^https?:\/\//.test(e[1]))
+  .map(([key, href]) => ({ label: LINK_LABELS[key] ?? key, href }));
+const { release, chosen } = view;
+const description = [view.subline, chosen?.subline].filter(Boolean).join(' · ') || null;
+---
+
+<Site title={chosen && view.editions.length > 1 ? `${release.title} · ${chosen.name}` : release.title} section="works" description={description} image={chosen?.covers[0]?.src ?? null}>
+  <ReleaseView view={view} url={Astro.url} eraHref={pages.works({ era: release.era_id })} links={links} />
+</Site>

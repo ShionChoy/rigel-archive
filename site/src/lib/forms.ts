@@ -24,9 +24,9 @@ export function kindOf(form: string | null): string {
   return form && ORIGINAL.includes(form) ? form : 'other';
 }
 
-/** The name of a form in the admin's language (the Japanese one falls back to the Chinese). */
-export function formName(form: Pick<ReleaseForm, 'name_zh' | 'name_ja'>, t: T): string {
-  return t.lang === 'ja' ? form.name_ja || form.name_zh : form.name_zh;
+/** The name of a form in the page's language (the Japanese and English ones fall back to the Chinese). */
+export function formName(form: Pick<ReleaseForm, 'name_zh' | 'name_ja' | 'name_en'>, t: T): string {
+  return t.lang === 'ja' ? form.name_ja || form.name_zh : t.lang === 'en' ? form.name_en || form.name_zh : form.name_zh;
 }
 
 /** The forms in their order, loaded once per request. */

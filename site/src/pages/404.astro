@@ -1,0 +1,21 @@
+---
+// Not found, on the public site (in the language of the address, else the visitor's) and for anything else.
+import Site from '../layouts/Site.astro';
+import { translator } from '../lib/i18n';
+import { langOfPath, pagesFor } from '../lib/public/paths';
+
+const lang = langOfPath(Astro.url.pathname) ?? (Astro.locals.lang ?? 'zh');
+Astro.locals.lang = lang;
+Astro.locals.t = translator(lang);
+const { t } = Astro.locals;
+const pages = pagesFor(lang);
+Astro.response.status = 404;
+---
+
+<Site title={t('找不到这个页面')}>
+  <div class="page page-narrow">
+    <h1>{t('找不到这个页面')}</h1>
+    <p class="lead">{t('它可能已经移动，或者还没有公开。')}</p>
+    <p><a class="button" href={pages.works()}>{t('浏览全部作品')}</a> <a class="button" href={pages.home}>{t('回到首页')}</a></p>
+  </div>
+</Site>
