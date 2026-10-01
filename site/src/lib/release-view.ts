@@ -295,9 +295,15 @@ export async function loadReleaseView(
   });
   // Tracks whose audio this edition has, but not to play here (the public site's rights rules).
   const heldBack = new Set(filesResult.results.filter((f) => f.edition_id === chosen.id && f.kind === 'audio' && f.track_id && !isOpen(f)).map((f) => f.track_id));
+  /** The one value the tracks that have the tag agree on (null when none has it or they differ). */
   const common = (name: string): string | null => {
-    const values = raws.map((l) => (l.tags[name] ?? []).join('; '));
-    return values.length && values.every((v) => v === values[0]) && values[0] ? values[0] : null;
+    const values = new Set(raws.map((l) => (l.tags[name] ?? []).join('; ')).filter(Boolean));
+    return values.size === 1 ? [...values][0] : null;
+  };
+  /** Every value the tracks give the tag, each once, in track order: tracks without it (instrumentals for 作词) add nothing. */
+  const allValues = (name: string): string | null => {
+    const values = new Set(raws.flatMap((l) => l.tags[name] ?? []).map((v) => v.trim()).filter(Boolean));
+    return values.size ? [...values].join(' / ') : null;
   };
   const covers = coversOf(chosen);
   const total = raws.reduce((s, l) => s + (l.seconds ?? 0), 0);
@@ -308,11 +314,11 @@ export async function loadReleaseView(
   const ids = parseIds(chosen.external_ids);
   const withTracks = raws.length > 0;
   const credits = ([
-    [t('艺术家'), common('albumartist') ?? common('artist')],
-    [t('作曲'), common('composer')],
-    [t('作词'), common('lyricist')],
-    [t('编曲'), common('arranger')],
-    [t('厂牌'), common('label')],
+    [t('艺术家'), allValues('albumartist') ?? allValues('artist')],
+    [t('作曲'), allValues('composer')],
+    [t('作词'), allValues('lyricist')],
+    [t('编曲'), allValues('arranger')],
+    [t('厂牌'), allValues('label')],
     [t('来源'), chosen.source],
   ] as [string, string | null][]).filter((c): c is [string, string] => !!c[1]);
 
