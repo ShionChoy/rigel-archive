@@ -67,6 +67,8 @@ export interface ReleaseView {
   release: ReleaseRow & { era_name: string };
   formLabel: string;
   subline: string; // subtitle · years · editions
+  /** The release's own pages elsewhere (its 链接): the circle's special page, shops, streaming. */
+  pages: { label: string; href: string }[];
   editions: NavEdition[];
   chosen: ChosenView | null;
   compare: Awaited<ReturnType<typeof comparison>> | null;
@@ -93,6 +95,23 @@ const readable = (f: F) => ['text', 'playlist'].includes(f.kind) || /^(log|cue|t
 export function audioQuality(format: string | null): number {
   const fmt = parseFormat(format);
   return (fmt.lossless ? 1e6 : 0) + (fmt.bits ?? 0) * 1e3 + (fmt.rate ?? 0) / 1e3 + (fmt.kbps ?? 0) / 1e3;
+}
+
+/** A release's 链接 («name URL» lines in the admin, kept as JSON) as the page shows them: known names get their label. */
+function releasePages(raw: string, t: T): { label: string; href: string }[] {
+  const labels: Record<string, string> = {
+    official: t('官方特设页'), bandcamp: 'Bandcamp', booth: 'BOOTH', dlsite: 'DLsite', melonbooks: 'メロンブックス',
+    alicebooks: 'アリスブックス', diverse: 'Diverse Direct', youtube: 'YouTube', soundcloud: 'SoundCloud', spotify: 'Spotify', apple: 'Apple Music',
+  };
+  let links: Record<string, unknown> = {};
+  try {
+    links = JSON.parse(raw || '{}') as Record<string, unknown>;
+  } catch {
+    // no links
+  }
+  return Object.entries(links)
+    .filter((e): e is [string, string] => typeof e[1] === 'string' && /^https?:\/\//.test(e[1]))
+    .map(([key, href]) => ({ label: labels[key] ?? key, href }));
 }
 
 /** Which translation of a release's title a reader sees first under the original. */
@@ -242,6 +261,7 @@ export async function loadReleaseView(
     release,
     formLabel: forms.label(release.form, t),
     subline: [subtitles[0], years.length ? (years.length > 1 ? `${years[0]}–${years.at(-1)}` : years[0]) : release.release_date, shown.length ? t('{n} 个版本', { n: shown.length }) : null].filter(Boolean).join(' · '),
+    pages: releasePages(release.links, t),
     editions: shown.map((e) => ({ id: e.id, name: editionName(e), sub: navSub(e), cover: coversOf(e)[0]?.src ?? null })),
     chosen: null,
     compare: compareView ? await publicComparison(release.id, new Set(shown.map((e) => e.id))) : null,

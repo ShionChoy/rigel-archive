@@ -12,10 +12,9 @@ interface Props {
   view: ReleaseView;
   url: URL; // this page's address (the editions link to it with ?edition= / ?view=compare)
   eraHref?: string | null; // the era's page (the public site's works list for it)
-  links?: { label: string; href: string }[]; // the release's official and shop pages
 }
 
-const { view, url, eraHref = null, links = [] } = Astro.props;
+const { view, url, eraHref = null } = Astro.props;
 const { t } = Astro.locals;
 const { release, chosen, compare } = view;
 const editionHref = (id: string) => withParams(url, { edition: id, view: null });
@@ -31,9 +30,9 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
   <div class="kicker">{eraHref ? <a href={eraHref}>{release.era_name}</a> : release.era_name} · {view.formLabel}</div>
   <h1>{release.title}</h1>
   <div class="sub">{view.subline}</div>
-  {links.length > 0 && (
+  {view.pages.length > 0 && (
     <div class="release-links">
-      {links.map((l) => <a href={l.href} target="_blank" rel="noopener">{l.label} ↗</a>)}
+      {view.pages.map((l) => <a href={l.href} target="_blank" rel="noopener">{l.label} ↗</a>)}
     </div>
   )}
 
