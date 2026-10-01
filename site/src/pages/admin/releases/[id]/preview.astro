@@ -66,7 +66,7 @@ const publicHref = release.state === 'published' ? `/${siteLangOf(lang)}/works/$
       <a href={`/admin/releases/${release.id}`}>{t('← 回到作品编辑')}</a>
       {chosen && <> · <a href={`/admin/editions/${chosen.id}`}>{t('编辑这个版本')}</a></>}
       {publicHref ? <> · <a href={publicHref}>{t('在公开站打开')}</a></> : ` · ${t('本作品还是草稿，不会公开')}`}
-      {view.unsettled > 0 && <> · <span class="warn">{t('这个版本有 {n} 个文件权属未定，公开站不显示', { n: view.unsettled })}</span></>}
+      {view.unsettled > 0 && chosen && <> · <a class="warn" href={`/admin/editions/${chosen.id}#public`}>{t('这个版本有 {n} 个文件权属未定，公开站不显示 › 设定权属', { n: view.unsettled })}</a></>}
     </div>
     <ReleaseView view={view} url={Astro.url} />
     <Player />

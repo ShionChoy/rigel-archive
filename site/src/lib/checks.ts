@@ -135,8 +135,8 @@ export async function runChecks(t: T): Promise<Check[]> {
     ...cap((sure.results as { dir: string; n: number }[]).map((d) => ({ label: d.dir || '/', href: `/admin/inbox?view=unplaced&dir=${encodeURIComponent(d.dir)}`, detail: t('{n} 个', { n: d.n }) }))),
   });
   checks.push({
-    id: 'unsettled', title: N_('已发布的作品里有权属未定的文件'), hint: N_('公开站不显示权属未定的文件：在整理台选中这些文件，设为社团自有、已获授权或第三方。'),
-    ...cap((unsettled.results as (EditionInfo & { n: number })[]).map((e) => edItem(e, t('{n} 个', { n: e.n })))),
+    id: 'unsettled', title: N_('已发布的作品里有权属未定的文件'), hint: N_('公开站不显示权属未定的文件：在版本页的「公开站」里一次设为社团自有、已获授权或第三方。'),
+    ...cap((unsettled.results as (EditionInfo & { n: number })[]).map((e) => ({ ...edItem(e, t('{n} 个', { n: e.n })), href: `/admin/editions/${e.id}#public` }))),
   });
   checks.push({
     id: 'bare', title: N_('已发布的作品没有已收录的版本'), hint: N_('公开站上只显示这些作品的资料，没有可以播放或查看的内容。'),

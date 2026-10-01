@@ -15,7 +15,9 @@ import { LANGS, saveInfo, saveTranslations } from '../../../lib/releases';
 import { formatMs, loadTracks, sameTitleSongs, saveTracks } from '../../../lib/tracks';
 import { NEW_TYPE } from '../../../lib/types';
 import { siteLangOf } from '../../../lib/public/paths';
-import { FILED_FILE, PUBLIC_EDITION } from '../../../lib/public/rules';
+import { PUBLIC_EDITION_STATUSES } from '../../../lib/public/rules';
+import { RIGHTS_LABELS } from '../../../lib/constants';
+import { rightsOf, setRights } from '../../../lib/rights';
 
 const { id } = Astro.params;
 const { t, lang } = Astro.locals;
@@ -47,6 +49,13 @@ if (Astro.request.method === 'POST') {
       case 'merge':
         msg = saved(await mergeTracks(actor, release, String(form.get('keep') ?? ''), String(form.get('drop') ?? '')));
         break;
+      case 'rights': {
+        // The files not set yet in the editions the public site shows.
+        const shown = (await loadEditions(release.id)).filter((e) => PUBLIC_EDITION_STATUSES.includes(e.status));
+        const n = await setRights(actor, release, shown, form.get('rights'), false);
+        msg = n ? t('已设定 {n} 个文件的权属', { n }) : t('没有改动');
+        break;
+      }
       default:
         throw new UserError('未知的表单');
     }
@@ -95,13 +104,10 @@ if (tracks.length) {
 }
 // 公开站: what the public site shows of this release (lib/public/rules.ts) — its collected editions, less the
 // files whose rights are not set yet.
-const publicState = await database
-  .prepare(
-    `SELECT (SELECT count(*) FROM editions e WHERE e.release_id = ?1 AND ${PUBLIC_EDITION}) AS editions,
-            (SELECT count(*) FROM files f JOIN editions e ON e.id = f.edition_id WHERE e.release_id = ?1 AND ${PUBLIC_EDITION} AND ${FILED_FILE} AND f.rights = 'unknown') AS unsettled`,
-  )
-  .bind(release.id)
-  .first<{ editions: number; unsettled: number }>();
+const rightsBy = await rightsOf(editions.map((e) => e.id));
+const shownEditions = editions.filter((e) => PUBLIC_EDITION_STATUSES.includes(e.status));
+const unsettledOf = (e: { id: string; status: string }) => (shownEditions.some((x) => x.id === e.id) ? rightsBy.get(e.id)?.unknown ?? 0 : 0);
+const unsettled = shownEditions.reduce((n, e) => n + unsettledOf(e), 0);
 const publicHref = `/${siteLangOf(lang)}/works/${release.id}/`;
 const tr = (field: string, code: string) => translations.results.find((x) => x.field === field && x.lang === code)?.value ?? '';
 const LANG_NAMES: Record<string, string> = { zh: N_('中文'), ja: N_('日文'), en: N_('英文') };
@@ -127,9 +133,22 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
 
   <p class="muted small public-state">
     {release.state === 'published' ? t('公开站：已发布') : t('公开站：草稿，不公开')} ·
-    {t('{n} 个版本可以公开（已收录或部分缺档）', { n: publicState?.editions ?? 0 })}
-    {(publicState?.unsettled ?? 0) > 0 && <> · <a href="/admin/checks#unsettled">{t('{n} 个文件权属未定，公开站不显示', { n: publicState?.unsettled ?? 0 })}</a></>}
+    {t('{n} 个版本可以公开（已收录或部分缺档）', { n: shownEditions.length })}
+    {release.state !== 'published' && <> · <a href="#info">{t('在「基本信息」里发布')}</a></>}
   </p>
+  {unsettled > 0 && (
+    <form method="post" class="inline-form public-rights">
+      <input type="hidden" name="section" value="rights" />
+      <input type="hidden" name="anchor" value="editions" />
+      <span class="chip unknown">{t('{n} 个文件权属未定，公开站不显示', { n: unsettled })}</span>
+      {t('一次设为：')}
+      <select name="rights" aria-label={t('权属')}>
+        {(['own', 'licensed', 'third_party'] as const).map((r) => <option value={r}>{t(RIGHTS_LABELS[r])}</option>)}
+      </select>
+      <button type="submit" class="primary">{t('设定')}</button>
+      <span class="muted small">{t('只改上面可以公开的版本里权属未定的文件；要分版本或逐个文件设定，到各版本页。')}</span>
+    </form>
+  )}
 
   <h2 id="editions">{t('版本')}</h2>
   <div class="panel">
@@ -155,7 +174,10 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
               </td>
               <td>{e.catalog_no ?? ''}</td>
               <td>{e.release_date ?? ''}</td>
-              <td><span class={`chip ${e.status}`}>{t(EDITION_STATUS_LABELS[e.status])}</span></td>
+              <td>
+                <span class={`chip ${e.status}`}>{t(EDITION_STATUS_LABELS[e.status])}</span>
+                {unsettledOf(e) > 0 && <a class="chip unknown" href={`/admin/editions/${e.id}#public`} title={t('公开站不显示这些文件；到版本页设定权属')}>{t('{n} 个权属未定', { n: unsettledOf(e) })}</a>}
+              </td>
               <td class="num">{trackCount.get(e.id) ?? 0}{e.track_count && e.track_count !== (trackCount.get(e.id) ?? 0) ? <span class="muted"> / {e.track_count}</span> : null}</td>
               <td class="num"><a href={`/admin/inbox?loc=ed:${e.id}&sub=1`}>{filesIn(e.id)}</a></td>
               <td>{ids.musicbrainz_release && <a href={`https://musicbrainz.org/release/${ids.musicbrainz_release}`} target="_blank" rel="noopener" title="MusicBrainz">MB</a>}</td>
@@ -303,7 +325,7 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
     </p>
   </form>
 
-  <h2>{t('基本信息')}</h2>
+  <h2 id="info">{t('基本信息')}</h2>
   <form method="post" class="panel" data-unsaved={t('基本信息')}>
     <input type="hidden" name="section" value="info" />
     <ReleaseFields release={release} />

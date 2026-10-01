@@ -7,7 +7,7 @@ import Admin from '../../../layouts/Admin.astro';
 import Dialogs from '../../../components/desk/Dialogs.astro';
 import FolderIcon from '../../../components/desk/FolderIcon.astro';
 import PlacePicker from '../../../components/PlacePicker.astro';
-import { FILE_KIND_LABELS } from '../../../lib/constants';
+import { FILE_KIND_LABELS, RIGHTS_LABELS } from '../../../lib/constants';
 import { editionCovers } from '../../../lib/covers';
 import { db, parseFormat, type EditionRow, type FileRow, type ReleaseRow } from '../../../lib/db';
 import {
@@ -24,9 +24,12 @@ import { COVER_SQL } from '../../../lib/tagedit';
 import { editionContext, nameParts, preloadOriginals, taggedSource } from '../../../lib/tags';
 import { NAMING_PRESETS } from '../../../lib/naming';
 import { NEW_TYPE } from '../../../lib/types';
+import { rightsOf, setRights } from '../../../lib/rights';
+import { siteLangOf } from '../../../lib/public/paths';
+import { PUBLIC_EDITION_STATUSES } from '../../../lib/public/rules';
 
 const { id } = Astro.params;
-const { t } = Astro.locals;
+const { t, lang } = Astro.locals;
 const database = db();
 const edition = await database.prepare('SELECT * FROM editions WHERE id = ?').bind(id).first<EditionRow>();
 if (!edition) return new Response(t('找不到版本'), { status: 404 });
@@ -57,6 +60,11 @@ if (Astro.request.method === 'POST') {
         msg = r.left ? t('已对应 {n} 个文件，{left} 个没找到对应曲目，请手动选择', { n: r.matched, left: r.left }) : t('已对应 {n} 个文件', { n: r.matched });
         break;
       }
+      case 'rights': {
+        const n = await setRights(actor, release, [edition], form.get('rights'), form.get('scope') === 'all');
+        msg = n ? t('已设定 {n} 个文件的权属', { n }) : t('没有改动');
+        break;
+      }
       case 'cover': {
         // An edition without a track list: its cover is one of its pictures (or, unset, one named like a cover).
         const fileId = String(form.get('cover_file_id') ?? '') || null;
@@ -83,13 +91,13 @@ const places = await Places.load();
 type F = Pick<
   FileRow,
   'id' | 'name' | 'download_name' | 'ext' | 'size' | 'kind' | 'state' | 'dir' | 'folder_id' | 'track_id' | 'format' | 'sha256' | 'blob_key' | 'origin' | 'mtime'
-  | 'edition_id' | 'sealed'
+  | 'edition_id' | 'sealed' | 'rights'
 > & { old: number };
 const [siblings, filesResult, audio] = await Promise.all([
   loadEditions(release.id, places.types),
   database
     .prepare(
-      `SELECT id, name, download_name, ext, size, kind, state, dir, folder_id, track_id, format, sha256, blob_key, origin, mtime, edition_id, sealed,
+      `SELECT id, name, download_name, ext, size, kind, state, dir, folder_id, track_id, format, sha256, blob_key, origin, mtime, edition_id, sealed, rights,
               EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id) AS old
        FROM files f WHERE edition_id = ? AND sealed_in IS NULL ORDER BY coalesce(download_name, name)`,
     )
@@ -158,6 +166,12 @@ const thumb = (f: F, size: 240 | 640 = 240) => imageSrc(f.blob_key ? `/admin/med
 const covers = withTracks ? [] : (await editionCovers([edition.id])).get(edition.id) ?? [];
 const coverChoices = images.filter((f) => /^(jpe?g|png)$/i.test(f.ext) && f.size < 12_000_000);
 const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
+// 公开站: whether the public site shows this edition (a published work, an edition collected at least in
+// part) and which of its files (by their rights, lib/public/rules.ts).
+const rights = (await rightsOf([edition.id])).get(edition.id)!;
+const workPublished = release.state === 'published';
+const editionShown = PUBLIC_EDITION_STATUSES.includes(edition.status);
+const publicHref = `/${siteLangOf(lang)}/works/${release.id}/?edition=${edition.id}`;
 ---
 
 <Admin title={`${release.catalog_no ? `${release.catalog_no} ` : ''}${release.title} · ${label}`} wide heading={false}>
@@ -178,6 +192,43 @@ const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
       <a class="button" href={`/admin/history?release=${release.id}`}>{t('修改记录')}</a>
     </div>
   </header>
+
+  <section class="panel ed-public" id="public">
+    <h2>{t('公开站')}</h2>
+    <p class="pub-line">
+      {!workPublished ? (
+        <><span class="chip unknown">{t('不显示')}</span> {t('作品还是草稿。')} <a href={`/admin/releases/${release.id}#info`}>{t('到作品页发布 ›')}</a></>
+      ) : !editionShown ? (
+        <><span class="chip unknown">{t('不显示')}</span> {t('本版状态为「{status}」：只有已收录、部分缺档的版本显示在公开站。', { status: t(EDITION_STATUS_LABELS[edition.status]) })}</>
+      ) : (
+        <><span class="chip collected">{t('显示中')}</span> {t('作品已发布，本版显示在作品页。')} <a href={publicHref}>{t('在公开站打开 ›')}</a></>
+      )}
+    </p>
+    {rights.total > 0 ? (
+      <>
+        <p class="pub-line">
+          {t('本版 {n} 个文件的权属：', { n: rights.total })}
+          {(['own', 'licensed', 'third_party', 'unknown'] as const).filter((r) => rights[r] > 0).map((r) => <span class={`chip ${r}`}>{t(RIGHTS_LABELS[r])} {rights[r]}</span>)}
+          {rights.unknown > 0 && <b class="pub-warn">{t('权属未定的 {n} 个文件在公开站不显示。', { n: rights.unknown })}</b>}
+        </p>
+        <form method="post" class="inline-form pub-form">
+          <input type="hidden" name="section" value="rights" />
+          <input type="hidden" name="anchor" value="public" />
+          {t('批量设定权属：')}
+          <select name="scope" aria-label={t('哪些文件')}>
+            {rights.unknown > 0 && <option value="unknown">{t('权属未定的 {n} 个文件', { n: rights.unknown })}</option>}
+            <option value="all">{t('本版全部 {n} 个文件', { n: rights.total })}</option>
+          </select>
+          <span aria-hidden="true">→</span>
+          <select name="rights" aria-label={t('权属')}>
+            {(['own', 'licensed', 'third_party'] as const).map((r) => <option value={r}>{t(RIGHTS_LABELS[r])}</option>)}
+          </select>
+          <button type="submit" class:list={{ primary: rights.unknown > 0 }}>{t('设定')}</button>
+        </form>
+        <p class="muted small">{t('公开站播放和展示社团自有、已获授权的文件；第三方的只列名称；权属未定的不显示。单个文件可以在下面「文件」里右键设定。')}</p>
+      </>
+    ) : <p class="muted small">{t('本版还没有文件。')}</p>}
+  </section>
 
   {withTracks ? (
     <div class="ed-top">
@@ -346,7 +397,7 @@ const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
         <thead>
           <tr>
             <th class="sel"><input type="checkbox" data-sel-all aria-label={t('全选')} /></th>
-            <th>{t('名称')}</th><th>{t('类型')}</th><th>{t('规格')}</th><th class="num">{t('大小')}</th><th>{t('下载')}</th><th class="row-menu"></th>
+            <th>{t('名称')}</th><th>{t('类型')}</th><th>{t('规格')}</th><th class="num">{t('大小')}</th><th>{t('权属')}</th><th>{t('下载')}</th><th class="row-menu"></th>
           </tr>
         </thead>
         <tbody>
@@ -360,7 +411,7 @@ const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
                 <FolderIcon kind={depth === 0 ? 'edition' : 'plain'} />
                 <a class="fname" href={`/admin/inbox?loc=${folderKey(node.id)}`} title={t('在整理台中显示')}>{node.name}</a>
               </td>
-              <td colspan="4" class="muted small">{node.count ? t('{n} 个文件', { n: node.count }) : t('空文件夹')}</td>
+              <td colspan="5" class="muted small">{node.count ? t('{n} 个文件', { n: node.count }) : t('空文件夹')}</td>
               <td class="row-menu"><button type="button" class="link" data-row-menu aria-label={t('更多操作')} title={t('更多操作')}>⋯</button></td>
             </tr>
           ) : f ? (
@@ -380,6 +431,7 @@ const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
               <td>{kindLabel(f.kind)}</td>
               <td class="spec">{formatSpec(parseFormat(f.format))}</td>
               <td class="num">{formatBytes(f.size)}</td>
+              <td>{f.state !== 'ignored' && !f.old && <span class={`chip ${f.rights}`}>{t(RIGHTS_LABELS[f.rights])}</span>}</td>
               <td class="downloads">
                 {taggedNames.has(f.id) && <a href={`/admin/download/${f.id}?tagged=1`} title={t('下载为「{name}」', { name: taggedNames.get(f.id)! })}>{t('带标签')}</a>}
                 {f.blob_key && <a href={`/admin/download/${f.id}`} title={t('下载为「{name}」（与收录时完全相同）', { name: f.download_name || f.name })}>{f.kind === 'audio' ? t('原件') : t('下载')}</a>}

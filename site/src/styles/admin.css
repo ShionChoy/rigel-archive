@@ -786,7 +786,13 @@ details.native summary { cursor: pointer; color: var(--muted); font-size: 12px; 
 .ed-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .ed-top { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
 .ed-top > .panel { margin: 0; }
-.ed-info h2, .ed-cover h2, .ed-archive h2, .ed-tracks h2, .ed-files h2 { font-size: 16px; margin: 0 0 8px; }
+.ed-info h2, .ed-cover h2, .ed-archive h2, .ed-tracks h2, .ed-files h2, .ed-public h2 { font-size: 16px; margin: 0 0 8px; }
+/* 公开站: whether the public site shows the edition, its files by rights, and setting them at once */
+.ed-public .pub-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0 0 6px; }
+.pub-warn { color: var(--ask); font-weight: 600; }
+.ed-public .pub-form { margin: 8px 0 4px; }
+.pub-form select, .public-rights select { width: auto; }
+.public-rights { margin: -4px 0 14px; }
 .ed-info h2 small, .ed-archive h2 small, .ed-tracks h2 small, .ed-files h2 small { font-weight: 400; font-size: 12px; }
 .album-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr); gap: 8px 12px; align-items: center; }
 .album-grid > label { text-align: right; color: var(--muted); font-size: 13px; }

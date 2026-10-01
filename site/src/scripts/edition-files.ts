@@ -148,8 +148,11 @@ async function refresh() {
     return;
   }
   section.innerHTML = fresh.innerHTML;
-  const del = doc.querySelector('#ed-delete');
-  if (del) $('#ed-delete')?.replaceChildren(...[...del.childNodes].map((n) => document.importNode(n, true)));
+  // The delete button and 公开站 (its counts by rights) follow the files.
+  for (const sel of ['#ed-delete', '#public']) {
+    const part = doc.querySelector(sel);
+    if (part) $(sel)?.replaceChildren(...[...part.childNodes].map((n) => document.importNode(n, true)));
+  }
   const options = doc.querySelector('#place-picker [data-options]');
   const mine = $('#place-picker [data-options]');
   if (options && mine) {

@@ -53,6 +53,10 @@ export interface ChosenView {
   differentCovers: boolean;
   multiDisc: boolean;
   lines: Line[];
+  /** Lines with nothing to play because their audio is here but not open (rights not set, or third-party). */
+  withheld: number;
+  /** The edition's files the page does not show or play (rights not set; third-party audio). */
+  hidden: number;
   withTracks: boolean;
   attachments: Attachments[];
   download: string | null; // null: no download here (the public site's come with accounts, 第 3 阶段)
@@ -269,6 +273,8 @@ export async function loadReleaseView(
     const fmt = main ? parseFormat(main.format) : {};
     return { row, tags, src, cover: rowCover(chosen.id, row), seconds: row.duration_ms ? row.duration_ms / 1000 : fmt.duration ?? (row.entry_duration ? row.entry_duration / 1000 : null) };
   });
+  // Tracks whose audio this edition has, but not to play here (the public site's rights rules).
+  const heldBack = new Set(filesResult.results.filter((f) => f.edition_id === chosen.id && f.kind === 'audio' && f.track_id && !isOpen(f)).map((f) => f.track_id));
   const common = (name: string): string | null => {
     const values = raws.map((l) => (l.tags[name] ?? []).join('; '));
     return values.length && values.every((v) => v === values[0]) && values[0] ? values[0] : null;
@@ -354,6 +360,8 @@ export async function loadReleaseView(
       file: l.src?.id ?? null,
       song: l.row.song_id ? links.song(l.row.song_id) : null,
     })),
+    withheld: raws.filter((l) => !l.src && heldBack.has(l.row.track_id)).length,
+    hidden: filesResult.results.filter((f) => f.edition_id === chosen.id && (!isListed(f) || (f.kind === 'audio' && !isOpen(f)))).length,
     withTracks,
     attachments,
     download: links.editionDownload(chosen.id),

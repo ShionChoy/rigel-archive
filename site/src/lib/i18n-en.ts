@@ -82,6 +82,8 @@ export const EN: Record<string, string> = {
   '曲目': 'Tracks',
   '播放 {title}': 'Play {title}',
   '这个版本的音频还没有收录，只列出曲目。': 'The audio of this edition has not been collected yet; only its track list is shown.',
+  '这个版本的音频暂不公开，只列出曲目。': 'The audio of this edition is not public for now; only its track list is shown.',
+  '其中 {n} 首的音频暂不公开。': 'The audio of {n} {n:track|tracks} is not public for now.',
   '附件': 'Extras',
   '文件': 'Files',
   '查看': 'View',
@@ -108,7 +110,7 @@ export const EN: Record<string, string> = {
   '作品 · 版本': 'Work · edition',
   '发行日': 'Released',
   '时长': 'Length',
-  '这一版的音频还没有收录': 'The audio of this edition has not been collected yet',
+  '这一版的音频暂时不能播放': 'This edition cannot be played for now',
   '第 {n} 曲': 'track {n}',
 
   // The player
@@ -132,4 +134,6 @@ export const EN: Record<string, string> = {
   '音量': 'Volume',
   '关闭播放器': 'Close the player',
   '清空': 'Clear',
+  '这个版本的文件暂不公开。': 'The files of this edition are not public for now.',
+  '这个版本还没有收录文件。': 'No files of this edition have been collected yet.',
 };

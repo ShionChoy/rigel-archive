@@ -140,8 +140,14 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
                     ))}
                   </tbody>
                 </table>
-                {!chosen.lines.some((l) => l.sources) && <p class="muted">{t('这个版本的音频还没有收录，只列出曲目。')}</p>}
+                {!chosen.lines.some((l) => l.sources)
+                  ? <p class="muted">{chosen.withheld ? t('这个版本的音频暂不公开，只列出曲目。') : t('这个版本的音频还没有收录，只列出曲目。')}</p>
+                  : chosen.withheld > 0 && <p class="muted">{t('其中 {n} 首的音频暂不公开。', { n: chosen.withheld })}</p>}
               </section>
+            )}
+
+            {!chosen.withTracks && chosen.attachments.length === 0 && (
+              <p class="muted">{chosen.hidden ? t('这个版本的文件暂不公开。') : t('这个版本还没有收录文件。')}</p>
             )}
 
             {chosen.attachments.length > 0 && (
