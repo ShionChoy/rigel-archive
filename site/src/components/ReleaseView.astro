@@ -290,6 +290,10 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
 <script>
   // Once per visit (pages may be swapped in place by the public site's router), so everything listens on
   // the document. Tracks are played by components/Player.astro.
+  //
+  // This listens in the capture phase: the router (ClientRouter) also listens for clicks on the document and
+  // was there first, so on the way up it would take a picture's link for a page, go there and stop the
+  // player. Caught on the way down, the click is already handled (defaultPrevented) when it gets there.
   document.addEventListener('click', async (e) => {
     const target = e.target as HTMLElement;
     // The covers of an edition whose tracks carry different ones.
@@ -303,7 +307,8 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
     // Pictures and text files open over the page.
     const a = target.closest<HTMLAnchorElement>('a[data-view]');
     const box = document.querySelector<HTMLDialogElement>('#lightbox');
-    if (!a || !box) return;
+    // Ctrl / Shift / ⌘-clicks still open the file in a new tab or window.
+    if (!a || !box || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
     box.innerHTML = '';
     if (a.dataset.view === 'image') {
@@ -331,7 +336,7 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
       }
     }
     pre.textContent = text;
-  });
+  }, true);
   document.addEventListener('click', (e) => {
     // A click outside the text, or on the picture, closes it.
     const box = (e.target as HTMLElement).closest<HTMLDialogElement>('dialog.lightbox');
