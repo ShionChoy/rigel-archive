@@ -1,8 +1,9 @@
-// The cover of an edition as pages show it. Covers go with the tracks: an edition shows the covers its
-// tracks carry (one when they all carry the same, several side by side when they differ) unless one was
-// chosen by hand. An edition without audio (scans, a PV) shows a picture named like a cover (cover, front,
-// folder, 封面, 表紙 …), else its first picture. Releases have no cover of their own: where one picture is
-// needed for a release, it is the first cover of its first collected edition.
+// The cover of an edition as pages show it. Covers go with the tracks: an edition with a track list shows
+// its rows' covers (the one chosen for a row on the 版本页, else the one its file carries), the most used
+// first, as the public album page does; one without a track list shows what its audio carries, unless a
+// picture was chosen by hand. An edition without audio (scans, a PV) shows a picture named like a cover
+// (cover, front, folder, 封面, 表紙 …), else its first picture. Releases have no cover of their own: where
+// one picture is needed for a release, it is the first cover of its first collected edition.
 
 import { env } from 'cloudflare:workers';
 import { db, parseFormat } from './db';
@@ -11,6 +12,7 @@ import { ADMIN_URLS, imageSrc, pictureSrc, type MediaUrls } from './media';
 import { derivedFor } from './processing';
 import { OPEN_SQL } from './access';
 import { PREVIEW_EDGE } from './public/rules';
+import { parseCover } from './tags';
 
 export interface Cover {
   src: string; // for showing it (a WebP preview when there is one)
@@ -42,7 +44,8 @@ interface ImageRow {
 }
 
 /**
- * The covers of these editions (in order: the chosen one; or the tracks' ones, most used first; or a picture).
+ * The covers of these editions (in order: the track list's, most used first; or the chosen picture; or what
+ * the audio carries, most used first; or a picture).
  * `urls` addresses them (the admin's by default); `open` keeps to files the public site shows.
  */
 export async function editionCovers(
@@ -66,7 +69,7 @@ export async function editionCovers(
       .all<{ sha256: string }>();
     await readNow(database, env.MEDIA, results.map((r) => r.sha256), 8000).catch(() => 0);
   }
-  const [chosen, embedded, images] = await database.batch([
+  const [chosen, embedded, images, trackRows, trackCovers] = await database.batch([
     database.prepare(
       `SELECT e.id AS edition_id, f.id, f.name, f.download_name, f.sha256, f.blob_key, f.folder_id, f.format, f.size, f.ext
        FROM editions e JOIN files f ON f.id = e.cover_file_id WHERE e.id IN (SELECT value FROM json_each(?)) ${open}`,
@@ -85,12 +88,40 @@ export async function editionCovers(
          AND NOT EXISTS (SELECT 1 FROM files a WHERE a.edition_id = f.edition_id AND a.kind = 'audio' AND a.sealed_in IS NULL AND a.state != 'ignored')
        ORDER BY f.edition_id, coalesce(f.download_name, f.name)`,
     ).bind(ids),
+    database.prepare('SELECT edition_id, track_id, cover FROM edition_tracks WHERE edition_id IN (SELECT value FROM json_each(?)) ORDER BY edition_id, disc, position').bind(ids),
+    database.prepare(
+      `SELECT f.edition_id, f.track_id, m.cover FROM files f JOIN embedded m ON m.sha256 = f.sha256
+       JOIN editions e ON e.id = f.edition_id
+       WHERE f.edition_id IN (SELECT value FROM json_each(?)) AND f.kind = 'audio' AND f.track_id IS NOT NULL AND f.sealed_in IS NULL
+         AND f.state != 'ignored' AND f.dup_of IS NULL AND m.cover IS NOT NULL ${carried}
+       GROUP BY f.edition_id, f.track_id, m.cover`,
+    ).bind(ids),
   ]);
   const chosenRows = chosen.results as ImageRow[];
   const embeddedRows = embedded.results as { edition_id: string; cover: string; n: number }[];
   const imageRows = images.results as ImageRow[];
-  const derived = await derivedFor(database, [...chosenRows.map((r) => r.sha256), ...imageRows.map((r) => r.sha256), ...embeddedRows.map((r) => r.cover)]);
-  const pictures = await picturesFor(embeddedRows.map((r) => r.cover));
+  // A track list's covers: per row its chosen picture or picture file, else the picture its file carries.
+  const rowList = (trackRows.results as { edition_id: string; track_id: string; cover: string | null }[]).map((r) => ({ ...r, chosen: parseCover(r.cover) }));
+  const carriedBy = new Map<string, string>();
+  for (const r of trackCovers.results as { edition_id: string; track_id: string; cover: string }[]) {
+    if (!carriedBy.has(`${r.edition_id}/${r.track_id}`)) carriedBy.set(`${r.edition_id}/${r.track_id}`, r.cover);
+  }
+  const rowFileIds = [...new Set(rowList.map((r) => r.chosen?.file).filter((x): x is string => !!x))];
+  const rowFiles = rowFileIds.length
+    ? ((await database
+      .prepare(
+        `SELECT f.edition_id, f.id, f.name, f.download_name, f.sha256, f.blob_key, f.folder_id, f.format, f.size, f.ext FROM files f
+         LEFT JOIN editions e ON e.id = f.edition_id WHERE f.id IN (SELECT value FROM json_each(?)) ${open}`,
+      )
+      .bind(JSON.stringify(rowFileIds))
+      .all<ImageRow>()).results)
+    : [];
+  const rowFile = new Map(rowFiles.map((r) => [r.id, r]));
+  const rowPictures = rowList.flatMap((r) => [r.chosen?.picture, carriedBy.get(`${r.edition_id}/${r.track_id}`)]).filter((x): x is string => !!x);
+  const derived = await derivedFor(database, [
+    ...chosenRows.map((r) => r.sha256), ...imageRows.map((r) => r.sha256), ...embeddedRows.map((r) => r.cover), ...rowFiles.map((r) => r.sha256), ...rowPictures,
+  ]);
+  const pictures = await picturesFor([...new Set([...embeddedRows.map((r) => r.cover), ...rowPictures])]);
   const fromFile = (r: ImageRow, source: Cover['source']): Cover => {
     const fmt = parseFormat(r.format);
     // The public site shows large pictures by their previews only.
@@ -102,18 +133,38 @@ export async function editionCovers(
       width: fmt.width ?? null, height: fmt.height ?? null, mime: r.ext.toLowerCase() === 'png' ? 'image/png' : `image/${r.ext.toLowerCase()}`, size: r.size,
     };
   };
-  for (const r of chosenRows) out.set(r.edition_id, [fromFile(r, 'chosen')]);
-  for (const r of embeddedRows) {
-    if (chosenRows.some((c) => c.edition_id === r.edition_id)) continue;
-    const p = pictures.get(r.cover);
-    const list = out.get(r.edition_id) ?? [];
+  const fromPicture = (sha: string, n: number, source: Cover['source']): Cover => {
+    const p = pictures.get(sha);
     // Shown by its preview (the processing program makes them for embedded pictures too); `full` is the picture itself.
-    const src = pictureSrc(r.cover, derived.get(r.cover), size, urls) ?? '';
-    list.push({
-      src, full: opts.urls ? src : pictureUrl(r.cover), source: 'embedded', picture: r.cover, tracks: r.n,
+    const src = pictureSrc(sha, derived.get(sha), size, urls) ?? '';
+    return {
+      src, full: opts.urls ? src : pictureUrl(sha), source, picture: sha, tracks: n,
       width: p?.width ?? null, height: p?.height ?? null, mime: p?.mime ?? null, size: p?.size ?? null,
-    });
-    out.set(r.edition_id, list);
+    };
+  };
+  const byRows = new Map<string, Map<string, { n: number; make: (n: number) => Cover }>>();
+  for (const r of rowList) {
+    const counts = byRows.get(r.edition_id) ?? new Map<string, { n: number; make: (n: number) => Cover }>();
+    byRows.set(r.edition_id, counts);
+    const file = r.chosen?.file ? rowFile.get(r.chosen.file) : undefined;
+    const sha = r.chosen?.picture ?? (r.chosen?.file ? undefined : carriedBy.get(`${r.edition_id}/${r.track_id}`));
+    const key = file ? `f:${file.id}` : sha ? `p:${sha}` : null;
+    if (!key) continue;
+    const seen = counts.get(key);
+    if (seen) seen.n += 1;
+    else {
+      const source: Cover['source'] = r.chosen ? 'chosen' : 'embedded';
+      counts.set(key, { n: 1, make: file ? (n) => ({ ...fromFile(file, source), tracks: n }) : (n) => fromPicture(sha!, n, source) });
+    }
+  }
+  for (const [id, counts] of byRows) {
+    const list = [...counts.values()].sort((a, b) => b.n - a.n).map((c) => c.make(c.n)).filter((c) => c.src);
+    if (list.length) out.set(id, list);
+  }
+  for (const r of chosenRows) if (!out.has(r.edition_id)) out.set(r.edition_id, [fromFile(r, 'chosen')]);
+  for (const r of embeddedRows) {
+    if (byRows.get(r.edition_id)?.size || chosenRows.some((c) => c.edition_id === r.edition_id)) continue;
+    out.set(r.edition_id, [...(out.get(r.edition_id) ?? []), fromPicture(r.cover, r.n, 'embedded')]);
   }
   const byEdition = new Map<string, ImageRow[]>();
   for (const r of imageRows) byEdition.set(r.edition_id, [...(byEdition.get(r.edition_id) ?? []), r]);
