@@ -1,6 +1,7 @@
 // The 整理台 in the browser (pages/admin/inbox.astro): selection, the inspector, the right-click menu,
-// drag and drop, the keyboard, and moving between folders without reloading the page. The server does
-// all the work; after each action the page's parts are fetched again and swapped in.
+// drag and drop, the keyboard, the two trees (未归档 and 已归档, whose open folders list their files), and
+// moving between folders without reloading the page. The server does all the work; after each action the
+// page's parts are fetched again and swapped in.
 import { t } from './i18n';
 import { tagDialog } from './tag-dialog';
 import { initPreviews as initPreviewsIn } from './previews';
@@ -14,6 +15,7 @@ import {
   fileRequest, folderRequest, lastBatch, moreQueued, nameNewFolder, postJson, queued, renameInPlace, renameRequest, report, undoRequest,
   type Reply,
 } from './file-ops';
+import { dirNode, fileNode, folderFiles, moreNode, put, sourceLevels, type FolderFiles, type SourceLevel } from './tree';
 
 type Kind = 'plain' | 'era' | 'release' | 'edition';
 interface FolderOpt { id: string; parent: string | null; kind: Kind; name: string; raw: string; path: string; depth: number; release?: string; edition?: string }
@@ -22,6 +24,7 @@ interface DeskData {
   view: string;
   dir: string;
   sub: boolean;
+  browse: boolean; // 未归档 opened like a folder (the original folder `dir`)
   total: number;
   layout: 'list' | 'grid';
   folders: FolderOpt[];
@@ -46,7 +49,10 @@ const initTextPreviews = (el: Element) => initTextIn(el as unknown as ParentNode
 let data: DeskData;
 let folders = new Map<string, FolderOpt>();
 let kids = new Map<string | null, string[]>();
-let clipboard: { files: string[]; folders: string[] } | null = null;
+/** What an action is about: files, archive folders, and original folders of 未归档 (the files in them). */
+interface What { files: string[]; folders: string[]; dirs: string[] }
+const NOTHING = (): What => ({ files: [], folders: [], dirs: [] });
+let clipboard: What | null = null;
 let anchor: HTMLElement | null = null;
 let baseInspector = '';
 
@@ -142,25 +148,28 @@ function scopeAll(): boolean {
   return !!$<HTMLInputElement>('[data-scope-all]')?.checked;
 }
 
-/** A file action (the 整理台's own POST): on the given files, or on the whole list when 「全部」 is ticked. */
-function fileAction(action: string, ids: string[], extra: Record<string, string> = {}): Promise<boolean> {
+/**
+ * A file action (the 整理台's own POST): on the given files (and the files in the given original folders),
+ * or on the whole list when 「全部」 is ticked.
+ */
+function fileAction(action: string, ids: string[], extra: Record<string, string> = {}, dirs: string[] = []): Promise<boolean> {
   const all = scopeAll();
-  if (!all && ids.length === 0) {
+  if (!all && ids.length === 0 && dirs.length === 0) {
     toast(t('先选中文件'), { error: true });
     return Promise.resolve(false);
   }
   const search = location.search;
   return queued(async () => {
     // A large 「按建议归档」 shows what it will do first: which editions and folders it makes, where the files go.
-    if (action === 'accept' && (all || ids.length > 20)) {
+    if (action === 'accept' && (all || ids.length > 20 || dirs.length)) {
       toast(t('正在估算…'));
-      const plan = await fileRequest(action, ids, { ...extra, preview: '1' }, { all, search });
+      const plan = await fileRequest(action, ids, { ...extra, preview: '1' }, { all, search, dirs });
       if (!plan) return false;
       $('#desk-toast')!.hidden = true;
       if (!(await confirmBox(String(plan.msg ?? ''), t('按建议归档')))) return false;
     }
     toast(t('处理中…'));
-    const r = await fileRequest(action, ids, extra, { all, search });
+    const r = await fileRequest(action, ids, extra, { all, search, dirs });
     if (!r) return false;
     report(r);
     if (!moreQueued()) await refresh(true);
@@ -184,7 +193,7 @@ let loading = 0;
  * (keep = keep the selection and the place in the list). Moving around asks only for the middle and the
  * inspector; after an action (`all`) the sidebar comes too, with its new counts.
  */
-async function load(href: string, push: boolean, keep = false, all = keep) {
+async function load(href: string, push: boolean, keep = false, all = keep, select: string | null = null) {
   const token = ++loading;
   const focusAt = keep ? selectables().indexOf(document.activeElement as HTMLElement) : -1;
   const kept = keep ? selectedKeys() : [];
@@ -205,12 +214,13 @@ async function load(href: string, push: boolean, keep = false, all = keep) {
   if (push) history.pushState(null, '', href);
   const desk = $('#desk')!;
   for (const [k, v] of Object.entries((fresh as HTMLElement).dataset)) desk.dataset[k] = v ?? '';
-  for (const sel of ['#desk-top', '#desk-content', '#desk-bar', '#desk-inspector', '.desk-side .fixed', '.desk-side .quick', '.desk-side .smart', '.desk-side .folders']) {
+  for (const sel of ['#desk-top', '#desk-content', '#desk-bar', '#desk-inspector', '.desk-side .fixed', '.desk-side .quick', '.desk-side .src-sec', '.desk-side .smart', '.desk-side .folders']) {
     const next = doc.querySelector(sel);
     const here = $(sel);
     if (next && here) here.replaceWith(document.importNode(next, true));
   }
   const next = JSON.parse(doc.querySelector('#desk-data')?.textContent ?? '{}') as Partial<DeskData> & { partial?: boolean };
+  const withSidebar = !next.partial;
   if (next.partial) {
     // Only this view's part: the folders, smart folders and the rest stay as they are.
     delete next.partial;
@@ -237,8 +247,13 @@ async function load(href: string, push: boolean, keep = false, all = keep) {
     selectionChanged();
   } else {
     $('#desk-content')?.focus({ preventScroll: true });
+    // A file clicked in a tree: shown selected in its folder.
+    const el = select ? $(`#desk-content .item[data-id="${select}"]`) : null;
+    if (el) selectOnly(el);
   }
-  syncSource();
+  // The trees came again (after an action): their open folders' files, at once from what was fetched
+  // before, then fetched again.
+  if (withSidebar) syncTrees(true);
 }
 
 const refresh = (keep = false) => load(location.pathname + location.search, false, keep, true);
@@ -246,12 +261,14 @@ const refresh = (keep = false) => load(location.pathname + location.search, fals
 /** After moving to another folder or list without the sidebar: mark where we are in it. */
 function markCurrent() {
   const id = currentFolder();
+  markSrcCurrent();
   for (const a of $$('.desk-side .fixed a.entry')) a.classList.toggle('current', !data.loc && !data.dir && a.dataset.view === data.view);
   const here = `/admin/inbox?view=${encodeURIComponent(data.view)}`;
   for (const a of $$('.desk-side .smart a.entry')) a.classList.toggle('current', !data.loc && a.getAttribute('href') === here);
   if (data.view.startsWith('p:')) $<HTMLDetailsElement>('.desk-side details.presets')?.setAttribute('open', '');
   for (const row of $$('.desk-side .frow')) row.classList.toggle('current', !!id && row.dataset.folder === id);
   if (id) revealInTree(id);
+  if (data.view === 'unplaced' && !data.loc && data.dir) revealSrc(data.dir);
 }
 
 /** What every freshly shown part needs. */
@@ -260,15 +277,16 @@ function afterSwap() {
   initPreviews($('#desk-inspector')!);
   initTextPreviews($('#desk-content')!);
   markPanes();
+  markSections();
   applyLayout();
   applyTree();
   anchor = null;
   selectionChanged(true);
 }
 
-function navigate(href: string) {
+function navigate(href: string, select: string | null = null) {
   closeMenu();
-  load(href, true);
+  load(href, true, false, false, select);
 }
 
 // ------------------------------------------------------------------------------------------ layout, tree, source
@@ -309,7 +327,101 @@ function togglePane(p: Pane, show = !paneShown(p)) {
   markPanes();
 }
 
+const SPLIT = 'rigel.deskSrcShare';
+
+/** How the two trees share the sidebar's height: the divider between them is dragged (or moved with the arrow keys). */
+function setSplit(share: number | null) {
+  const root = document.documentElement;
+  if (share === null) {
+    delete root.dataset.deskSplit;
+    root.style.removeProperty('--src-share');
+  } else {
+    root.dataset.deskSplit = '';
+    root.style.setProperty('--src-share', share.toFixed(3));
+  }
+}
+
+function saveSplit() {
+  try {
+    const v = document.documentElement.style.getPropertyValue('--src-share');
+    if (v) localStorage.setItem(SPLIT, v);
+    else localStorage.removeItem(SPLIT);
+  } catch {
+    // private mode: for this page only
+  }
+}
+
+// 视图, 快速访问 and 智能文件夹 fold away; which ones are folded is kept on <html> and in this browser
+// (layouts/Admin.astro applies it before the page is drawn).
+const CLOSED = 'rigel.deskClosed';
+const closedSecs = () => new Set((document.documentElement.dataset.deskClosed ?? '').split(' ').filter(Boolean));
+
+function markSections() {
+  const closed = closedSecs();
+  for (const b of $$('.desk-side .sec-toggle')) b.setAttribute('aria-expanded', String(!closed.has(b.dataset.sec!)));
+}
+
+function toggleSection(sec: string, open = closedSecs().has(sec)) {
+  const closed = closedSecs();
+  if (open) closed.delete(sec);
+  else closed.add(sec);
+  const value = [...closed].join(' ');
+  if (value) document.documentElement.dataset.deskClosed = value;
+  else delete document.documentElement.dataset.deskClosed;
+  try {
+    if (value) localStorage.setItem(CLOSED, value);
+    else localStorage.removeItem(CLOSED);
+  } catch {
+    // private mode: for this page only
+  }
+  markSections();
+}
+
+function initSplit() {
+  // The divider stays when the sidebar's parts come again: listen on the document.
+  const parts = () => ({ src: $('.desk-side .src-sec'), arc: $('.desk-side .folders') });
+  document.addEventListener('pointerdown', (ev) => {
+    const handle = (ev.target as HTMLElement).closest<HTMLElement>('.tree-split');
+    const { src, arc } = parts();
+    if (!handle || !src || !arc || ev.button !== 0) return;
+    ev.preventDefault();
+    const from = ev.clientY;
+    const top = src.getBoundingClientRect().height;
+    const total = top + arc.getBoundingClientRect().height;
+    handle.setPointerCapture(ev.pointerId);
+    handle.classList.add('active');
+    document.body.classList.add('resizing-rows');
+    const move = (e: PointerEvent) => setSplit(Math.max(0, Math.min(1, (top + e.clientY - from) / total)));
+    const up = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.classList.remove('active');
+      document.body.classList.remove('resizing-rows');
+      saveSplit();
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up, { once: true });
+    handle.addEventListener('pointercancel', up, { once: true });
+  });
+  document.addEventListener('dblclick', (ev) => {
+    if (!(ev.target as HTMLElement).closest('.tree-split')) return;
+    setSplit(null);
+    saveSplit();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (!(ev.target as HTMLElement).closest?.('.tree-split') || (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown')) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const { src, arc } = parts();
+    if (!src || !arc) return;
+    const top = src.getBoundingClientRect().height;
+    const total = top + arc.getBoundingClientRect().height;
+    setSplit(Math.max(0, Math.min(1, top / total + (ev.key === 'ArrowUp' ? -0.05 : 0.05))));
+    saveSplit();
+  }, true);
+}
+
 function initResize() {
+  initSplit();
   for (const handle of $$('.desk-resize')) {
     const pane = PANES[handle.dataset.resize as Pane];
     handle.addEventListener('pointerdown', (ev) => {
@@ -351,24 +463,39 @@ function initResize() {
   }
 }
 
+// The two trees. 已归档 (the folder tree) comes from the server; an open folder lists its files under its
+// subfolders, fetched when it opens. 未归档 is drawn here from what the server says is below each open
+// original folder. Which folders are open is remembered (folder ids, original paths), and what was
+// fetched is kept so that the trees do not flicker when the page's parts come again after an action.
+
 const TREE = 'rigel.treeOpen';
+const SRC = 'rigel.srcOpen';
+const fileCache = new Map<string, FolderFiles>();
+const srcCache = new Map<string, SourceLevel>();
+const depthOf = (li: HTMLElement) => Number(li.querySelector<HTMLElement>(':scope > .frow')?.style.getPropertyValue('--depth') || 0);
 
 function applyTree() {
   const openIds = new Set(store.get<string[]>(TREE, []));
-  for (const li of $$('.desk-side .folders li.fnode')) {
+  for (const li of $$('.desk-side .folders li.fnode[data-id]')) {
     if (openIds.has(li.dataset.id!)) li.classList.add('open');
-    li.setAttribute('aria-expanded', String(li.classList.contains('open')));
+    if (!li.classList.contains('leaf')) li.setAttribute('aria-expanded', String(li.classList.contains('open')));
   }
   $('.desk-side .frow.current')?.scrollIntoView({ block: 'nearest' });
 }
 
-function toggleNode(li: HTMLElement, open = !li.classList.contains('open')) {
+/** Open or close a folder of either tree (its files, or what is below an original folder, are fetched when needed). */
+function toggleNode(li: HTMLElement, open = !li.classList.contains('open'), load = true) {
   li.classList.toggle('open', open);
   li.setAttribute('aria-expanded', String(open));
-  const ids = new Set(store.get<string[]>(TREE, []));
-  if (open) ids.add(li.dataset.id!);
-  else ids.delete(li.dataset.id!);
-  store.set(TREE, [...ids].slice(-500));
+  const src = li.dataset.src;
+  const key = src !== undefined ? SRC : TREE;
+  const ids = new Set(store.get<string[]>(key, []));
+  if (open) ids.add(src ?? li.dataset.id!);
+  else ids.delete(src ?? li.dataset.id!);
+  store.set(key, [...ids].slice(-500));
+  if (!open || !load) return;
+  if (src !== undefined) openSrc(li, src);
+  else if (li.dataset.own) folderFilesFor([li]);
 }
 
 function revealInTree(id: string) {
@@ -379,43 +506,124 @@ function revealInTree(id: string) {
   return $(`.desk-side .folders .frow[data-folder="${id}"]`);
 }
 
-let sourceFor: string | null = null;
-
-/** 按来源浏览 is loaded when opened (it lists every original folder). */
-async function syncSource() {
-  const box = $<HTMLDetailsElement>('details[data-source]');
-  if (!box?.open) return;
-  const dir = data.dir;
-  if (sourceFor === dir && $('[data-source-body] ul')) {
-    for (const a of $$('[data-source-body] a')) a.classList.toggle('current', (a.dataset.dir ?? '') === dir && !!dir);
-    return;
-  }
-  sourceFor = dir;
-  const r = await fetch(`/admin/desk/source?dir=${encodeURIComponent(dir)}`);
-  if (r.ok) $('[data-source-body]')!.innerHTML = await r.text();
+/** List a folder's files under its subfolders (all but the first few hundred are a link to the folder). */
+function fillFolder(li: HTMLElement, v: FolderFiles) {
+  const ul = li.querySelector<HTMLElement>(':scope > ul.ftree') ?? li.appendChild(Object.assign(document.createElement('ul'), { className: 'ftree' }));
+  ul.querySelectorAll(':scope > li.file, :scope > li.more-files').forEach((x) => x.remove());
+  const depth = depthOf(li) + 1;
+  put(ul, ...v.files.map((f) => fileNode(f, depth, true)), ...(v.more ? [moreNode(v.more, depth, `/admin/inbox?loc=${folderKey(li.dataset.id!)}`)] : []));
 }
 
-/** A closed original folder comes without its subfolders; opening it fetches them (one level). */
-function initSourceTree() {
-  // `toggle` does not bubble: listen while it goes down.
-  document.addEventListener('toggle', async (ev) => {
-    const d = ev.target as HTMLElement;
-    if (!(d instanceof HTMLDetailsElement) || !d.open || !d.dataset.lazy || !d.closest('[data-source-body]')) return;
-    const path = d.dataset.lazy;
-    delete d.dataset.lazy;
-    const r = await fetch(`/admin/desk/source?under=${encodeURIComponent(path)}&dir=${encodeURIComponent(data.dir)}`);
-    if (r.ok) d.insertAdjacentHTML('beforeend', await r.text());
-  }, true);
+/** The files of these open folders: what was fetched before at once, then fetched (again, with `fresh`). */
+async function folderFilesFor(lis: HTMLElement[], fresh = false) {
+  for (const li of lis) {
+    const c = fileCache.get(li.dataset.id!);
+    if (c) fillFolder(li, c);
+  }
+  const need = lis.map((li) => li.dataset.id!).filter((id) => fresh || !fileCache.has(id));
+  if (!need.length) return;
+  for (const [id, v] of await folderFiles(need)) {
+    fileCache.set(id, v);
+    const li = $(`.desk-side .folders li.fnode[data-id="${id}"]`);
+    if (li?.classList.contains('open')) fillFolder(li, v);
+  }
+}
+
+/** Draw what is below an original folder of 未归档 ('' is the top), and below its open subfolders. */
+function fillSrc(ul: HTMLElement, path: string, depth: number) {
+  const level = srcCache.get(path);
+  if (!level) return;
+  const open = new Set(store.get<string[]>(SRC, []));
+  const nodes: HTMLElement[] = [];
+  for (const d of level.dirs) {
+    const li = dirNode(d, depth, open.has(d.path));
+    nodes.push(li);
+    if (open.has(d.path)) fillSrc(li.querySelector<HTMLElement>(':scope > ul')!, d.path, depth + 1);
+  }
+  nodes.push(...level.files.map((f) => fileNode(f, depth, true)));
+  if (level.more) nodes.push(moreNode(level.more, depth, `/admin/inbox?view=unplaced&dir=${encodeURIComponent(path)}`));
+  ul.replaceChildren(...nodes);
+}
+
+async function openSrc(li: HTMLElement, path: string) {
+  const ul = li.querySelector<HTMLElement>(':scope > ul')!;
+  if (srcCache.has(path)) fillSrc(ul, path, depthOf(li) + 1);
+  else {
+    const got = await sourceLevels([path]);
+    for (const [p, v] of got) srcCache.set(p, v);
+    if (li.classList.contains('open')) fillSrc(ul, path, depthOf(li) + 1);
+  }
+  markSrcCurrent();
+}
+
+/** 未归档: the top and every open original folder whose parents are open too. */
+async function syncSrc(fresh: boolean) {
+  const root = $('[data-src-tree]');
+  if (!root) return;
+  if (root.dataset.n === '0') {
+    root.replaceChildren();
+    srcCache.clear();
+    return;
+  }
+  const open = new Set(store.get<string[]>(SRC, []));
+  const shown = ['', ...[...open].filter((p) => p.split('/').every((_, i, parts) => i === parts.length - 1 || open.has(parts.slice(0, i + 1).join('/'))))];
+  fillSrc(root, '', 0);
+  markSrcCurrent();
+  const need = shown.filter((p) => fresh || !srcCache.has(p));
+  if (!need.length) return;
+  const got = await sourceLevels(need);
+  for (const p of need) {
+    const v = got.get(p);
+    if (v) srcCache.set(p, v);
+    else srcCache.delete(p);
+  }
+  fillSrc(root, '', 0);
+  markSrcCurrent();
+}
+
+/** Both trees after the sidebar was drawn (again). */
+function syncTrees(fresh: boolean) {
+  folderFilesFor($$('.desk-side .folders li.fnode.open[data-own]'), fresh);
+  syncSrc(fresh);
+}
+
+/** The open original folder, marked in 未归档 (and the way to it opened). */
+function markSrcCurrent() {
+  $('.desk-side .folders .sec-link')?.classList.toggle('current', !data.loc && data.view === 'archive');
+  const here = data.view === 'unplaced' && !data.loc ? data.dir : null;
+  $('.desk-side .src-sec .sec-link')?.classList.toggle('current', here === '' && data.browse);
+  for (const row of $$('.desk-side .src-sec .frow[data-src]')) row.classList.toggle('current', here !== null && row.dataset.src === here);
+}
+
+/** Open the way to an original folder in 未归档. */
+function revealSrc(path: string) {
+  const parts = path.split('/');
+  const open = new Set(store.get<string[]>(SRC, []));
+  let changed = false;
+  for (let i = 1; i < parts.length; i += 1) {
+    const p = parts.slice(0, i).join('/');
+    if (!open.has(p)) {
+      open.add(p);
+      changed = true;
+    }
+  }
+  if (changed) {
+    store.set(SRC, [...open].slice(-500));
+    syncSrc(false);
+  }
 }
 
 // ------------------------------------------------------------------------------------------ selection
 
-const selectables = () => $$('#desk-content .item, #desk-content .tile[data-folder]');
-const keyOf = (el: HTMLElement) => (el.dataset.id ? `f:${el.dataset.id}` : `d:${el.dataset.folder}`);
+const selectables = () => $$('#desk-content .item, #desk-content .tile[data-folder], #desk-content .tile[data-src]');
+const keyOf = (el: HTMLElement) => (el.dataset.id ? `f:${el.dataset.id}` : el.dataset.src !== undefined ? `s:${el.dataset.src}` : `d:${el.dataset.folder}`);
 const selectedEls = () => selectables().filter((el) => el.classList.contains('selected'));
 const selectedKeys = () => selectedEls().map(keyOf);
 const selectedFiles = () => selectedEls().filter((el) => el.dataset.id).map((el) => el.dataset.id!);
 const selectedFolders = () => selectedEls().filter((el) => el.dataset.folder && !el.dataset.id).map((el) => el.dataset.folder!);
+const selectedDirs = () => selectedEls().filter((el) => el.dataset.src !== undefined && !el.dataset.id).map((el) => el.dataset.src!);
+/** A file's row: in the middle, else in a tree. */
+const fileEl = (id: string) => $(`#desk-content .item[data-id="${id}"]`) ?? $(`.desk-side .frow[data-id="${id}"]`);
 
 function mark(el: HTMLElement, on: boolean) {
   el.classList.toggle('selected', on);
@@ -476,7 +684,8 @@ let inspectToken = 0;
 function selectionChanged(immediate = false) {
   const files = selectedFiles();
   const fds = selectedFolders();
-  const n = files.length + fds.length;
+  const dirs = selectedDirs();
+  const n = files.length + fds.length + dirs.length;
   // Group boxes follow their items (ticked when all are selected, dashed when some are); 「全部」
   // goes off once an item on the page is left out, so an action no longer reaches files deselected here.
   for (const box of $$<HTMLInputElement>('#desk-content input.pick-group')) {
@@ -495,24 +704,24 @@ function selectionChanged(immediate = false) {
     if (count) count.textContent = String(n);
   }
   clearTimeout(inspectTimer);
-  const run = () => inspect(files, fds);
+  const run = () => inspect(files, fds, dirs);
   if (immediate) return;
   inspectTimer = setTimeout(run, n > 1 ? 250 : 120);
 }
 
-async function inspect(files: string[], fds: string[]) {
+async function inspect(files: string[], fds: string[], dirs: string[] = []) {
   const box = $('#desk-inspector')!;
   const token = ++inspectToken;
-  if (files.length + fds.length === 0) {
+  if (files.length + fds.length + dirs.length === 0) {
     box.innerHTML = baseInspector;
     initPreviews(box);
     return;
   }
-  const r = files.length === 1 && fds.length === 0
+  const r = files.length === 1 && fds.length === 0 && dirs.length === 0
     ? await fetch(`/admin/desk/inspect?file=${files[0]}`)
-    : fds.length === 1 && files.length === 0
+    : fds.length === 1 && files.length === 0 && dirs.length === 0
       ? await fetch(`/admin/desk/inspect?folder=${fds[0]}&selected=1`)
-      : await fetch('/admin/desk/inspect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ files, folders: fds }) });
+      : await fetch('/admin/desk/inspect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ files, folders: fds, dirs }) });
   if (token !== inspectToken) return;
   box.innerHTML = r.ok ? await r.text() : `<p class="muted">${t('读取失败（HTTP {status}）', { status: r.status })}</p>`;
   initPreviews(box);
@@ -521,21 +730,21 @@ async function inspect(files: string[], fds: string[]) {
 // ------------------------------------------------------------------------------------------ doing things
 
 /** Files and folders an action is about: the given ones, else the selection. */
-function targets(el?: HTMLElement | null): { files: string[]; folders: string[] } {
+function targets(el?: HTMLElement | null): What {
   const files = el?.dataset.files ? el.dataset.files.split(',') : null;
   const fds = el?.dataset.folders ? el.dataset.folders.split(',') : null;
-  if (files || fds) return { files: files ?? [], folders: fds ?? [] };
-  return { files: selectedFiles(), folders: selectedFolders() };
+  if (files || fds) return { files: files ?? [], folders: fds ?? [], dirs: [] };
+  return { files: selectedFiles(), folders: selectedFolders(), dirs: selectedDirs() };
 }
 
-/** Move files and folders to a place (a folder key, or «top» for folders). */
-async function moveTo(what: { files: string[]; folders: string[] }, key: string, newFolder = '') {
+/** Move files and folders to a place (a folder key, or «top» for folders); original folders come with what is below them. */
+async function moveTo(what: What, key: string, newFolder = '') {
   if (what.folders.length) {
     const ok = await folderOp({ op: 'move', ids: what.folders, under: newFolder ? await ensureFolderKey(key, newFolder) : key });
     if (!ok) return;
   }
-  if (what.files.length || scopeAll()) {
-    await fileAction('move', what.files, { target: key, new_folder: newFolder, keep: '__none__' });
+  if (what.files.length || what.dirs.length || scopeAll()) {
+    await fileAction('move', what.files, { target: key, new_folder: newFolder, keep: '__none__' }, what.dirs);
   }
   if (key !== 'top') rememberPlace(key);
 }
@@ -546,16 +755,17 @@ async function ensureFolderKey(under: string, name: string): Promise<string> {
   return r.ok && r.id ? folderKey(String(r.id)) : under;
 }
 
-async function pickAndMove(what: { files: string[]; folders: string[] }) {
-  if (!what.files.length && !what.folders.length && !scopeAll()) {
+async function pickAndMove(what: What) {
+  if (!what.files.length && !what.folders.length && !what.dirs.length && !scopeAll()) {
     toast(t('先选中文件或文件夹'), { error: true });
     return;
   }
   const blocked = new Set(what.folders);
   const r = await openPicker({
-    title: what.folders.length ? t('把 {n} 个文件夹和文件移到…', { n: what.folders.length }) : t('移动到…'),
-    allowTop: what.files.length === 0,
-    keepDir: what.files.length && data.dir ? data.dir : null,
+    title: what.folders.length || what.dirs.length ? t('把 {n} 个文件夹和文件移到…', { n: what.folders.length + what.dirs.length }) : t('移动到…'),
+    allowTop: what.files.length === 0 && what.dirs.length === 0,
+    keepDir: what.files.length && data.dir && !data.browse ? data.dir : null,
+    current: data.loc || null,
     exclude: (key) => {
       if (key === 'top') return what.files.length > 0 && what.folders.length > 0;
       const id = key.slice(3);
@@ -564,7 +774,7 @@ async function pickAndMove(what: { files: string[]; folders: string[] }) {
   });
   if (!r) return;
   if (r.keep && what.files.length) {
-    await fileAction('move', what.files, { target: r.target, new_folder: r.newFolder, keep: data.dir });
+    await fileAction('move', what.files, { target: r.target, new_folder: r.newFolder, keep: data.dir }, what.dirs);
     rememberPlace(r.target);
     return;
   }
@@ -587,7 +797,7 @@ async function newFolder(under: string) {
 /** A tile in the open folder, or a row in the tree under its parent, with a text box for the new name. */
 function askFolderName(parent: string | null, value: string): Promise<string | null> {
   const icon = () => document.querySelector('.desk-side .frow[data-kind="plain"] svg, #desk-content .tile[data-kind="plain"] svg')?.cloneNode(true);
-  const tiles = parent && parent === currentFolder() ? $('#desk-content .tiles') : null;
+  const tiles = (parent && parent === currentFolder()) || (!parent && data.view === 'archive' && !data.loc) ? $('#desk-content .tiles') : null;
   if (tiles) {
     const holder = document.createElement('div');
     holder.className = 'tile item-folder';
@@ -665,8 +875,8 @@ function renameFiles(pairs: [string, string][]): Promise<string | null> {
 
 /** Rename one file in its row: the name without the extension is edited; Enter saves, Esc cancels. */
 async function startFileRename(id: string) {
-  const item = $(`#desk-content .item[data-id="${id}"]`);
-  const target = item?.querySelector<HTMLElement>('.fn');
+  const item = fileEl(id);
+  const target = item?.querySelector<HTMLElement>('.fn, .fname');
   if (!item || !target) return;
   const f = fileName(item);
   const value = await renameInPlace(target, { value: f.stem, ext: f.ext, label: t('新文件名'), row: item });
@@ -699,7 +909,7 @@ function renameSelection() {
 
 /** 「标签与封面」 of one audio file (what its 整理版 download gets). */
 async function editTags(id: string) {
-  const r = await tagDialog(id, $(`#desk-content .item[data-id="${id}"]`)?.dataset.edition);
+  const r = await tagDialog(id, fileEl(id)?.dataset.edition);
   if (!r) return;
   if (!r.ok) {
     toast(r.err ?? t('读取失败'), { error: true });
@@ -760,9 +970,9 @@ async function setType(id: string) {
   if (choice) await folderOp({ op: 'type', id, type: choice.type, options: choice.options });
 }
 
-async function deleteSelection(what: { files: string[]; folders: string[] }) {
+async function deleteSelection(what: What) {
   if (what.folders.length) await folderOp({ op: 'delete', ids: what.folders });
-  if (what.files.length || scopeAll()) await fileAction('discard', what.files);
+  if (what.files.length || what.dirs.length || scopeAll()) await fileAction('discard', what.files, {}, what.dirs);
 }
 
 async function paste() {
@@ -781,19 +991,19 @@ async function paste() {
   await moveTo(what, here);
 }
 
-function cut(what: { files: string[]; folders: string[] }) {
-  if (!what.files.length && !what.folders.length) return;
+function cut(what: What) {
+  if (!what.files.length && !what.folders.length && !what.dirs.length) return;
   clipboard = what;
   $$('.cut').forEach((e) => e.classList.remove('cut'));
   for (const el of selectedEls()) el.classList.add('cut');
-  toast(t('已剪切 {n} 个，打开目标文件夹后按 Ctrl+V 放入', { n: what.files.length + what.folders.length }));
+  toast(t('已剪切 {n} 个，打开目标文件夹后按 Ctrl+V 放入', { n: what.files.length + what.folders.length + what.dirs.length }));
 }
 
 /** Move a folder up or down among the folders next to it (a manual order from then on). */
 async function shift(id: string, by: -1 | 1) {
   const f = folders.get(id);
   if (!f) return;
-  const siblings = [...$$(f.parent ? `.desk-side li.fnode[data-id="${f.parent}"] > ul > li.fnode` : '.desk-side .folders > ul.ftree > li.fnode')].map((li) => li.dataset.id!);
+  const siblings = [...$$(f.parent ? `.desk-side li.fnode[data-id="${f.parent}"] > ul > li.fnode[data-id]` : '.desk-side .folders > ul.ftree > li.fnode[data-id]')].map((li) => li.dataset.id!);
   const at = siblings.indexOf(id);
   const to = at + by;
   if (at < 0 || to < 0 || to >= siblings.length) return;
@@ -804,7 +1014,7 @@ async function shift(id: string, by: -1 | 1) {
 async function reorderNear(id: string, near: string, after: boolean) {
   const f = folders.get(id);
   if (!f) return;
-  const siblings = [...$$(f.parent ? `.desk-side li.fnode[data-id="${f.parent}"] > ul > li.fnode` : '.desk-side .folders > ul.ftree > li.fnode')].map((li) => li.dataset.id!).filter((x) => x !== id);
+  const siblings = [...$$(f.parent ? `.desk-side li.fnode[data-id="${f.parent}"] > ul > li.fnode[data-id]` : '.desk-side .folders > ul.ftree > li.fnode[data-id]')].map((li) => li.dataset.id!).filter((x) => x !== id);
   const at = siblings.indexOf(near);
   if (at < 0) return;
   siblings.splice(after ? at + 1 : at, 0, id);
@@ -827,13 +1037,18 @@ function editSmart(id: string | null) {
 const recent = () => recentPlaces().filter((k) => !k.startsWith('fd:') || folders.has(k.slice(3)));
 const placeName = (key: string) => (key.startsWith('fd:') ? nameOf(key.slice(3)) : key);
 
-function fileMenu(): MenuEntry[] {
-  const els = selectedEls().filter((el) => el.dataset.id);
-  const what = targets();
-  const one = els.length === 1 ? els[0] : null;
+/** The menu for files (and original folders of 未归档): the selection's, or one row's in a tree. */
+function fileMenu(els = selectedEls().filter((el) => el.dataset.id), what = targets()): MenuEntry[] {
+  const one = els.length === 1 && !what.dirs.length ? els[0] : null;
   const any = (attr: string) => els.some((el) => el.dataset[attr]);
+  // Original folders hold files to organize, some with suggestions.
+  const suggested = any('sug') || what.dirs.length > 0;
   const places = recent();
   const head: MenuEntry[] = [];
+  if (what.dirs.length === 1 && !els.length) {
+    const dir = what.dirs[0];
+    head.push({ label: t('打开'), keys: 'Enter', run: () => navigate(`/admin/inbox?view=unplaced&dir=${encodeURIComponent(dir)}`) }, '-');
+  }
   if (one) {
     const id = one.dataset.id!;
     head.push(
@@ -854,19 +1069,19 @@ function fileMenu(): MenuEntry[] {
     ...head,
     { label: t('移动到…'), keys: 'M', run: () => pickAndMove(what) },
     ...places.slice(0, 5).map((k, i) => ({ label: t('放到「{place}」', { place: placeName(k) }), keys: i === 0 ? `Shift+D · ${i + 1}` : String(i + 1), run: () => moveTo(what, k) })),
-    { label: t('按建议归档'), keys: 'A', run: () => fileAction('accept', what.files), disabled: any('sug') ? false : t('选中的文件没有规则建议') },
+    { label: t('按建议归档'), keys: 'A', run: () => fileAction('accept', what.files, {}, what.dirs), disabled: suggested ? false : t('选中的文件没有规则建议') },
     { label: t('退回未归档'), run: () => fileAction('reset', what.files), disabled: any('placed') || any('state') ? false : t('没有已归档的文件') },
     { label: t('剪切'), keys: 'Ctrl+X', run: () => cut(what) },
     '-',
-    { label: t('设为社团自有'), run: () => fileAction('rights', what.files, { rights_value: 'own' }) },
-    { label: t('设为第三方'), keys: 'T', run: () => fileAction('rights', what.files, { rights_value: 'third_party' }) },
-    { label: t('设为已授权'), run: () => fileAction('rights', what.files, { rights_value: 'licensed' }) },
-    { label: t('权利改回未知'), run: () => fileAction('rights', what.files, { rights_value: 'unknown' }) },
+    { label: t('设为社团自有'), run: () => fileAction('rights', what.files, { rights_value: 'own' }, what.dirs) },
+    { label: t('设为第三方'), keys: 'T', run: () => fileAction('rights', what.files, { rights_value: 'third_party' }, what.dirs) },
+    { label: t('设为已授权'), run: () => fileAction('rights', what.files, { rights_value: 'licensed' }, what.dirs) },
+    { label: t('权利改回未知'), run: () => fileAction('rights', what.files, { rights_value: 'unknown' }, what.dirs) },
     '-',
-    { label: t('标为重复'), keys: 'D', run: () => fileAction('dup', what.files) },
+    { label: t('标为重复'), keys: 'D', run: () => fileAction('dup', what.files, {}, what.dirs) },
     ...(any('archive') ? [{ label: t('整体收藏（压缩包）'), run: () => fileAction('seal', what.files) }] : []),
     ...(any('sealed') ? [{ label: t('展开整体收藏的包'), run: () => fileAction('unseal', what.files) }] : []),
-    { label: t('忽略'), keys: 'I', run: () => fileAction('ignore', what.files) },
+    { label: t('忽略'), keys: 'I', run: () => fileAction('ignore', what.files, {}, what.dirs) },
     { label: any('upload') ? t('删除（移到回收站）或忽略') : t('删除或忽略'), keys: 'Delete', danger: true, run: () => deleteSelection(what) },
   ];
 }
@@ -876,7 +1091,7 @@ function folderMenu(id: string, inTree: boolean): MenuEntry[] {
   if (!f) return [];
   const key = folderKey(id);
   const pinned = data.quick.includes(id);
-  const what = inTree ? { files: [], folders: [id] } : targets();
+  const what = inTree ? { ...NOTHING(), folders: [id] } : targets();
   const many = what.folders.length > 1 || what.files.length > 0;
   const colors = ['', 'red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'pink'];
   const colorLabel: Record<string, string> = { '': t('无'), red: t('红'), orange: t('橙'), yellow: t('黄'), green: t('绿'), aqua: t('青'), blue: t('蓝'), purple: t('紫'), pink: t('粉') };
@@ -901,7 +1116,7 @@ function folderMenu(id: string, inTree: boolean): MenuEntry[] {
     ...(f.release ? [{ label: t('打开作品页'), run: () => (location.href = `/admin/releases/${f.release}`) }] : []),
     ...(f.edition ? [{ label: t('打开版本页'), run: () => (location.href = `/admin/editions/${f.edition}`) }] : []),
     '-',
-    { label: t('删除'), keys: 'Delete', danger: true, run: () => deleteSelection(inTree ? { files: [], folders: [id] } : what) },
+    { label: t('删除'), keys: 'Delete', danger: true, run: () => deleteSelection(inTree ? { ...NOTHING(), folders: [id] } : what) },
   ];
 }
 
@@ -956,17 +1171,28 @@ function parentHref(): string | null {
     return u.pathname + u.search;
   })() : null;
   const parent = folders.get(id)?.parent;
-  return parent ? `/admin/inbox?loc=${folderKey(parent)}` : '/admin/inbox?view=all';
+  return parent ? `/admin/inbox?loc=${folderKey(parent)}` : '/admin/inbox?view=archive';
 }
 
 function open(el: HTMLElement) {
   if (el.dataset.folder && !el.dataset.id) navigate(`/admin/inbox?loc=${folderKey(el.dataset.folder)}`);
+  else if (el.dataset.src !== undefined && !el.dataset.id) navigate(`/admin/inbox?view=unplaced&dir=${encodeURIComponent(el.dataset.src)}`);
   else if (el.dataset.id) location.href = `/admin/files/${el.dataset.id}`;
+}
+
+/** A file clicked in a tree: its folder opens in the middle with the file selected. */
+function reveal(row: HTMLElement) {
+  const li = row.closest('li.fnode')?.parentElement?.closest<HTMLElement>('li.fnode');
+  const id = row.dataset.id!;
+  if (row.closest('.src-sec')) {
+    const dir = li?.dataset.src ?? '';
+    navigate(`/admin/inbox?view=unplaced&dir=${encodeURIComponent(dir)}`, id);
+  } else if (li?.dataset.id) navigate(`/admin/inbox?loc=${folderKey(li.dataset.id)}`, id);
 }
 
 // ------------------------------------------------------------------------------------------ drag and drop
 
-let dragging: { files: string[]; folders: string[]; fromQuick?: boolean } | null = null;
+let dragging: (What & { fromQuick?: boolean }) | null = null;
 
 function dropTarget(el: HTMLElement): { key?: string; special?: string; folder?: string } | null {
   const d = el.dataset.drop;
@@ -982,7 +1208,7 @@ function dropPlan(el: HTMLElement, ev: DragEvent): { text: string; ok: boolean; 
   const what = dragging;
   const target = dropTarget(el);
   if (!target) return null;
-  const n = what.files.length + what.folders.length;
+  const n = what.files.length + what.folders.length + what.dirs.length;
   // A 快速访问 entry dropped on another one: the list's order, not a move.
   if (what.fromQuick && el.dataset.quick !== undefined && target.folder && target.folder !== what.folders[0]) {
     const order = data.quick.filter((q) => q !== what.folders[0]);
@@ -999,9 +1225,12 @@ function dropPlan(el: HTMLElement, ev: DragEvent): { text: string; ok: boolean; 
       return { text: t('加入快速访问'), ok: true, run: async () => { for (const id of what.folders) await folderOp({ op: 'pin', id }, { quiet: true }); } };
     }
     if (what.folders.length) return { text: t('这里只能放文件'), ok: false, run: async () => {} };
-    if (target.special === 'unplaced') return { text: t('退回未归档（{n} 个）', { n }), ok: true, run: () => fileAction('reset', what.files) };
-    if (target.special === 'ignored') return { text: t('忽略（{n} 个）', { n }), ok: true, run: () => fileAction('ignore', what.files) };
-    if (target.special === 'trash') return { text: t('删除或忽略（{n} 个）', { n }), ok: true, run: () => fileAction('discard', what.files) };
+    if (target.special === 'unplaced') {
+      if (what.dirs.length || !what.files.some((id) => fileEl(id)?.dataset.placed)) return { text: t('已经在未归档里'), ok: false, run: async () => {} };
+      return { text: t('退回未归档（{n} 个）', { n }), ok: true, run: () => fileAction('reset', what.files) };
+    }
+    if (target.special === 'ignored') return { text: t('忽略（{n} 个）', { n }), ok: true, run: () => fileAction('ignore', what.files, {}, what.dirs) };
+    if (target.special === 'trash') return { text: t('删除或忽略（{n} 个）', { n }), ok: true, run: () => fileAction('discard', what.files, {}, what.dirs) };
     return null;
   }
   const into = target.folder ?? null;
@@ -1027,31 +1256,64 @@ function dropPlan(el: HTMLElement, ev: DragEvent): { text: string; ok: boolean; 
     const problem = placeProblem(id, into);
     if (problem) return { text: problem, ok: false, run: async () => {} };
   }
-  if (!into && what.files.length) return { text: t('文件要放进某个文件夹'), ok: false, run: async () => {} };
-  if (into && what.folders.length === 0 && what.files.length && into === currentFolder() && !data.sub) return { text: t('已经在这个文件夹里'), ok: false, run: async () => {} };
+  if (!into && (what.files.length || what.dirs.length)) return { text: t('文件要放进某个文件夹'), ok: false, run: async () => {} };
+  if (into && what.folders.length === 0 && what.dirs.length === 0 && what.files.length && what.files.every((id) => fileFolder(id) === into)) {
+    return { text: t('已经在这个文件夹里'), ok: false, run: async () => {} };
+  }
   return { text: t('移到「{place}」（{n} 个）', { place: nameOf(into), n }), ok: true, run: () => moveTo(what, target.key!) };
+}
+
+/** The folder a file is in, when the page knows: its row in the middle of an open folder, or in the 已归档 tree. */
+function fileFolder(id: string): string | null {
+  if ($(`#desk-content .item[data-id="${id}"]`) && currentFolder() && !data.sub) return currentFolder();
+  const row = $(`.desk-side .folders .frow[data-id="${id}"]`);
+  return row?.closest('li.fnode')?.parentElement?.closest<HTMLElement>('li.fnode')?.dataset.id ?? null;
+}
+
+// Hovering over a closed folder of a tree while dragging opens it (as in the file explorer).
+let hoverRow: HTMLElement | null = null;
+let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+
+function hoverOpen(row: HTMLElement | null) {
+  if (row === hoverRow) return;
+  clearTimeout(hoverTimer);
+  hoverRow = row;
+  if (!row) return;
+  hoverTimer = setTimeout(() => {
+    if (row.classList.contains('sec-toggle')) {
+      if (closedSecs().has(row.dataset.sec!)) toggleSection(row.dataset.sec!, true);
+      return;
+    }
+    const li = row.closest<HTMLElement>('li.fnode');
+    if (li && !li.classList.contains('open') && !li.classList.contains('leaf') && !li.classList.contains('file')) toggleNode(li, true);
+  }, 700);
 }
 
 function initDrag() {
   const label = $('#desk-drag')!;
   document.addEventListener('dragstart', (ev) => {
-    const el = (ev.target as HTMLElement).closest<HTMLElement>('.item, .tile[data-folder], .frow[data-folder]');
+    const el = (ev.target as HTMLElement).closest<HTMLElement>('.item, .tile[data-folder], .tile[data-src], .frow[data-folder], .frow[data-id], .frow[data-src]');
     if (!el) return;
     const inContent = !!el.closest('#desk-content');
     if (inContent && !el.classList.contains('selected')) selectOnly(el);
-    dragging = inContent ? { files: selectedFiles(), folders: selectedFolders() } : { files: [], folders: [el.dataset.folder!], fromQuick: el.dataset.quick !== undefined };
-    ev.dataTransfer?.setData('text/plain', [...dragging.files, ...dragging.folders].join(','));
+    if (inContent) dragging = { files: selectedFiles(), folders: selectedFolders(), dirs: selectedDirs() };
+    else if (el.dataset.id) dragging = { ...NOTHING(), files: [el.dataset.id] };
+    else if (el.dataset.src !== undefined) dragging = { ...NOTHING(), dirs: [el.dataset.src] };
+    else dragging = { ...NOTHING(), folders: [el.dataset.folder!], fromQuick: el.dataset.quick !== undefined };
+    ev.dataTransfer?.setData('text/plain', [...dragging.files, ...dragging.folders, ...dragging.dirs].join(','));
     if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
     document.body.classList.add('dragging');
   });
   document.addEventListener('dragend', () => {
     dragging = null;
+    hoverOpen(null);
     label.hidden = true;
     document.body.classList.remove('dragging');
     $$('.drop-over, .drop-no, .drop-before, .drop-after').forEach((e) => e.classList.remove('drop-over', 'drop-no', 'drop-before', 'drop-after'));
   });
   document.addEventListener('dragover', (ev) => {
     if (!dragging) return;
+    hoverOpen((ev.target as HTMLElement).closest<HTMLElement>('.desk-side .frow[data-folder], .desk-side .frow[data-src], .desk-side .sec-toggle'));
     const el = (ev.target as HTMLElement).closest<HTMLElement>('[data-drop]');
     $$('.drop-over, .drop-no').forEach((e) => e !== el && e.classList.remove('drop-over', 'drop-no', 'drop-before', 'drop-after'));
     if (!el) {
@@ -1134,23 +1396,29 @@ function initClicks() {
     if (target.closest('input.rename')) return; // typing a new name
     const act = target.closest<HTMLElement>('[data-act]');
 
-    // The tree: the triangle opens and closes; a row opens its folder.
-    const twisty = target.closest<HTMLElement>('.twisty');
+    // The trees: the triangle opens and closes; a row opens its folder; a file opens its folder with it selected.
+    const twisty = target.closest<HTMLElement>('.desk-side .twisty');
     if (twisty) {
       ev.preventDefault();
       toggleNode(twisty.closest<HTMLElement>('li.fnode')!);
       return;
     }
+    const fileRow = target.closest<HTMLElement>('.desk-side .frow[data-id]');
+    if (fileRow && !target.closest('input')) {
+      ev.preventDefault();
+      reveal(fileRow);
+      return;
+    }
 
     // Items and tiles: a click selects (Ctrl / Shift for several), the checkbox toggles.
-    const item = target.closest<HTMLElement>('#desk-content .item, #desk-content .tile[data-folder]');
+    const item = target.closest<HTMLElement>('#desk-content .item, #desk-content .tile[data-folder], #desk-content .tile[data-src]');
     if (item && !(act && act.dataset.act !== 'menu') && !target.closest('.place-link, .chips a')) {
       // A cancelled click puts a checkbox back the way it was after this handler, undoing mark().
       if (!target.closest('input.pick')) ev.preventDefault();
       if (act?.dataset.act === 'menu') {
         if (!item.classList.contains('selected')) selectOnly(item);
         const r = act.getBoundingClientRect();
-        if (item.dataset.id) openMenu(fileMenu(), r.left, r.bottom);
+        if (item.dataset.id || item.dataset.src !== undefined) openMenu(fileMenu(), r.left, r.bottom);
         else openFolderMenuFor(item.dataset.folder!, r.left, r.bottom, false);
         return;
       }
@@ -1182,6 +1450,11 @@ function initClicks() {
       navigate(`/admin/inbox?loc=${folderKey(row.dataset.folder!)}`);
       return;
     }
+    const srcRow = target.closest<HTMLElement>('.desk-side .frow[data-src]');
+    if (srcRow && !act && !target.closest('a')) {
+      navigate(`/admin/inbox?view=unplaced&dir=${encodeURIComponent(srcRow.dataset.src!)}`);
+      return;
+    }
     if (!act) {
       if (marqueed) marqueed = false;
       else if (target.closest('#desk-content') && !target.closest('a, button, input, select, textarea, .readme')) clearSelection();
@@ -1191,7 +1464,7 @@ function initClicks() {
     switch (a) {
       case 'menu-selection': {
         const r = act.getBoundingClientRect();
-        if (selectedFiles().length) openMenu(fileMenu(), r.left, r.top - 8);
+        if (selectedFiles().length || selectedDirs().length) openMenu(fileMenu(), r.left, r.top - 8);
         else if (selectedFolders().length) openFolderMenuFor(selectedFolders()[0], r.left, r.top - 8, false);
         break;
       }
@@ -1202,7 +1475,7 @@ function initClicks() {
       case 'file-action': {
         const what = targets(act);
         if (act.dataset.action === 'discard') deleteSelection(what);
-        else fileAction(act.dataset.action!, what.files);
+        else fileAction(act.dataset.action!, what.files, {}, what.dirs);
         break;
       }
       case 'rename': startRename(act.dataset.folder!); break;
@@ -1210,11 +1483,12 @@ function initClicks() {
       case 'edit-tags': editTags(act.dataset.file!); break;
       case 'set-cover': makeCover(act.dataset.file!); break;
       case 'toggle-side': togglePane('side'); break;
+      case 'toggle-sec': toggleSection(act.dataset.sec!); break;
       case 'toggle-insp': togglePane('insp'); break;
       case 'new-folder': newFolder(act.dataset.under || 'top'); break;
       case 'pin':
       case 'unpin': folderOp({ op: a, id: act.dataset.folder }, { quiet: true }); break;
-      case 'delete-folders': deleteSelection({ files: [], folders: act.dataset.folders!.split(',') }); break;
+      case 'delete-folders': deleteSelection({ ...NOTHING(), folders: act.dataset.folders!.split(',') }); break;
       case 'set-type': setType(act.dataset.folder!); break;
       case 'color': folderOp({ op: 'color', id: act.dataset.folder, color: act.dataset.color ?? '' }, { quiet: true }); break;
       case 'open': navigate(`/admin/inbox?loc=${act.dataset.key}`); break;
@@ -1244,23 +1518,27 @@ function initClicks() {
   });
 
   document.addEventListener('dblclick', (ev) => {
-    const item = (ev.target as HTMLElement).closest<HTMLElement>('#desk-content .item, #desk-content .tile[data-folder]');
+    const item = (ev.target as HTMLElement).closest<HTMLElement>('#desk-content .item, #desk-content .tile[data-folder], #desk-content .tile[data-src], .desk-side .frow[data-id]');
     if (item && !(ev.target as HTMLElement).closest('input, button')) open(item);
   });
 
   document.addEventListener('contextmenu', (ev) => {
     const target = ev.target as HTMLElement;
     if (target.closest('input, textarea, select, .readme pre, #desk-inspector, dialog')) return;
-    const item = target.closest<HTMLElement>('#desk-content .item, #desk-content .tile[data-folder]');
+    const item = target.closest<HTMLElement>('#desk-content .item, #desk-content .tile[data-folder], #desk-content .tile[data-src]');
     const row = target.closest<HTMLElement>('.desk-side .frow[data-folder]');
+    const treeFile = target.closest<HTMLElement>('.desk-side .frow[data-id]');
+    const treeDir = target.closest<HTMLElement>('.desk-side .frow[data-src]');
     const content = target.closest('#desk-content');
-    if (!item && !row && !content) return;
+    if (!item && !row && !treeFile && !treeDir && !content) return;
     ev.preventDefault();
     if (item) {
       if (!item.classList.contains('selected')) selectOnly(item);
-      if (item.dataset.id) openMenu(fileMenu(), ev.clientX, ev.clientY);
+      if (item.dataset.id || item.dataset.src !== undefined) openMenu(fileMenu(), ev.clientX, ev.clientY);
       else openFolderMenuFor(item.dataset.folder!, ev.clientX, ev.clientY, false);
     } else if (row) openFolderMenuFor(row.dataset.folder!, ev.clientX, ev.clientY, true);
+    else if (treeFile) openMenu(fileMenu([treeFile], { ...NOTHING(), files: [treeFile.dataset.id!] }), ev.clientX, ev.clientY);
+    else if (treeDir) openMenu(fileMenu([], { ...NOTHING(), dirs: [treeDir.dataset.src!] }), ev.clientX, ev.clientY);
     else openMenu(backgroundMenu(), ev.clientX, ev.clientY);
   });
 
@@ -1297,14 +1575,14 @@ function initClicks() {
     }
   });
 
-  $('details[data-source]')?.addEventListener('toggle', () => syncSource());
   addEventListener('popstate', () => load(location.pathname + location.search, false));
 }
 
 function expandAll() {
-  const nodes = $$('.desk-side .folders li.fnode:not(.leaf)');
+  const nodes = $$('.desk-side .folders li.fnode[data-id]:not(.leaf)');
   const open = nodes.some((li) => !li.classList.contains('open'));
-  for (const li of nodes) toggleNode(li, open);
+  for (const li of nodes) toggleNode(li, open, false);
+  if (open) folderFilesFor(nodes.filter((li) => li.dataset.own));
 }
 
 // ------------------------------------------------------------------------------------------ keyboard
@@ -1386,10 +1664,10 @@ function initKeys() {
     else if (key === 'm') { ev.preventDefault(); pickAndMove(what()); }
     else if (key === 'D' && ev.shiftKey) { const k = recent()[0]; if (k) moveTo(what(), k); }
     else if (/^[1-5]$/.test(key)) { const k = recent()[Number(key) - 1]; if (k) moveTo(what(), k); }
-    else if (key === 'a') fileAction('accept', what().files);
-    else if (key === 'i') fileAction('ignore', what().files);
-    else if (key === 't') fileAction('rights', what().files, { rights_value: 'third_party' });
-    else if (key === 'd') fileAction('dup', what().files);
+    else if (key === 'a') fileAction('accept', what().files, {}, what().dirs);
+    else if (key === 'i') fileAction('ignore', what().files, {}, what().dirs);
+    else if (key === 't') fileAction('rights', what().files, { rights_value: 'third_party' }, what().dirs);
+    else if (key === 'd') fileAction('dup', what().files, {}, what().dirs);
   });
 }
 
@@ -1413,7 +1691,6 @@ export function initDesk() {
   initResize();
   initDrag();
   initMarquee();
-  initSourceTree();
-  syncSource();
+  syncTrees(false);
   if (!store.get('rigel.deskGuide', false)) setTimeout(guideBox, 400);
 }

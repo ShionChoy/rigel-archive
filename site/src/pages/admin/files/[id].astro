@@ -483,7 +483,7 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
           <input type="hidden" name="section" value="move" />
           <input type="hidden" name="target" value="" />
           <input type="hidden" name="new_folder" value="" />
-          <button type="button" class="primary" id="file-move">{t('移动到…')}</button>
+          <button type="button" class="primary" id="file-move" data-current={file.folder_id ? `fd:${file.folder_id}` : undefined}>{t('移动到…')}</button>
         </form>
         {placeKey && <form method="post" class="inline"><input type="hidden" name="section" value="reset" /><button type="submit">{t('退回待整理')}</button></form>}
         {file.state !== 'ignored' && <form method="post" class="inline"><input type="hidden" name="section" value="ignore" /><button type="submit">{t('忽略')}</button></form>}
@@ -672,7 +672,7 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
   import { t } from '../../../scripts/i18n';
 
   document.querySelector('#file-move')?.addEventListener('click', async () => {
-    const r = await openPicker();
+    const r = await openPicker({ current: document.querySelector<HTMLElement>('#file-move')?.dataset.current ?? null });
     if (!r) return;
     const form = document.querySelector<HTMLFormElement>('#move-form')!;
     form.querySelector<HTMLInputElement>('input[name="target"]')!.value = r.target;

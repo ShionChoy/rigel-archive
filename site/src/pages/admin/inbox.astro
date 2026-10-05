@@ -1,8 +1,10 @@
 ---
-// 整理台: an explorer over the archive. Left: fixed entries, 快速访问, 智能文件夹, the folder tree (eras,
-// releases and editions are folders of their type) and 按来源浏览. Middle: the open folder (subfolders
-// first, then files) or list. Right: the inspector. scripts/desk.ts adds selection, the right-click menu,
-// drag and drop, the keyboard and loading without page reloads; everything also works as plain links.
+// 整理台: an explorer over the archive, laid out like the Windows file explorer. Left: fixed entries,
+// 快速访问, two trees of the same kind — 未归档 (the files still to organize, by their original folders)
+// and 已归档 (the folder tree: eras, releases and editions are folders of their type) — whose open folders
+// list their files too, and 智能文件夹. Middle: the open folder (subfolders first, then files) or list.
+// Right: the inspector. scripts/desk.ts adds selection, the right-click menu, drag and drop (from either
+// tree or the middle onto any folder), the keyboard and loading without page reloads.
 import { env } from 'cloudflare:workers';
 import Admin from '../../layouts/Admin.astro';
 import Bare from '../../components/Bare.astro';
@@ -20,10 +22,10 @@ import { formatBytes, formatSpec, percent, withParams } from '../../lib/format';
 import { keptMessage, originalGone } from '../../lib/deletion';
 import { errorText, summaryText, UserError, type T } from '../../lib/i18n';
 import {
-  FIXED_VIEWS, applyInboxAction, deskOrder, deskWhere, idsForQuery, parseInboxAction, readDeskQuery, viewCounts,
+  ARCHIVE_VIEW, FIXED_VIEWS, applyInboxAction, browsing, underDir, deskOrder, deskWhere, idsForQuery, idsInDirs, parseInboxAction, readDeskQuery, sourceChildren, viewCounts,
   type ActionResult, type DeskQuery,
 } from '../../lib/inbox';
-import { Places, folderKey, folderTree, isArchive, split, type LocNode } from '../../lib/locations';
+import { Places, UNPLACED_SQL, folderKey, folderTree, isArchive, split, type LocNode } from '../../lib/locations';
 import { guessRelease, loadQuickAccess } from '../../lib/folders';
 import { ORIGINS, PRESETS, RULE_FIELDS, RULE_OPS, SUGGEST_KINDS, loadSmartFolders, presetOf, type RuleSet } from '../../lib/smart';
 import { EDITION_PROBLEMS, editionProblems, type EditionProblem } from '../../lib/checks';
@@ -100,6 +102,14 @@ if (Astro.request.method === 'POST') {
       const preset = q.view.startsWith('p:') ? presetOf(q.view.slice(2)) : undefined;
       ids = await idsForQuery(q, places, smart, preset?.ids ? await preset.ids() : null);
     }
+    // Original folders of 未归档 (dragged or chosen whole): the files in them still to organize, which keep
+    // the folders from that one down when moved.
+    const dirs = form.getAll('dirs').map(String);
+    if (dirs.length) {
+      const inDirs = await idsInDirs(dirs);
+      ids = [...new Set([...ids, ...inDirs.keys()])];
+      if (action.action === 'move') action.bases = new Map([...inDirs].map(([id, dir]) => [id, dir.split('/').slice(0, -1).join('/')]));
+    }
     if (ids.length === 0) throw new UserError('没有选中文件');
     const r = await applyInboxAction(actor, ids, action, t);
     if (r.plan) return new Response(JSON.stringify({ ok: true, msg: planMessage(r, t), batch: null }), { headers: { 'content-type': 'application/json' } });
@@ -126,7 +136,19 @@ const preset = q.view.startsWith('p:') ? presetOf(q.view.slice(2)) : undefined;
 const folder = q.loc ? places.folderOf(q.loc) ?? null : null;
 const presetIds = preset?.ids ? await preset.ids() : null;
 const w = deskWhere(q, places, smart, presetIds);
-const listsFiles = q.view !== 'trash' && !preset?.editions;
+// 未归档 opened like a folder: the original folders below the open one come first.
+const browse = browsing(q);
+const srcDirs = browse ? (await sourceChildren(q.dir)).dirs : [];
+// What the open original folder holds to organize, at any depth (the inspector's count).
+const browseTotals = browse
+  ? await (() => {
+    const u = underDir(q.dir);
+    return database.prepare(`SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM files WHERE ${UNPLACED_SQL} AND ${u.sql}`).bind(...u.binds).first<{ n: number; bytes: number }>();
+  })()
+  : null;
+// 已归档 at its top lists only folders.
+const atTop = !q.loc && q.view === ARCHIVE_VIEW;
+const listsFiles = q.view !== 'trash' && !atTop && !preset?.editions;
 
 type Row = Pick<
   FileRow,
@@ -186,7 +208,7 @@ const thumbOf = (r: Row): string | null => {
   return null;
 };
 // A folder of mostly pictures opens as a grid (the page's script remembers the admin's own choice per folder).
-const layout = q.loc && rows.length > 0 && media.length / rows.length > 0.6 ? 'grid' : 'list';
+const layout = (q.loc || browse) && rows.length > 0 && media.length / rows.length > 0.6 ? 'grid' : 'list';
 
 // The tree: open on the way to the open folder; nodes by key for counts; editions with problems.
 const byKey = new Map<string, LocNode>();
@@ -211,11 +233,12 @@ const viewName = (view: string): string => {
   if (view === 'suggested') return t('可按建议归档');
   if (view === 'ignored') return t('已忽略');
   if (view === 'trash') return t('回收站');
+  if (view === ARCHIVE_VIEW) return t('已归档');
   if (view.startsWith('p:')) return t(presetOf(view.slice(2))?.name ?? view);
   if (view.startsWith('sf:')) return smartFolders.find((s) => s.id === view.slice(3))?.name ?? t('智能文件夹');
   return view;
 };
-const title = folder ? places.folderName(folder, t) : viewName(q.view);
+const title = folder ? places.folderName(folder, t) : q.view === 'unplaced' && q.dir ? q.dir.split('/').at(-1)! : viewName(q.view);
 const here = (params: Record<string, string | null>) => withParams(url, { page: null, msg: null, err: null, undo: null, ...params });
 const folderHref = (key: string) => `/admin/inbox?loc=${key}`;
 const viewHref = (view: string) => `/admin/inbox?view=${encodeURIComponent(view)}`;
@@ -247,7 +270,7 @@ for (const row of rows) {
   if (q.view === 'suggested') {
     groups.push({ key, rows: [row], href: key ? `/admin/releases/${key}` : null, label: key ? t('建议：{release}', { release: places.releaseLabel(key) }) : t('没有作品建议') });
   } else if (q.sort === 'path') {
-    groups.push({ key, label: row.dir || t('（根目录）'), href: here({ dir: row.dir, loc: null, view: q.loc ? 'all' : q.view }), rows: [row] });
+    groups.push({ key, label: row.dir || t('（根目录）'), href: here({ dir: row.dir, loc: null, view: q.loc ? 'all' : q.view, sub: q.view === 'unplaced' ? null : url.searchParams.get('sub'), q: q.view === 'unplaced' ? null : url.searchParams.get('q') }), rows: [row] });
   } else groups.push({ key, label: '', href: null, rows: [row] });
 }
 
@@ -268,11 +291,11 @@ const shortPath = (key: string) => {
   const last = places.folderOf(chain.at(-1)!);
   return last?.edition_id ? chain.slice(-2).map((k) => places.name(k, t)).join(' / ') : places.name(chain.at(-1)!, t);
 };
-const subfolders = folder ? places.children(folder.id) : [];
+const subfolders = folder ? places.children(folder.id) : atTop ? places.children(null) : [];
 const showPlace = !q.loc || q.sub;
 
 // Everything the page's script needs to know about the tree (for the picker, drag and drop and menus).
-const viewData = { loc: q.loc, view: q.view, dir: q.dir, sub: q.sub, total, layout };
+const viewData = { loc: q.loc, view: q.view, dir: q.dir, sub: q.sub, browse, total, layout };
 const deskData = partial ? { ...viewData, partial: true } : {
   ...viewData,
   folders: places.options(t).map((o) => {
@@ -302,21 +325,28 @@ const Page = partial ? Bare : Admin;
   <div id="desk" class="desk" data-loc={q.loc} data-view={q.view} data-layout={layout}>
     {!partial && counts && forms && (
     <aside id="desk-side" class="desk-side" aria-label={t('位置')}>
-      <nav class="fixed">
-        {FIXED_VIEWS.map((v) => (
-          <a class:list={['entry', { current: !q.loc && q.view === v && !q.dir }]} href={viewHref(v)} data-nav data-view={v} data-drop={v === 'unplaced' || v === 'ignored' || v === 'trash' ? v : undefined}>
-            <span>{viewName(v)}</span>
-            {v !== 'trash' && <span class="n">{counts[v as Exclude<typeof v, 'trash'>]}</span>}
-          </a>
-        ))}
-        <div class="progress mini" title={t('已整理 = 已归档、已发布或已忽略')}>
-          <div class="bar"><span style={`width:${counts.all ? (done / counts.all) * 100 : 0}%`}></span></div>
-          <span class="muted small">{t('已整理 {pct}', { pct: percent(counts.all ? done / counts.all : 0) })}</span>
+      {/* 视图, 快速访问 and 智能文件夹 fold away with their triangle (remembered in this browser), leaving the trees more room. */}
+      <nav class="side-sec fixed" data-sec="views">
+        <h3>
+          <button type="button" class="sec-toggle" data-act="toggle-sec" data-sec="views" aria-expanded="true">{t('视图')}</button>
+          <span class="sec-note" title={t('已整理 = 已归档、已发布或已忽略')}>{t('已整理 {pct}', { pct: percent(counts.all ? done / counts.all : 0) })}</span>
+        </h3>
+        <div class="sec-body">
+          {FIXED_VIEWS.filter((v) => v !== 'unplaced').map((v) => (
+            <a class:list={['entry', { current: !q.loc && q.view === v && !q.dir }]} href={viewHref(v)} data-nav data-view={v} data-drop={v === 'ignored' || v === 'trash' ? v : undefined}>
+              <span>{viewName(v)}</span>
+              {v !== 'trash' && <span class="n">{counts[v as Exclude<typeof v, 'trash'>]}</span>}
+            </a>
+          ))}
+          <div class="progress mini" title={t('已整理 = 已归档、已发布或已忽略')}>
+            <div class="bar"><span style={`width:${counts.all ? (done / counts.all) * 100 : 0}%`}></span></div>
+          </div>
         </div>
       </nav>
 
-      <section class="side-sec quick" data-drop="quick">
-        <h3>{t('快速访问')}</h3>
+      <section class="side-sec quick" data-drop="quick" data-sec="quick">
+        <h3><button type="button" class="sec-toggle" data-act="toggle-sec" data-sec="quick" aria-expanded="true">{t('快速访问')}</button></h3>
+        <div class="sec-body">
         {quickFolders.length === 0 && <p class="muted small">{t('右键文件夹「加入快速访问」，或把文件夹拖到这里。')}</p>}
         <ul>
           {quickFolders.map((f) => (
@@ -329,10 +359,37 @@ const Page = partial ? Bare : Admin;
             </li>
           ))}
         </ul>
+        </div>
       </section>
 
-      <section class="side-sec smart">
-        <h3>{t('智能文件夹')} <button type="button" class="icon-button" data-act="smart-new" title={t('新建智能文件夹')} aria-label={t('新建智能文件夹')}>＋</button></h3>
+      <section class="side-sec tree-sec src-sec" aria-label={t('未归档')}>
+        <h3>
+          <a class:list={['sec-link', { current: browse && !q.dir }]} href={viewHref('unplaced')} data-nav data-view="unplaced" data-drop="unplaced" title={t('还没归档的文件，按原始文件夹排列；把文件拖到这里就是退回未归档')}>
+            {t('未归档')} <span class="n">{counts.unplaced}</span>
+          </a>
+        </h3>
+        <ul class="ftree" role="tree" data-src-tree data-n={counts.unplaced}></ul>
+        {counts.unplaced === 0 && <p class="muted small tree-empty">{t('全部整理完了。')}</p>}
+      </section>
+      <div class="tree-split" role="separator" aria-orientation="horizontal" tabindex="0" aria-label={t('调整两棵树的高度')} title={t('上下拖动调整两棵树的高度，双击恢复')}></div>
+
+      <section class="side-sec tree-sec folders" data-drop="top">
+        <h3>
+          <a class:list={['sec-link', { current: atTop }]} href={viewHref(ARCHIVE_VIEW)} data-nav data-view={ARCHIVE_VIEW} title={t('整理好的文件夹：名义、作品、版本和普通文件夹')}>{t('已归档')}</a>
+          <span>
+            <button type="button" class="icon-button" data-act="expand-all" title={t('展开或收起全部（*）')} aria-label={t('展开或收起全部')}>⇕</button>
+            <button type="button" class="icon-button" data-act="new-folder" data-under="top" title={t('在顶层新建文件夹')} aria-label={t('在顶层新建文件夹')}>＋</button>
+          </span>
+        </h3>
+        <FolderTree nodes={tree} current={q.loc} open={open} problems={problemTexts} editions={editionOfFolder} />
+      </section>
+
+      <section class="side-sec smart" data-sec="smart">
+        <h3>
+          <button type="button" class="sec-toggle" data-act="toggle-sec" data-sec="smart" aria-expanded="true">{t('智能文件夹')}</button>
+          <button type="button" class="icon-button" data-act="smart-new" title={t('新建智能文件夹')} aria-label={t('新建智能文件夹')}>＋</button>
+        </h3>
+        <div class="sec-body">
         <ul>
           {smartFolders.map((s) => (
             <li><a class:list={['entry', { current: q.view === `sf:${s.id}` }]} href={viewHref(`sf:${s.id}`)} data-nav data-smart={s.id}><span class="sf-icon" aria-hidden="true">⚙</span>{s.name}</a></li>
@@ -346,23 +403,9 @@ const Page = partial ? Bare : Admin;
             ))}
           </ul>
         </details>
+        </div>
       </section>
 
-      <section class="side-sec folders" data-drop="top">
-        <h3>
-          {t('文件夹')}
-          <span>
-            <button type="button" class="icon-button" data-act="expand-all" title={t('展开或收起全部（*）')} aria-label={t('展开或收起全部')}>⇕</button>
-            <button type="button" class="icon-button" data-act="new-folder" data-under="top" title={t('在顶层新建文件夹')} aria-label={t('在顶层新建文件夹')}>＋</button>
-          </span>
-        </h3>
-        <FolderTree nodes={tree} current={q.loc} open={open} problems={problemTexts} editions={editionOfFolder} />
-      </section>
-
-      <details class="side-sec source" data-source open={!!q.dir}>
-        <summary><h3>{t('按来源浏览')}</h3></summary>
-        <div data-source-body data-dir={q.dir}><p class="muted small">{t('读取中…')}</p></div>
-      </details>
     </aside>
     )}
 
@@ -374,15 +417,22 @@ const Page = partial ? Bare : Admin;
         <nav class="crumbs" aria-label={t('位置')}>
           {folder ? (
             <>
-              <a href={viewHref('all')} data-nav class="crumb-root">{t('全部')}</a>
+              <a href={viewHref(ARCHIVE_VIEW)} data-nav class="crumb-root">{t('已归档')}</a>
               {places.chain(q.loc).map((k) => (
                 <> <span class="sep">›</span> <a href={folderHref(k)} data-nav data-drop="folder" data-folder={split(k)[1]}>{places.name(k, t)}</a></>
+              ))}
+            </>
+          ) : q.view === 'unplaced' ? (
+            <>
+              <a href={viewHref('unplaced')} data-nav data-drop="unplaced" class="crumb-root">{t('未归档')}</a>
+              {dirParts.map((part, i) => (
+                <> <span class="sep">›</span> <a href={`/admin/inbox?view=unplaced&dir=${encodeURIComponent(dirParts.slice(0, i + 1).join('/'))}`} data-nav>{part}</a></>
               ))}
             </>
           ) : (
             <a href={viewHref(q.view)} data-nav>{viewName(q.view)}</a>
           )}
-          {dirParts.length > 0 && (
+          {dirParts.length > 0 && q.view !== 'unplaced' && (
             <span class="dir-crumbs" title={t('按来源浏览')}>
               <span class="sep">·</span> {t('来源：')}
               {dirParts.map((part, i) => <>{i > 0 && ' / '}<a href={here({ dir: dirParts.slice(0, i + 1).join('/') })} data-nav>{part}</a></>)}
@@ -395,7 +445,7 @@ const Page = partial ? Bare : Admin;
           {!q.loc && <input type="hidden" name="view" value={q.view} />}
           {q.dir && <input type="hidden" name="dir" value={q.dir} />}
           {q.sub && <input type="hidden" name="sub" value="1" />}
-          <input type="search" name="q" value={q.q} placeholder={folder ? t('在这个文件夹里搜索') : t('在这里搜索文件名或路径')} aria-label={t('搜索')} />
+          <input type="search" name="q" value={q.q} placeholder={folder || (q.view === 'unplaced' && q.dir) ? t('在这个文件夹里搜索') : t('在这里搜索文件名或路径')} aria-label={t('搜索')} />
         </form>
         <div class="top-tools">
           <label class="small">{t('排序')}
@@ -408,7 +458,7 @@ const Page = partial ? Bare : Admin;
             <button type="button" data-act="layout" data-layout="list" title={t('列表')} aria-label={t('列表')}>☰</button>
             <button type="button" data-act="layout" data-layout="grid" title={t('网格')} aria-label={t('网格')}>▦</button>
           </span>
-          {folder && (
+          {(folder || (q.view === 'unplaced' && !q.q)) && (
             <label class="small sub-toggle"><input type="checkbox" data-act="sub" checked={q.sub} /> {t('显示子文件夹内容')}</label>
           )}
           <button type="button" class="icon-button" data-act="help" title={t('快捷键（?）')} aria-label={t('快捷键')}>?</button>
@@ -433,7 +483,7 @@ const Page = partial ? Bare : Admin;
         )}
         {preset && !preset.editions && <p class="view-note muted">{t(preset.hint)}{preset.link && <> · <a href={preset.link.href}>{t(preset.link.label)} ›</a></>}</p>}
 
-        {listsFiles && (rows.length > 0 || subfolders.length > 0) && (
+        {listsFiles && (rows.length > 0 || subfolders.length > 0 || srcDirs.length > 0) && (
           <div class="items-head" aria-hidden="true">
             <span></span>
             <span></span>
@@ -445,7 +495,7 @@ const Page = partial ? Bare : Admin;
           </div>
         )}
 
-        {folder && (
+        {(folder || atTop) && (
           <div class="tiles" role="list" aria-label={t('子文件夹')}>
             {subfolders.map((f) => {
               const node = byKey.get(folderKey(f.id));
@@ -461,9 +511,22 @@ const Page = partial ? Bare : Admin;
                 </div>
               );
             })}
-            <button type="button" class="tile new" data-act="new-folder" data-under={q.loc} title="Ctrl+Shift+N">
+            <button type="button" class="tile new" data-act="new-folder" data-under={q.loc || 'top'} title="Ctrl+Shift+N">
               <span aria-hidden="true">＋</span> {t('新建文件夹')}
             </button>
+          </div>
+        )}
+
+        {srcDirs.length > 0 && (
+          <div class="tiles" role="list" aria-label={t('子文件夹')}>
+            {srcDirs.map((d) => (
+              <div class="tile item-folder" role="listitem" tabindex="-1" data-src={d.path} draggable="true" title={d.path}>
+                <FolderIcon kind="plain" size={28} />
+                <a class="tname" href={`/admin/inbox?view=unplaced&dir=${encodeURIComponent(d.path)}`} data-nav tabindex="-1">{d.name}</a>
+                <span class="muted small">{t('{n} 个', { n: d.n })}</span>
+                <button type="button" class="more" data-act="menu" aria-label={t('更多操作')} tabindex="-1">⋯</button>
+              </div>
+            ))}
           </div>
         )}
 
@@ -545,7 +608,7 @@ const Page = partial ? Bare : Admin;
                             {f.role && ROLE_LABELS[f.role] && <span class="chip">{t(ROLE_LABELS[f.role])}</span>}
                           </span>
                           {f.note && <span class="muted small note">{f.note}</span>}
-                          {(q.sort !== 'path' || q.view === 'suggested') && <span class="muted mono src-path" title={f.dir}>{f.dir}</span>}
+                          {!browse && (q.sort !== 'path' || q.view === 'suggested') && <span class="muted mono src-path" title={f.dir}>{f.dir}</span>}
                         </div>
                         <div class="isize">{formatBytes(f.size)}</div>
                         <div class="ispec" title={fmt.probe_error ?? formatSpec(fmt)}>{formatSpec(fmt)}</div>
@@ -571,10 +634,12 @@ const Page = partial ? Bare : Admin;
                 </>
               ))}
             </div>
-            {total === 0 && (
+            {total === 0 && srcDirs.length === 0 && (
               <div class="empty">
                 {q.view === 'unplaced' && !q.dir && !q.q ? (
                   <p>{t('全部整理完了。')}</p>
+                ) : browse ? (
+                  <p class="muted">{t('这个文件夹里的文件都整理好了。')}</p>
                 ) : folder && subfolders.length === 0 ? (
                   <p>{t('这个文件夹是空的：把文件拖到这里的文件夹上，或右键新建子文件夹。')}</p>
                 ) : folder ? (
@@ -619,9 +684,10 @@ const Page = partial ? Bare : Admin;
         <Inspector mode="folder" places={places} view={openFolder} />
       ) : (
         <Inspector
-          mode="view" title={title} hint={preset ? t(preset.hint) : q.view === 'unplaced' ? t('还不在任何文件夹里的文件。有规则建议的可以「按建议归档」，其余的拖到左侧的文件夹上。')
-            : q.view === 'suggested' ? t('建议把握度在 50% 以上、还没归档的文件（批量「按建议归档」处理的就是这些），按建议的作品分组：勾选一组按 A 即可。') : undefined}
-          count={total} bytes={totals?.bytes ?? 0} link={preset?.link ? { href: preset.link.href, label: t(preset.link.label) } : null}
+          mode="view" title={title} hint={preset ? t(preset.hint) : q.view === 'unplaced' ? t('还没归档的文件，按原始文件夹排列。把文件或整个文件夹拖到左边「已归档」里的文件夹上即可归档；有规则建议的可以「按建议归档」。')
+            : q.view === 'suggested' ? t('建议把握度在 50% 以上、还没归档的文件（批量「按建议归档」处理的就是这些），按建议的作品分组：勾选一组按 A 即可。')
+            : atTop ? t('整理好的文件夹。名义、作品、版本都是带图标的文件夹，操作和普通文件夹一样。') : undefined}
+          count={browseTotals?.n ?? total} bytes={browseTotals?.bytes ?? totals?.bytes ?? 0} link={preset?.link ? { href: preset.link.href, label: t(preset.link.label) } : null}
           smart={smart?.id ?? null} rules={smart ? ruleText(smart.rules) : []}
         />
       )}

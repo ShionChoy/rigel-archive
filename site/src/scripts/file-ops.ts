@@ -90,16 +90,20 @@ export async function folderRequest(body: Record<string, unknown>): Promise<Repl
 }
 
 /**
- * A file action (the 整理台's POST /admin/inbox): on these files, or with `all` on every file the list at
- * `search` (the 整理台's query string) shows. Shows a failure; null then.
+ * A file action (the 整理台's POST /admin/inbox): on these files (and the files still to organize in the
+ * original folders `dirs`), or with `all` on every file the list at `search` (the 整理台's query string)
+ * shows. Shows a failure; null then.
  */
 export async function fileRequest(
-  action: string, ids: string[], extra: Record<string, string> = {}, opts: { all?: boolean; search?: string } = {},
+  action: string, ids: string[], extra: Record<string, string> = {}, opts: { all?: boolean; search?: string; dirs?: string[] } = {},
 ): Promise<Reply | null> {
   const body = new FormData();
   body.append('action', action);
   if (opts.all) body.append('scope', 'filter');
-  else for (const id of ids) body.append('ids', id);
+  else {
+    for (const id of ids) body.append('ids', id);
+    for (const dir of opts.dirs ?? []) body.append('dirs', dir);
+  }
   for (const [k, v] of Object.entries(extra)) body.append(k, v);
   const r = await postForm(`/admin/inbox${opts.search ?? ''}`, body);
   if (!r.ok) {

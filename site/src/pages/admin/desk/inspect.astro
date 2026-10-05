@@ -1,6 +1,7 @@
 ---
 // The 整理台's inspector for what is selected, loaded into the page without navigating:
-// GET ?file=<id> | ?folder=<id>; POST {"files": [...], "folders": [...]} for several.
+// GET ?file=<id> | ?folder=<id>; POST {"files": [...], "folders": [...], "dirs": [...]} for several (dirs:
+// original folders of 未归档, standing for the files in them still to organize).
 import { env } from 'cloudflare:workers';
 import Inspector from '../../../components/desk/Inspector.astro';
 import { fileView, filesSummary, folderView } from '../../../lib/desk';
@@ -9,6 +10,7 @@ import { Places } from '../../../lib/locations';
 import { derivedFor } from '../../../lib/processing';
 import { db } from '../../../lib/db';
 import { fileTagView } from '../../../lib/tagedit';
+import { idsInDirs } from '../../../lib/inbox';
 
 export const partial = true;
 
@@ -16,10 +18,12 @@ const { t } = Astro.locals;
 const actor = Astro.locals.admin!.email;
 const url = Astro.url;
 const places = await Places.load();
-let body: { files?: unknown; folders?: unknown } = {};
+let body: { files?: unknown; folders?: unknown; dirs?: unknown } = {};
 if (Astro.request.method === 'POST') body = ((await Astro.request.json().catch(() => ({}))) ?? {}) as typeof body;
 const list = (v: unknown) => (Array.isArray(v) ? v.map(String).filter((s) => /^[\w-]{1,80}$/.test(s)) : []);
-const files = body.files !== undefined ? list(body.files) : url.searchParams.get('file') ? [url.searchParams.get('file')!] : [];
+const dirs = Array.isArray(body.dirs) ? body.dirs.map(String).slice(0, 200) : [];
+let files = body.files !== undefined ? list(body.files) : url.searchParams.get('file') ? [url.searchParams.get('file')!] : [];
+if (dirs.length) files = [...new Set([...files, ...(await idsInDirs(dirs)).keys()])];
 const folders = body.folders !== undefined ? list(body.folders) : url.searchParams.get('folder') ? [url.searchParams.get('folder')!] : [];
 
 let mode: 'folder' | 'file' | 'files' | 'empty' = 'empty';
@@ -28,7 +32,7 @@ let file = null;
 let derived = undefined;
 let summary = null;
 let tags = null;
-if (files.length === 1 && folders.length === 0) {
+if (files.length === 1 && folders.length === 0 && dirs.length === 0) {
   file = await fileView(files[0]);
   if (file) {
     mode = 'file';

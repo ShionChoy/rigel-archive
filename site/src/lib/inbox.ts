@@ -1,6 +1,5 @@
 import { ChangeSet } from './changes';
 import { RIGHTS, RIGHTS_LABELS, isOneOf } from './constants';
-import type { DirNode } from '../components/DirTree.astro';
 import { db, parseSuggestion, type Suggestion } from './db';
 import { deleteFiles, planDelete, type DeletePlan } from './deletion';
 import { newId } from './ids';
@@ -23,11 +22,14 @@ export interface DeskQuery {
   view: string; // a fixed view, p:<preset> or sf:<smart folder id>; '' when a folder is open
   loc: string; // the open folder (fd:<id>), or ''
   sub: boolean; // with the files of its subfolders
-  dir: string; // 按来源浏览: an original folder and everything below it
+  dir: string; // an original folder: in 未归档 the one open (browse), elsewhere it and everything below it
   q: string;
   sort: Sort;
   desc: boolean;
 }
+
+/** 未归档 opened like a folder: the original folder `dir` with its subfolders, not every file below it. */
+export const browsing = (q: Pick<DeskQuery, 'view' | 'loc' | 'sub' | 'q'>) => !q.loc && q.view === 'unplaced' && !q.sub && !q.q;
 
 /** The query of a 整理台 URL. Links from before the folder tree (state=, tree=source, release=, loc=rel:…) still work. */
 export function readDeskQuery(params: URLSearchParams, places: Places): DeskQuery {
@@ -46,19 +48,15 @@ export function readDeskQuery(params: URLSearchParams, places: Places): DeskQuer
     view = state === 'ignored' ? 'ignored' : state === 'all' || state === 'classified' || state === 'published' ? 'all' : 'unplaced';
   }
   const sort = params.get('sort') ?? '';
-  return {
-    view,
-    loc,
-    sub: params.get('sub') === '1',
-    dir: params.get('dir') ?? '',
-    q: (params.get('q') ?? '').trim(),
-    sort: isOneOf(SORTS, sort) ? sort : loc ? 'name' : 'path',
-    desc: params.get('desc') === '1',
-  };
+  const q = { view, loc, sub: params.get('sub') === '1', dir: (params.get('dir') ?? '').replace(/^\/+|\/+$/g, ''), q: (params.get('q') ?? '').trim() };
+  return { ...q, sort: isOneOf(SORTS, sort) ? sort : loc || browsing(q) ? 'name' : 'path', desc: params.get('desc') === '1' };
 }
 
+/** 已归档 opened at its top: the top-level folders. */
+export const ARCHIVE_VIEW = 'archive';
+
 function isView(view: string): boolean {
-  if ((FIXED_VIEWS as readonly string[]).includes(view)) return true;
+  if ((FIXED_VIEWS as readonly string[]).includes(view) || view === ARCHIVE_VIEW) return true;
   if (view.startsWith('p:')) return !!presetOf(view.slice(2));
   return /^sf:[\w-]{1,40}$/.test(view);
 }
@@ -97,12 +95,9 @@ export function deskWhere(q: DeskQuery, places: Places, smart?: SmartFolder | nu
   } else if (q.view.startsWith('sf:')) {
     if (smart) add(ruleSetSql(smart.rules, places));
     else parts.push('0');
-  } else if (q.view === 'trash') parts.push('0');
-  if (q.dir) {
-    // The folder and everything below it: 'a/b' plus every 'a/b/…' ('0' is the character after '/').
-    // A range instead of LIKE: D1 refuses LIKE patterns longer than 50 bytes, and this uses the index.
-    add({ sql: '(files.dir = ? OR (files.dir >= ? AND files.dir < ?))', binds: [q.dir, `${q.dir}/`, `${q.dir}0`] });
-  }
+  } else if (q.view === 'trash' || q.view === ARCHIVE_VIEW) parts.push('0');
+  if (browsing(q)) add({ sql: 'files.dir = ?', binds: [q.dir] });
+  else if (q.dir) add(underDir(q.dir));
   if (q.q) add({ sql: "instr(lower(files.dir || '/' || files.name || char(10) || coalesce(files.download_name, '')), lower(?)) > 0", binds: [q.q] });
   return { sql: `WHERE ${parts.join(' AND ')}`, binds };
 }
@@ -138,48 +133,57 @@ export async function viewCounts(): Promise<Record<Exclude<FixedView, 'trash'>, 
   return { all: row?.all_ ?? 0, unplaced: row?.unplaced ?? 0, suggested: row?.suggested ?? 0, ignored: row?.ignored ?? 0 };
 }
 
-export interface SourceNode extends DirNode {
-  left: number; // still to organize
+/**
+ * SQL (on `files`): in the original folder `dir` or anywhere below it: 'a/b' plus every 'a/b/…' ('0' is the
+ * character after '/'). A range instead of LIKE: D1 refuses LIKE patterns longer than 50 bytes, and this uses the index.
+ */
+export function underDir(dir: string): { sql: string; binds: unknown[] } {
+  return dir ? { sql: '(files.dir = ? OR (files.dir >= ? AND files.dir < ?))', binds: [dir, `${dir}/`, `${dir}0`] } : { sql: '1', binds: [] };
 }
 
-/** The original folders (visible files), each with how many files are still to organize. */
-export async function sourceTree(onlyUnplaced = false): Promise<{ nodes: SourceNode[]; total: number; left: number }> {
-  const { results } = await db()
-    .prepare(
-      `SELECT dir, count(*) AS n, sum(state = 'inbox' AND release_id IS NULL AND folder_id IS NULL) AS left FROM files
-       WHERE ${VISIBLE} ${onlyUnplaced ? "AND release_id IS NULL AND folder_id IS NULL AND state != 'ignored'" : ''} GROUP BY dir`,
-    )
-    .all<{ dir: string; n: number; left: number }>();
+/** An original folder in 未归档: its name, path and how many files to organize it still holds (at any depth). */
+export interface SourceDir {
+  name: string;
+  path: string;
+  n: number;
+}
 
-  interface Build { name: string; path: string; n: number; left: number; children: Map<string, Build> }
-  const root: Build = { name: '', path: '', n: 0, left: 0, children: new Map() };
-  for (const { dir, n, left } of results) {
-    root.n += n;
-    root.left += left;
-    if (!dir) continue;
-    let node = root;
-    const parts = dir.split('/');
-    parts.forEach((part, i) => {
-      let child = node.children.get(part);
-      if (!child) {
-        child = { name: part, path: parts.slice(0, i + 1).join('/'), n: 0, left: 0, children: new Map() };
-        node.children.set(part, child);
-      }
-      child.n += n;
-      child.left += left;
-      node = child;
-    });
+/** The original folders right below `dir` that still hold files to organize, and how many files are directly in `dir`. */
+export async function sourceChildren(dir: string): Promise<{ dirs: SourceDir[]; own: number }> {
+  const w = underDir(dir);
+  const { results } = await db()
+    .prepare(`SELECT files.dir AS dir, count(*) AS n FROM files WHERE ${UNPLACED_SQL} AND ${w.sql} GROUP BY files.dir`)
+    .bind(...w.binds)
+    .all<{ dir: string; n: number }>();
+  const below = new Map<string, number>();
+  let own = 0;
+  for (const r of results) {
+    if (r.dir === dir) own += r.n;
+    else {
+      const name = (dir ? r.dir.slice(dir.length + 1) : r.dir).split('/')[0];
+      below.set(name, (below.get(name) ?? 0) + r.n);
+    }
   }
-  const finish = (b: Build): SourceNode[] =>
-    [...b.children.values()]
-      .sort((a, c) => a.name.localeCompare(c.name, 'ja'))
-      .map((c) => ({ name: c.name, path: c.path, n: c.n, left: c.left, children: finish(c) }));
-  return { nodes: finish(root), total: root.n, left: root.left };
+  const dirs = [...below].map(([name, n]) => ({ name, path: dir ? `${dir}/${name}` : name, n }));
+  dirs.sort((a, b) => a.name.localeCompare(b.name, 'ja', { numeric: true }));
+  return { dirs, own };
+}
+
+/** The files still to organize in these original folders (at any depth), each with the folder it was taken from. */
+export async function idsInDirs(dirs: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  for (const dir of dirs) {
+    const w = underDir(dir);
+    const { results } = await db().prepare(`SELECT id FROM files WHERE ${UNPLACED_SQL} AND ${w.sql}`).bind(...w.binds).all<{ id: string }>();
+    for (const r of results) if (!out.has(r.id)) out.set(r.id, dir);
+  }
+  return out;
 }
 
 export type InboxAction =
   | { action: 'accept'; preview?: boolean } // preview: say what it would do, change nothing
-  | { action: 'move'; target: string; keep: string | null; newFolder: string | null }
+  // keep: the folders below this original folder come along; bases: the same per file (original folders moved whole)
+  | { action: 'move'; target: string; keep: string | null; newFolder: string | null; bases?: Map<string, string> }
   | { action: 'rights'; rights: string }
   | { action: 'ignore' }
   | { action: 'reset' }
@@ -296,7 +300,7 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
   }
   if (a.action === 'rename') return renameFiles(actor, a.names);
   if (a.action === 'move') {
-    const r = await moveFiles(actor, ids, a.target, t, a.keep, a.newFolder);
+    const r = await moveFiles(actor, ids, a.target, t, a.keep, a.newFolder, a.bases);
     return { summary: r.summary, changed: r.changed, skipped: r.skipped, lowConfidence: 0, batchId: r.batchId };
   }
   if (a.action === 'seal' || a.action === 'unseal') {

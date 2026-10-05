@@ -5,6 +5,7 @@
 // its files. An edition without tracks (scans, a PV) shows its information, cover and files.
 import Admin from '../../../layouts/Admin.astro';
 import Dialogs from '../../../components/desk/Dialogs.astro';
+import FileIcon from '../../../components/desk/FileIcon.astro';
 import FolderIcon from '../../../components/desk/FolderIcon.astro';
 import PlacePicker from '../../../components/PlacePicker.astro';
 import { FILE_KIND_LABELS, RIGHTS_LABELS } from '../../../lib/constants';
@@ -515,6 +516,7 @@ const KIND_FILTERS: Record<string, string> = { audio: N_('音频'), image: N_('�
             >
               <td class="sel">{depth > 0 && <input type="checkbox" data-sel aria-label={t('选择 {name}', { name: node.name })} />}</td>
               <td style={`--depth:${depth}`} class="tree-name">
+                <button type="button" class="twisty" data-twisty tabindex="-1" aria-label={t('展开或收起')} aria-expanded="true"></button>
                 <FolderIcon kind={depth === 0 ? 'edition' : 'plain'} />
                 <a class="fname" href={`/admin/inbox?loc=${folderKey(node.id)}`} title={t('在整理台中显示')}>{node.name}</a>
               </td>
@@ -526,10 +528,11 @@ const KIND_FILTERS: Record<string, string> = { audio: N_('音频'), image: N_('�
               class:list={['file-row', { muted: f.state === 'ignored' || !!f.old }]} data-key={`f:${f.id}`} data-kind={f.kind} data-ext={f.ext}
               data-name={f.download_name || f.name} data-orig={f.name} data-origin={f.origin} data-parent={parent ?? ''} data-state={f.state}
               data-row={rowOfFile.get(f.id)} data-cover={coverable(f) ? '1' : undefined} data-tagged={taggedNames.has(f.id) ? '1' : undefined}
-              data-blob={f.blob_key ? '1' : undefined} data-loose={loose(f) ? kindLabel(f.kind) : undefined} draggable="true"
+              data-blob={f.blob_key ? '1' : undefined} data-loose={loose(f) ? kindLabel(f.kind) : undefined} data-depth={depth} draggable="true"
             >
               <td class="sel"><input type="checkbox" data-sel aria-label={t('选择 {name}', { name: f.download_name || f.name })} /></td>
               <td style={`--depth:${depth}`} class="tree-name">
+                <span class="twisty none"></span><FileIcon kind={f.kind} />
                 <a class="fname" href={`/admin/files/${f.id}`} title={f.download_name && f.download_name !== f.name ? t('原文件名：{name}', { name: f.name }) : undefined}>{f.download_name || f.name}</a>
                 {f.track_id && rowOfTrack.get(f.track_id) && <span class="muted small"> → {t('第 {n} 首', { n: rowOfTrack.get(f.track_id)!.position })}</span>}
                 {f.old ? <span class="chip ignored">{t('旧版本')}</span> : null}

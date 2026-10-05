@@ -564,9 +564,12 @@ export interface MoveResult {
 
 /**
  * Put files in a folder. With `keep`, the folders below that original folder come along: a file in
- * `<keep>/a/b` goes to the folder a/b under the place (made where missing).
+ * `<keep>/a/b` goes to the folder a/b under the place (made where missing). `bases` does the same per file
+ * (an original folder dragged whole: its files keep the folders from its parent down).
  */
-export async function moveFiles(actor: string, ids: string[], where: string, t: T, keep?: string | null, newFolder?: string | null): Promise<MoveResult> {
+export async function moveFiles(
+  actor: string, ids: string[], where: string, t: T, keep?: string | null, newFolder?: string | null, bases?: Map<string, string>,
+): Promise<MoveResult> {
   const places = await Places.load();
   if (!places.exists(where) || where === UNPLACED || (where === TOP && !newFolder)) throw new UserError('文件要放进某个文件夹');
   const rows = await loadRows<MoveRow>('id, dir, state, rights, release_id, track_id, sealed_in', ids);
@@ -583,8 +586,9 @@ export async function moveFiles(actor: string, ids: string[], where: string, t: 
       continue;
     }
     let key = target;
-    if (base !== null) {
-      const rel = row.dir === base ? '' : base === '' ? row.dir : row.dir.startsWith(`${base}/`) ? row.dir.slice(base.length + 1) : '';
+    const from = bases?.get(row.id) ?? base;
+    if (from !== null) {
+      const rel = row.dir === from ? '' : from === '' ? row.dir : row.dir.startsWith(`${from}/`) ? row.dir.slice(from.length + 1) : '';
       const names = rel.split('/').filter(Boolean);
       if (names.length) key = folderKey(ensureFolder(cs, places, target, names));
     }

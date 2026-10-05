@@ -61,7 +61,7 @@ const places = await Places.load();
   const placeText = document.querySelector<HTMLElement>('#place-path')!;
   const clearPlace = document.querySelector<HTMLButtonElement>('#clear-place')!;
   document.querySelector('#choose-place')?.addEventListener('click', async () => {
-    const r = await openPicker({ title: t('上传的文件放到…'), confirm: t('选定') });
+    const r = await openPicker({ title: t('上传的文件放到…'), confirm: t('选定'), current: placeInput.value || null });
     if (!r) return;
     // A new folder is made when the batch is filed (it is part of the suggestion).
     placeInput.value = r.target;

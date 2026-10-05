@@ -22,6 +22,7 @@ const editor = () => (window as unknown as { rigelEditor?: Editor }).rigelEditor
 
 const section = $('#files');
 const selected = new Set<string>(); // row keys: f:<file id>, d:<folder id>
+const closed = new Set<string>(); // folders shown closed (their triangle), kept when the list comes again
 let anchor: string | null = null; // where a Shift range starts
 
 const rows = () => $$<HTMLTableRowElement>('tr[data-key]', section!);
@@ -37,6 +38,32 @@ function current(): Sel {
   return { files: keys.filter(isFile).map(idOf), folders: keys.filter((k) => !isFile(k)).map(idOf) };
 }
 
+// ------------------------------------------------------------------------------------------ opening and closing folders
+
+/** Rows inside a closed folder are hidden (and no longer selected). */
+function applyClosed() {
+  let cut = Infinity;
+  for (const r of rows()) {
+    const d = Number(r.dataset.depth || 0);
+    if (d <= cut) cut = Infinity;
+    const key = r.dataset.key!;
+    const shut = !isFile(key) && closed.has(idOf(key));
+    r.classList.toggle('closed', shut);
+    r.querySelector('[data-twisty]')?.setAttribute('aria-expanded', String(!shut));
+    r.hidden = cut !== Infinity;
+    if (r.hidden) selected.delete(key);
+    if (!r.hidden && shut) cut = d;
+  }
+}
+
+function toggleFolder(key: string) {
+  const id = idOf(key);
+  if (closed.has(id)) closed.delete(id);
+  else closed.add(id);
+  applyClosed();
+  paint();
+}
+
 // ------------------------------------------------------------------------------------------ selection
 
 function paint() {
@@ -48,7 +75,7 @@ function paint() {
   }
   const n = selected.size;
   const all = $<HTMLInputElement>('input[data-sel-all]', section!);
-  const choosable = rows().filter(selectable);
+  const choosable = rows().filter((r) => selectable(r) && !r.hidden);
   if (all) {
     all.checked = n > 0 && n === choosable.length;
     all.indeterminate = n > 0 && n < choosable.length;
@@ -78,7 +105,7 @@ function selectOnly(key: string) {
 
 function toggle(key: string, range: boolean) {
   if (range && anchor) {
-    const keys = rows().filter(selectable).map((r) => r.dataset.key!);
+    const keys = rows().filter((r) => selectable(r) && !r.hidden).map((r) => r.dataset.key!);
     const a = keys.indexOf(anchor);
     const b = keys.indexOf(key);
     if (a >= 0 && b >= 0) {
@@ -168,6 +195,7 @@ async function refresh() {
   const naming = doc.querySelector('#dlg-naming [data-naming]');
   if (naming) $('#dlg-naming [data-naming]')!.textContent = naming.textContent;
   for (const k of [...selected]) if (!rowOf(k)) selected.delete(k);
+  applyClosed();
   paint();
   const ed = editor();
   if (ed && !(await ed.reload()) && ed.changes()) {
@@ -213,9 +241,11 @@ async function moveTo(sel: Sel, key: string, newFolder = '') {
 async function pickAndMove(sel: Sel) {
   if (!sel.files.length && !sel.folders.length) return;
   const blocked = new Set(sel.folders.flatMap((id) => [...below(id)]));
+  const first = sel.files.length ? rowOf(`f:${sel.files[0]}`) : rowOf(`d:${sel.folders[0]}`);
   const r = await openPicker({
     title: sel.folders.length ? t('把 {n} 个文件夹和文件移到…', { n: sel.folders.length }) : t('移动到…'),
     exclude: (key) => key === 'top' || blocked.has(key.slice(3)),
+    current: folderKey(first?.dataset.parent || home()),
   });
   if (r) await moveTo(sel, r.target, r.newFolder);
 }
@@ -659,13 +689,17 @@ function init() {
     if (el.matches('input[data-sel-all]')) {
       const on = (el as HTMLInputElement).checked;
       selected.clear();
-      if (on) for (const r of rows().filter(selectable)) selected.add(r.dataset.key!);
+      if (on) for (const r of rows().filter((x) => selectable(x) && !x.hidden)) selected.add(r.dataset.key!);
       paint();
       return;
     }
     const row = el.closest<HTMLTableRowElement>('tr[data-key]');
     if (!row) return;
     const key = row.dataset.key!;
+    if (el.closest('[data-twisty]')) {
+      toggleFolder(key);
+      return;
+    }
     if (el.closest('[data-row-menu]')) {
       if (!selected.has(key)) selectOnly(key);
       const r = el.getBoundingClientRect();
@@ -681,6 +715,12 @@ function init() {
     if (e.ctrlKey || e.metaKey || e.shiftKey) toggle(key, e.shiftKey);
     else selectOnly(key);
     row.focus({ preventScroll: true });
+  });
+  // A folder's row opens and closes on a double click (its name is a link to the 整理台).
+  section.addEventListener('dblclick', (ev) => {
+    const el = ev.target as HTMLElement;
+    const row = el.closest<HTMLTableRowElement>('tr.folder-row[data-key]');
+    if (row && !el.closest('a, button, input')) toggleFolder(row.dataset.key!);
   });
   section.addEventListener('contextmenu', (ev) => {
     const row = (ev.target as HTMLElement).closest<HTMLTableRowElement>('tr[data-key]');

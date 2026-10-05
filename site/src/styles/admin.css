@@ -353,17 +353,18 @@ dialog.picker { width: min(640px, 94vw); background: var(--panel); color: var(--
 dialog.picker::backdrop { background: var(--backdrop); }
 dialog.picker h3 { margin: 0 0 8px; font-size: 16px; }
 dialog.picker input[type="search"] { width: 100%; }
-dialog.picker ul { list-style: none; margin: 8px 0; padding: 0; max-height: 50vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
-dialog.picker li { padding: 4px 8px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--line-soft); }
-dialog.picker li:hover { background: var(--pick-hover); }
-dialog.picker li.chosen { background: var(--accent-soft); font-weight: 600; }
-dialog.picker li.recent { background: var(--recent); }
-dialog.picker li.k-era, dialog.picker li.k-top { font-weight: 600; }
-dialog.picker li.k-top { color: var(--muted); }
-dialog.picker li.k-plain::before { content: '▭ '; color: var(--f-plain); }
-dialog.picker li.k-era::before { content: '⚑ '; color: var(--ask); }
-dialog.picker li.k-release::before { content: '● '; color: var(--accent); }
-dialog.picker li.k-edition::before { content: '■ '; color: var(--f-edition); }
+/* the picker's places: the same tree as the 整理台's (folders open with their triangle; files are greyed) */
+dialog.picker .picker-tree { margin: 8px 0; padding: 4px; height: min(52vh, 460px); overflow: auto; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; outline: none; }
+.picker-tree .frow:hover { background: var(--pick-hover); }
+.picker-tree .frow.chosen { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.picker-tree .frow.disabled { color: var(--muted); cursor: not-allowed; }
+.picker-tree .frow.inert { cursor: default; color: var(--muted); }
+.picker-tree .frow.inert:hover { background: none; }
+.picker-tree .frow .chip { margin-left: 6px; }
+.picker-tree .picker-label { padding: 6px 6px 2px; font-size: 11px; font-weight: 600; color: var(--muted); list-style: none; }
+.picker-tree .picker-label ~ .picker-label { margin-top: 6px; border-top: 1px solid var(--line-soft); }
+.picker-tree .more-files, .picker-tree .empty-note { padding: 2px 6px 2px calc(24px + var(--depth, 0) * 14px); list-style: none; }
+.ficon.top { display: inline-block; width: 16px; height: 16px; flex: none; border: 1.5px dashed var(--muted); border-radius: 3px; }
 .picker-extra { display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
 .picker-extra input[type="text"] { width: 220px; }
 .picker-chosen { min-height: 1.5em; font-size: 13px; }
@@ -447,12 +448,46 @@ body.resizing { cursor: col-resize; user-select: none; }
 .pane-toggle[aria-pressed="true"] { color: var(--accent); }
 .pane-toggle[aria-pressed="true"] .pane-fill { fill: var(--accent-soft); }
 .desk-side, .desk-inspector { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: auto; font-size: 13px; }
-.desk-side { padding: 8px 6px 16px; }
+/* the two trees scroll on their own, so that both stay in view (drag from one onto the other) */
+.desk-side { padding: 8px 6px 8px; display: flex; flex-direction: column; }
+.desk-side > * { flex: none; }
+.desk-side .tree-sec { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--line); }
+.desk-side .tree-sec > .ftree { overflow: auto; min-height: 0; }
+.desk-side .src-sec { flex: 0 1 auto; max-height: 42%; }
+.desk-side .src-sec:has(> .ftree:empty) { flex: none; }
+.desk-side .folders { flex: 1 1 auto; min-height: 160px; }
+/* the divider between the two trees: dragged, they share the height as chosen (double-click: back to the default) */
+.desk-side .tree-split { flex: none; height: 7px; margin: -3px 0 -4px; position: relative; z-index: 1; cursor: row-resize; touch-action: none; outline: none; }
+.desk-side .tree-split::after { content: ''; position: absolute; left: 8px; right: 8px; top: 2px; height: 3px; border-radius: 2px; }
+.desk-side .tree-split:hover::after, .desk-side .tree-split.active::after, .desk-side .tree-split:focus-visible::after { background: var(--accent); }
+.desk-side .src-sec:has(> .ftree:empty) + .tree-split { display: none; }
+:root[data-desk-split] .desk-side .src-sec { flex: var(--src-share) 1 0; max-height: none; min-height: 30px; }
+:root[data-desk-split] .desk-side .src-sec:has(> .ftree:empty) { flex: none; min-height: 0; }
+:root[data-desk-split] .desk-side .folders { flex: calc(1 - var(--src-share)) 1 0; min-height: 30px; }
+body.resizing-rows { cursor: row-resize; user-select: none; }
+.desk-side .smart { border-top: 1px solid var(--line); max-height: 25%; overflow: auto; }
+.desk-side .tree-empty { margin: 2px 10px 6px; }
+.side-sec .sec-link { color: inherit; display: inline-flex; align-items: center; gap: 6px; padding: 1px 4px; margin-left: -4px; border-radius: 4px; }
+.side-sec .sec-link:hover { background: var(--hover); color: var(--text); text-decoration: none; }
+.side-sec .sec-link.current { background: var(--accent-soft); color: var(--accent); }
+.side-sec .sec-link.drop-over { background: var(--accent-soft); box-shadow: inset 0 0 0 2px var(--accent); }
 .desk-inspector { padding: 12px; }
 .desk-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; position: relative; }
 
 /* sidebar */
-.desk-side .fixed { display: grid; gap: 1px; padding-bottom: 8px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+.desk-side .fixed .sec-body { display: grid; gap: 1px; padding-bottom: 4px; }
+/* 视图, 快速访问 and 智能文件夹 fold away (the choice is on <html>, applied before the page is drawn) */
+.sec-toggle { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 1px 4px 1px 0; font: inherit; color: inherit; cursor: pointer; border-radius: 4px; }
+.sec-toggle:hover { color: var(--text); }
+.sec-toggle::before { content: '▸'; display: inline-block; width: 12px; font-size: 10px; transform: rotate(90deg); transition: transform .12s; }
+.side-sec h3 .sec-note { margin-left: auto; font-weight: 400; }
+.side-sec h3 .sec-note + * { margin-left: 6px; }
+:root[data-desk-closed~="views"] .desk-side [data-sec="views"] > .sec-body,
+:root[data-desk-closed~="quick"] .desk-side [data-sec="quick"] > .sec-body,
+:root[data-desk-closed~="smart"] .desk-side [data-sec="smart"] > .sec-body { display: none; }
+:root[data-desk-closed~="views"] .sec-toggle[data-sec="views"]::before,
+:root[data-desk-closed~="quick"] .sec-toggle[data-sec="quick"]::before,
+:root[data-desk-closed~="smart"] .sec-toggle[data-sec="smart"]::before { transform: none; }
 .desk-side .entry { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 6px; color: var(--text); }
 .desk-side .entry:hover, .desk-side .frow:hover { background: var(--hover); text-decoration: none; }
 .desk-side .entry.current, .desk-side .frow.current { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
@@ -467,15 +502,6 @@ body.resizing { cursor: col-resize; user-select: none; }
 .sf-icon { color: var(--muted); font-size: 11px; width: 14px; text-align: center; }
 .icon-button { border: 0; background: none; padding: 0 4px; color: var(--muted); font-size: 14px; line-height: 1; cursor: pointer; border-radius: 4px; }
 .icon-button:hover { background: var(--hover-3); color: var(--text); }
-.side-sec.source summary { list-style: none; cursor: pointer; }
-.side-sec.source summary h3 { display: inline-flex; }
-.side-sec.source [data-source-body] { padding: 0 8px; }
-.side-sec.source ul { list-style: none; margin: 0; padding-left: 12px; }
-.side-sec.source a { color: var(--text); }
-.side-sec.source a.current { color: var(--accent); font-weight: 700; }
-.side-sec.source a.done { color: var(--ok); }
-.side-sec.source .n { margin-left: 6px; }
-.side-sec.source a.archive::after { content: '包'; margin-left: 4px; padding: 0 4px; border-radius: 4px; font-size: 10px; background: var(--plan-soft); color: var(--plan); }
 
 .ftree { list-style: none; margin: 0; padding: 0; }
 .fnode > .ftree { display: none; }
@@ -492,6 +518,13 @@ body.resizing { cursor: col-resize; user-select: none; }
 .twisty::before { content: '▸'; display: inline-block; transition: transform .12s; font-size: 11px; }
 .fnode.open > .frow .twisty::before { transform: rotate(90deg); }
 .twisty.none { visibility: hidden; pointer-events: none; }
+.frow.file-row { cursor: default; }
+.desk-side .more-files .frow { cursor: default; }
+.ficon.file { color: var(--muted); }
+.ficon.file.k-audio { color: var(--f-release); }
+.ficon.file.k-image { color: var(--ok); }
+.ficon.file.k-video { color: var(--ask); }
+.ficon.file.k-archive, .ficon.file.k-disc_image { color: var(--warn); }
 .quick-row { padding-left: 8px; }
 .desk-side .frow.drop-over, .tile.drop-over, .desk-side .entry.drop-over, .crumbs a.drop-over, .side-sec.drop-over { background: var(--accent-soft); box-shadow: inset 0 0 0 2px var(--accent); }
 .drop-no { box-shadow: inset 0 0 0 2px var(--danger-line); background: var(--bad-soft) !important; }
@@ -925,7 +958,9 @@ details.native summary { cursor: pointer; color: var(--muted); font-size: 12px; 
   background: var(--bar, #1f2430); color: #fff; padding: 8px 10px 8px 16px; border-radius: 8px; box-shadow: 0 8px 28px rgb(0 0 0 / 0.3); }
 .ed-savebar button { padding: 4px 14px; }
 .ed-notracks { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; border: 1px dashed var(--line); }
-.files-tree td.tree-name { padding-left: calc(8px + var(--depth, 0) * 18px); }
+.files-tree td.tree-name { padding-left: calc(4px + var(--depth, 0) * 18px); white-space: nowrap; }
+.files-tree td.tree-name .twisty { vertical-align: -2px; }
+.files-tree tr.folder-row:not(.closed) .twisty::before { transform: rotate(90deg); }
 .files-tree tr.folder-row td { background: var(--panel-2); font-weight: 500; }
 .files-tree tr.folder-row td.muted { font-weight: 400; }
 .files-tree td.downloads a { margin-right: 8px; }
@@ -947,6 +982,7 @@ details.native summary { cursor: pointer; color: var(--muted); font-size: 12px; 
 .files-tree tr.selected td, .files-tree tr.folder-row.selected td { background: var(--sel); }
 .files-tree tr.drop-over td { background: var(--accent-soft); box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); }
 .files-tree .ficon { margin-right: 6px; }
+.files-tree td.tree-name .fname { white-space: normal; }
 .files-tree .rename-box { display: inline-flex; width: min(420px, 100%); vertical-align: middle; }
 .ed-files.working .files-tree { opacity: .55; cursor: progress; transition: opacity .15s .1s; }
 .page-toast { position: fixed; bottom: 72px; z-index: 45; }

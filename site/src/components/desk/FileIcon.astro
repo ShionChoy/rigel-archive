@@ -1,0 +1,14 @@
+---
+// The icon of a file in the trees: a sheet with a folded corner, coloured by the file's kind (the same
+// shape as scripts/tree.ts draws).
+interface Props {
+  kind: string;
+  size?: number;
+}
+const { kind, size = 16 } = Astro.props;
+---
+
+<svg class={`ficon file k-${kind}`} width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+  <path d="M3.5 1.5h6l3 3v10h-9z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
+  <path d="M9.5 1.5v3h3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
+</svg>

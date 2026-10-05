@@ -1,7 +1,8 @@
 ---
-// The folder tree of the 整理台's sidebar. Every row is a link (opens the folder), a drop target (files
+// The 已归档 tree of the 整理台's sidebar. Every row is a link (opens the folder), a drop target (files
 // and folders dropped on it move there) and draggable; the page's script adds the rest (right-click
-// menu, renaming, opening and closing, which it remembers).
+// menu, renaming, opening and closing, which it remembers, and the files of an open folder, listed under
+// its subfolders: scripts/tree.ts).
 import type { LocNode } from '../../lib/locations';
 import FolderIcon from './FolderIcon.astro';
 
@@ -23,10 +24,11 @@ const statusText: Record<string, string> = { missing: '缺档', partial: '部分
   {
     nodes.map((node) => {
       const issues = problems.get(editions.get(node.id) ?? '') ?? [];
+      const leaf = node.children.length === 0 && node.own === 0;
       return (
-        <li class:list={['fnode', { open: open.has(node.key), leaf: node.children.length === 0 }]} data-id={node.id} role="treeitem" aria-expanded={node.children.length ? (open.has(node.key) ? 'true' : 'false') : undefined}>
+        <li class:list={['fnode', { open: open.has(node.key), leaf }]} data-id={node.id} data-own={node.own || undefined} role="treeitem" aria-expanded={leaf ? undefined : open.has(node.key) ? 'true' : 'false'}>
           <div class:list={['frow', { current: current === node.key, zero: node.n === 0 }]} data-folder={node.id} data-kind={node.kind} data-drop="folder" draggable="true" style={`--depth:${depth}`}>
-            <button type="button" class:list={['twisty', { none: node.children.length === 0 }]} tabindex="-1" aria-label={t('展开或收起')} />
+            <button type="button" class:list={['twisty', { none: leaf }]} tabindex="-1" aria-label={t('展开或收起')} />
             <FolderIcon kind={node.kind} color={node.color} />
             <a class="fname" href={`/admin/inbox?loc=${node.key}`} data-nav>{node.name}</a>
             {node.status && statusText[node.status] && <span class={`chip ${node.status}`}>{t(statusText[node.status])}</span>}
@@ -34,7 +36,7 @@ const statusText: Record<string, string> = { missing: '缺档', partial: '部分
             {node.readme && <span class="badge" title={t('有说明文件')}>{t('说明')}</span>}
             <span class="n">{node.n || ''}</span>
           </div>
-          {node.children.length > 0 && <Astro.self nodes={node.children} current={current} open={open} problems={problems} editions={editions} depth={depth + 1} />}
+          {node.children.length > 0 ? <Astro.self nodes={node.children} current={current} open={open} problems={problems} editions={editions} depth={depth + 1} /> : !leaf && <ul class="ftree" role="group"></ul>}
         </li>
       );
     })

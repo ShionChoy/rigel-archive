@@ -55,7 +55,7 @@ const nav: { href: string; label: string; icon: string; also?: string[]; exact?:
     <title>{title} · {t('管理后台')}</title>
     <script is:inline>
       // Choices kept in this browser, applied before the page is drawn: 夜间模式 (none = follow the system),
-      // the collapsed side bar, and the 整理台's hidden or resized side panes.
+      // the collapsed side bar, and the 整理台's hidden or resized side panes and how its two trees share the height.
       try {
         const root = document.documentElement;
         const theme = localStorage.getItem('rigel.theme');
@@ -66,6 +66,13 @@ const nav: { href: string; label: string; icon: string; also?: string[]; exact?:
         for (const [key, prop] of [['rigel.deskSideW', '--desk-side-w'], ['rigel.deskInspW', '--desk-insp-w']]) {
           const w = Number(localStorage.getItem(key));
           if (w >= 120 && w <= 1200) root.style.setProperty(prop, w + 'px');
+        }
+        const closed = localStorage.getItem('rigel.deskClosed');
+        if (closed && /^[a-z ]{1,60}$/.test(closed)) root.dataset.deskClosed = closed;
+        const share = Number(localStorage.getItem('rigel.deskSrcShare'));
+        if (share >= 0 && share <= 1 && localStorage.getItem('rigel.deskSrcShare') !== null) {
+          root.dataset.deskSplit = '';
+          root.style.setProperty('--src-share', String(share));
         }
       } catch {}
     </script>
