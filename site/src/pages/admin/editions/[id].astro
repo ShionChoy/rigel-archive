@@ -480,7 +480,7 @@ const KIND_FILTERS: Record<string, string> = { audio: N_('音频'), image: N_('�
       <div class="files-bar" data-files-bar>
         <div class="files-bar-idle">
           <button type="button" data-files-act="new-folder" title="Ctrl+Shift+N">{t('＋ 新建文件夹')}</button>
-          <a class="button" href={`/admin/upload?place=${folderKey(home.id)}`}>{t('上传到本版…')}</a>
+          <a class="button" href={`/admin/upload?place=${folderKey(home.id)}&back=/admin/editions/${edition.id}`}>{t('上传到本版…')}</a>
           {withTracks && looseRoot > 0 && (
             <button type="button" data-files-act="tidy" title={t('把本版根目录里的 {n} 个非音频文件（LOG、CUE、图片、说明等）一次移进一个文件夹：可以选已有的，也可以新建', { n: looseRoot })}>
               {t('整理非音频文件…')}

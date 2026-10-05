@@ -6,6 +6,8 @@ import { ChangeSet } from './changes';
 import { UPLOAD_ROOT, kindFor } from './constants';
 import { N_, summary, UserError } from './i18n';
 import { newId } from './ids';
+import { suggestedPlace } from './inbox';
+import { Places, markEditionsCollected, placePatch } from './locations';
 
 export interface UploadInput {
   batch: string; // one upload session = one revision batch, undone together
@@ -97,7 +99,6 @@ export async function registerUpload(db: D1Database, media: R2Bucket, actor: str
 
   const dot = name.lastIndexOf('.');
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
-  // A place chosen on the upload page is a suggestion with full confidence: 「按建议确认」 files it.
   const kept = [input.folder ?? '', ...(input.keep ? dirs.map((d) => d.slice(0, 200)) : [])].filter(Boolean).join('/');
   const suggest = input.place
     ? JSON.stringify({ rule: N_('上传时指定'), confidence: 1, place: input.place, ...(kept ? { folder: kept } : {}), ...(input.place.startsWith('rel:') || input.place.startsWith('ed:') ? { rights: 'own' } : {}) })
@@ -107,11 +108,23 @@ export async function registerUpload(db: D1Database, media: R2Bucket, actor: str
   const archive = ['archive', 'disc_image'].includes(kindFor(name.slice(name.lastIndexOf('.') + 1)));
   const id = newFileId();
   const cs = new ChangeSet(db, actor, summary, input.batch);
-  cs.create('file', {
+  const row: Record<string, unknown> = {
     id, origin: 'upload', dir: [input.batchDir, ...dirs].join('/'), name, ext, size: input.size, mtime: input.mtime,
     sha256: input.sha256, blob_key: key, kind: kindFor(ext), rights: 'unknown', state: 'inbox', suggest,
     note: input.note, uploaded_by: actor, sealed: input.sealed && archive ? 1 : 0,
-  });
+  };
+  // A place chosen on the upload page (the 版本页's 「上传到本版…」 chooses its edition) is where the file goes
+  // at once, with the folders asked for, in the same batch; the suggestion stays as the record of it.
+  if (input.place) {
+    const places = await Places.load();
+    const at = suggestedPlace(cs, places, JSON.parse(suggest!));
+    if (at) {
+      const place = places.place(at);
+      Object.assign(row, placePatch({ state: 'inbox', rights: 'unknown', release_id: null, track_id: null }, place));
+      markEditionsCollected(cs, places, [place.edition_id]);
+    }
+  }
+  cs.create('file', row);
   await cs.commit();
   return id;
 }

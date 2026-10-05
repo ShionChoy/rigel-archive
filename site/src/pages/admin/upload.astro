@@ -29,7 +29,7 @@ const places = await Places.load();
     <span></span>
     <label><input id="up-dup" type="checkbox" /> {t('内容与已有文件完全相同时也添加一条记录（默认跳过）')}</label>
   </div>
-  <p class="muted">{t('指定的位置作为「上传时指定」的建议记在文件上；上传完成后点「放入指定位置」即可一次放好，也可以在整理台再调整。')}</p>
+  <p class="muted">{t('指定了位置时，上传完成的文件直接放进那里（之后可以在整理台再调整）；不指定则留在整理台的「未归档」里。')}</p>
 
   <div id="drop" class="dropzone">
     {t('把文件或文件夹拖到这里，或')}
@@ -42,12 +42,7 @@ const places = await Places.load();
     <button id="clear">{t('清空列表')}</button>
     <span id="summary" class="muted"></span>
     <a id="to-inbox" hidden>{t('到整理台查看这批文件')}</a>
-    <form method="post" id="accept-form" hidden>
-      <input type="hidden" name="action" value="accept" />
-      <input type="hidden" name="scope" value="filter" />
-      <input type="hidden" name="then" value="" />
-      <button class="primary" type="submit">{t('放入指定位置')}</button>
-    </form>
+    <a id="to-back" class="button" hidden>{t('返回版本页')}</a>
   </div>
 
   <table class="grid" id="queue">
@@ -88,6 +83,11 @@ const places = await Places.load();
     placeText.textContent = placePath(given);
     clearPlace.hidden = false;
   }
+
+  // The 版本页's 「上传到本版…」 comes back to it afterwards.
+  const back = new URLSearchParams(location.search).get('back');
+  const backLink = document.querySelector<HTMLAnchorElement>('#to-back')!;
+  if (back && /^\/admin\/editions\/[\w-]+$/.test(back)) backLink.href = back;
 
   const PARALLEL = 2;
   // Files the operating system writes by itself; the import ignores them too.
@@ -217,6 +217,13 @@ const places = await Places.load();
     await storeFile(file, sha, (loaded) => show(item, 'working', t('上传中'), file.size ? loaded / file.size : 1));
   }
 
+  let registered: Promise<unknown> = Promise.resolve();
+  function registering<T>(work: () => Promise<T>): Promise<T> {
+    const next = registered.then(work, work);
+    registered = next.catch(() => undefined);
+    return next;
+  }
+
   async function run(item: Item) {
     const value = (id: string) => (document.querySelector(id) as HTMLInputElement | HTMLSelectElement).value.trim() || null;
     try {
@@ -231,8 +238,9 @@ const places = await Places.load();
         return;
       }
       if (!check.stored) await upload(item, sha);
-      show(item, 'working', t('登记到整理台'));
-      const { id } = await call<{ id: string }>('/admin/api/upload/register', {
+      show(item, 'working', placeInput.value ? t('放进指定位置') : t('登记到整理台'));
+      // One registration at a time: files going into new folders must not make the same folder twice.
+      const { id } = await registering(() => call<{ id: string }>('/admin/api/upload/register', {
         batch: session.batch,
         batchDir: session.dir,
         path: item.path,
@@ -244,7 +252,7 @@ const places = await Places.load();
         folder: placeInput.dataset.folder || null,
         sealed: document.querySelector<HTMLInputElement>('#up-sealed')!.checked,
         note: value('#up-note'),
-      });
+      }));
       show(item, 'done', check.stored ? t('完成（存储里已有相同内容，未重复上传）') : t('完成'), undefined, `/admin/files/${id}`);
     } catch (e) {
       show(item, 'error', t('失败：{error}', { error: e instanceof Error ? e.message : String(e) }));
@@ -267,13 +275,12 @@ const places = await Places.load();
     };
     await Promise.all(Array.from({ length: PARALLEL }, worker));
     running = false;
-    toInbox.href = `/admin/inbox?view=all&dir=${encodeURIComponent(session.dir)}`;
+    // The files went to the place chosen (the 整理台 opens it), else they wait in 未归档.
+    const place = placeInput.value;
+    toInbox.href = place && place.startsWith('fd:') ? `/admin/inbox?loc=${place}` : `/admin/inbox?view=all&dir=${encodeURIComponent(session.dir)}`;
+    toInbox.textContent = place ? t('在整理台打开「{place}」', { place: placeText.textContent ?? '' }) : t('到整理台查看这批文件');
     toInbox.hidden = !items.some((i) => i.status === 'done');
-    const acceptForm = document.querySelector<HTMLFormElement>('#accept-form')!;
-    acceptForm.action = `/admin/inbox?view=unplaced&dir=${encodeURIComponent(session.dir)}`;
-    // Afterwards the 整理台 opens the place the files went.
-    acceptForm.querySelector<HTMLInputElement>('input[name="then"]')!.value = placeInput.value;
-    acceptForm.hidden = !placeInput.value || !items.some((i) => i.status === 'done');
+    backLink.hidden = !backLink.getAttribute('href') || !items.some((i) => i.status === 'done');
     refresh();
   });
 
