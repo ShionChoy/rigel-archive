@@ -63,6 +63,9 @@ export function initEditor(data: EditorData) {
   // ------------------------------------------------------------------ state
   let rows: Row[] = data.rows.map((r) => ({ id: r.id, disc: r.disc, tags: structuredClone(r.tags), cover: r.cover, entry: r.entry_title, duration: r.duration_ms }));
   const baseFiles = new Map(data.rows.map((r) => [r.id, r.files]));
+  // Each saved row's number as the table shows it («disc-place»): a row shown elsewhere has moved.
+  const savedNumbers = new Map<string, string>();
+  for (const d of new Set(data.rows.map((r) => r.disc))) data.rows.filter((r) => r.disc === d).forEach((r, i) => savedNumbers.set(r.id, `${d}-${i + 1}`));
   const links = new Map<string, string | null>(); // file → row it is linked to on this page (null: none)
   const selected = new Set<string>();
   const expanded = new Set<string>();
@@ -118,10 +121,13 @@ export function initEditor(data: EditorData) {
   interface CoverInfo { width: number; height: number; mime: string; size: number | null }
   /**
    * The release being compared: which online track each row is, what was turned down, whether its cover is
-   * wanted, and its cover's size (undefined while it is being read).
+   * wanted, and its cover's size (undefined while it is being read). The rows follow the online order while
+   * `follow` (until 「恢复原来的顺序」 or a row dragged by hand); `before` is their order when the comparison
+   * started, which 「取消对比」 brings back unless the order was taken (「全部应用」).
    */
   let compare: {
     online: Online; mapping: Map<string, number | null>; rejected: Set<string>; cover: boolean; coverInfo?: CoverInfo | { err: string };
+    follow: boolean; taken: boolean; before: [string, number][];
   } | null = null;
   let editionIds: Record<string, string> | null = null; // the source's id, kept with the edition when its data was taken
   const durationOf = (r: Row): number | null => (r.duration ? r.duration / 1000 : mainFile(r)?.duration ?? null);
@@ -195,15 +201,29 @@ export function initEditor(data: EditorData) {
   /** How many rows the online order moves (to another place, or to another disc). */
   const orderMoves = (): number =>
     compare ? onlineOrder().filter((r, i) => r !== rows[i] || (onlineOf(r)?.disc ?? r.disc) !== r.disc).length : 0;
-  function takeOrder() {
-    if (!compare || !orderMoves()) return;
+  /** Put the rows in the online order, with its discs (while the comparison follows it). */
+  function arrange() {
+    if (!compare?.follow) return;
     rows = onlineOrder();
     for (const r of rows) {
       const o = onlineOf(r);
       if (o) r.disc = o.disc;
     }
-    remember();
   }
+  /** The rows back in the order they had when the comparison started (rows added since stay last). */
+  function unarrange() {
+    if (!compare) return;
+    const before = new Map(compare.before.map(([id, disc], i) => [id, { i, disc }]));
+    const key = new Map(rows.map((r, i) => [r.id, before.get(r.id)?.i ?? before.size + i]));
+    rows = [...rows].sort((a, b) => key.get(a.id)! - key.get(b.id)!);
+    for (const r of rows) r.disc = before.get(r.id)?.disc ?? r.disc;
+  }
+  /** How many rows are in another place (or disc) than when the comparison started. */
+  const movedSinceStart = (): number => {
+    if (!compare) return 0;
+    const before = new Map(compare.before.map(([id, disc], i) => [id, { i, disc }]));
+    return rows.filter((r, i) => before.has(r.id) && (before.get(r.id)!.i !== i || before.get(r.id)!.disc !== r.disc)).length;
+  };
   function takeAll() {
     if (!compare) return;
     for (const r of rows) for (const name of onlineNames()) {
@@ -647,7 +667,7 @@ export function initEditor(data: EditorData) {
       return `<tr class="data-row ${selected.has(r.id) ? 'sel' : ''} ${expanded.has(r.id) ? 'open' : ''}" data-id="${esc(r.id)}" draggable="true">
           <td><input type="checkbox" data-select="${esc(r.id)}" ${selected.has(r.id) ? 'checked' : ''} aria-label="${esc(t('选中'))}" /></td>
           <td class="handle" title="${esc(t('拖动排序'))}">⠿</td>
-          <td class="num">${n.discs > 1 ? `${r.disc}-` : ''}${String(p.pos).padStart(2, '0')}</td>
+          <td class="num ${savedNumbers.has(r.id) && savedNumbers.get(r.id) !== `${r.disc}-${p.pos}` ? 'changed' : ''}">${n.discs > 1 ? `${r.disc}-` : ''}${String(p.pos).padStart(2, '0')}</td>
           <td class="thumb">${pic ? `<img src="${esc(pic.src)}" alt="" loading="lazy" />` : ''}</td>
           ${columns.map((c) => cellHtml(r, c)).join('')}
           ${compare ? `<td class="map">${onlineOptions(r)}</td>` : ''}
@@ -773,6 +793,7 @@ export function initEditor(data: EditorData) {
       rows.push({ id: `new:${f.id}`, disc: rows.at(-1)?.disc ?? 1, tags: newTags(title), cover: null, entry: title, duration: null });
       links.delete(f.id);
       if (compare) compare.mapping = autoMap(compare.online, compare.mapping); // the new row finds its online track
+      arrange();
       render();
     } else if (b?.dataset.act === 'blank') {
       const title = prompt(t('新曲目的标题'))?.trim();
@@ -780,6 +801,7 @@ export function initEditor(data: EditorData) {
       blank += 1;
       rows.push({ id: `blank:${blank}`, disc: rows.at(-1)?.disc ?? 1, tags: newTags(title), cover: null, entry: title, duration: null, title });
       if (compare) compare.mapping = autoMap(compare.online, compare.mapping);
+      arrange();
       render();
     }
   });
@@ -819,6 +841,7 @@ export function initEditor(data: EditorData) {
       // An online track goes to one row: the row that had it lets go.
       for (const [k, v] of compare.mapping) if (i !== null && v === i) compare.mapping.set(k, null);
       compare.mapping.set(map.dataset.map!, i);
+      arrange();
       render();
       return;
     }
@@ -904,7 +927,9 @@ export function initEditor(data: EditorData) {
     dragged = null;
     const ids = [...tracks.querySelectorAll<HTMLElement>('tr.data-row')].map((tr) => tr.dataset.id!);
     const byId = new Map(rows.map((r) => [r.id, r]));
+    const was = rows.map((r) => r.id).join();
     rows = ids.map((x) => byId.get(x)!).filter(Boolean);
+    if (compare && rows.map((r) => r.id).join() !== was) compare.follow = false; // arranged by hand now
     // A row dropped among another disc's rows joins that disc.
     const at = rows.findIndex((r) => r.id === id);
     const neighbour = rows[at - 1] ?? rows[at + 1];
@@ -978,17 +1003,18 @@ export function initEditor(data: EditorData) {
     const extraOnline = online.tracks.map((x, i) => [x, i] as const).filter(([, i]) => !mapped.has(i));
     const extraLocal = rows.filter((r) => compare!.mapping.get(r.id) == null);
     const n = proposalCount();
-    const moves = orderMoves();
+    const moves = orderMoves(); // not following the online order: how far from it
+    const moved = compare.follow ? movedSinceStart() : 0; // following it: how many rows it moved
     compareBar.innerHTML = `
       <div class="cmp-head">
         ${online.cover ? `<a href="${esc(online.cover.url)}" target="_blank" rel="noopener" title="${esc(t('打开在线原图'))}"><img class="cmp-thumb" src="${esc(online.cover.thumb)}" alt="" onerror="this.style.display='none'" /></a>` : ''}
         <div class="cmp-what">
           <b>${esc(t('正在对比：{label}', { label: online.label }))}</b> <a href="${esc(online.url)}" target="_blank" rel="noopener">↗</a><br />
-          <span class="muted small">${esc(n ? t('{n} 处不同：旧值划掉、新值标绿，逐项 ✓ 采用或 ✕ 不采用。对比本身不改动任何东西，采用后和手动修改一样，保存后才生效。', { n })
+          <span class="muted small">${esc(n ? t('{n} 处不同：旧值划掉、新值标绿，逐项 ✓ 采用或 ✕ 不采用；采用的内容和手动修改一样，保存后才生效。', { n })
             : moves ? t('标签都一致，只有曲目顺序不同。') : t('没有不同之处（或都已处理）。'))}</span>
         </div>
         <div class="cmp-actions">
-          <button type="button" class="primary" data-cmp="all" ${n || moves || compare.cover ? '' : 'disabled'}>${esc(t('全部应用'))}</button>
+          <button type="button" class="primary" data-cmp="all" ${n || moves || compare.cover || (moved && !compare.taken) ? '' : 'disabled'}>${esc(t('全部应用'))}</button>
           <button type="button" data-cmp="other">${esc(t('换一个候选'))}</button>
           <button type="button" data-cmp="stop">${esc(t('取消对比'))}</button>
         </div>
@@ -1004,6 +1030,9 @@ export function initEditor(data: EditorData) {
         <label class="inline-check small"><input type="checkbox" data-cmp-cover ${compare.cover ? 'checked' : ''} /> ${esc(t('同时采用在线封面（存进本版根目录，替换全部曲目的正面封面）'))}</label>
         <button type="button" class="linkish small" data-cmp="cover">${esc(t('现在就采用封面'))}</button>`;
       })() : ''}
+      ${moved ? `<div class="cmp-order small"><span>${esc(compare.taken ? t('曲目已按在线版的顺序排好：{n} 首换了位置，保存后生效。', { n: moved })
+        : t('曲目已按在线版的顺序排好：{n} 首换了位置，保存后生效；取消对比会恢复原来的顺序。', { n: moved }))}</span>
+        <button type="button" class="linkish" data-cmp="restore">${esc(t('恢复原来的顺序'))}</button></div>` : ''}
       ${moves ? `<div class="cmp-order small"><span>${esc(t('曲目顺序和在线版不同：{n} 首的位置会变（「全部应用」也会一并排好）。', { n: moves }))}</span>
         <button type="button" class="linkish" data-cmp="order">${esc(t('按在线版排列'))}</button></div>` : ''}
       ${extraOnline.length ? `<div class="cmp-extra"><b>${esc(t('在线版多出的曲目（{n}）', { n: extraOnline.length }))}</b> ${extraOnline.map(([x, i]) =>
@@ -1048,22 +1077,34 @@ export function initEditor(data: EditorData) {
       const id = `blank:${blank}`;
       rows.push({ id, disc: x.disc, tags: { ...compare.online.album, ...x.tags }, cover: null, entry: x.title, duration: x.duration_ms, title: x.title });
       compare.mapping.set(id, Number(add.dataset.cmpAdd));
+      arrange();
       render();
       return;
     }
     if (act === 'stop') {
+      if (compare?.follow && !compare.taken) unarrange();
       compare = null;
       render();
     } else if (act === 'other') openLookup();
-    else if (act === 'order') {
-      takeOrder();
+    else if (act === 'order' && compare) {
+      compare.follow = true;
+      arrange();
+      remember();
+      render();
+    } else if (act === 'restore' && compare) {
+      unarrange();
+      compare.follow = false;
       render();
     } else if (act === 'cover') {
       if (await takeCover()) render();
     } else if (act === 'all') {
       (el as HTMLButtonElement).disabled = true;
       takeAll();
-      takeOrder();
+      if (compare) {
+        compare.follow = true;
+        compare.taken = true;
+        arrange();
+      }
       if (compare?.cover) await takeCover();
       render();
     }
@@ -1132,7 +1173,13 @@ export function initEditor(data: EditorData) {
       const res = await fetch(`/admin/editions/${data.edition.id}/lookup?op=release&ref=${encodeURIComponent(ref)}`);
       const j = (await res.json()) as { ok: boolean; err?: string; release?: Online };
       if (!j.ok || !j.release) throw new Error(j.err ?? t('读取失败'));
-      compare = { online: j.release, mapping: autoMap(j.release), rejected: new Set(), cover: false };
+      // Another candidate: the rows go back to their own order first (unless the last one's order was taken).
+      if (compare?.follow && !compare.taken) unarrange();
+      compare = {
+        online: j.release, mapping: autoMap(j.release), rejected: new Set(), cover: false,
+        follow: true, taken: false, before: rows.map((r) => [r.id, r.disc]),
+      };
+      arrange();
       panel.hidden = true;
       render();
       compareBar.scrollIntoView({ block: 'nearest' });

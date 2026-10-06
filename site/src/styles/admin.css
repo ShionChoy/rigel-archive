@@ -926,7 +926,7 @@ details.native summary { cursor: pointer; color: var(--muted); font-size: 12px; 
 .ed-table td.cell { cursor: text; min-width: 6em; }
 .ed-table td.cell:hover { outline: 1px dashed var(--line); outline-offset: -3px; }
 .ed-table td.cell input { width: 100%; font: inherit; padding: 3px 6px; }
-.ed-table td.cell.changed, .tri-table tr.changed td.new { background: var(--tag-changed); }
+.ed-table td.cell.changed, .ed-table td.num.changed, .tri-table tr.changed td.new { background: var(--tag-changed); }
 .ed-table td.cell.added, .tri-table tr.added td.new { background: var(--tag-added); }
 .ed-table td.cell.removed, .tri-table tr.removed td.new { background: var(--tag-removed); }
 .ed-table td.cell.removed s { color: var(--bad); }
