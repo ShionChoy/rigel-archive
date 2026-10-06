@@ -1048,7 +1048,7 @@ label.block input { display: block; width: 100%; margin-top: 4px; }
 .cmp-what { flex: 1; min-width: 240px; }
 .cmp-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .cmp-extra { margin-top: 6px; font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.cmp-cover { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; margin: 8px 0 2px; }
+.cmp-cover, .cmp-order { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; margin: 8px 0 2px; }
 .cv-verdict { font-weight: 500; }
 .cv-verdict.online { color: var(--ok); }
 .cv-verdict.local { color: var(--accent); }

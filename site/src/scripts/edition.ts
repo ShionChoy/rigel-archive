@@ -141,31 +141,68 @@ export function initEditor(data: EditorData) {
   const onlineNames = (): string[] => (compare ? sortNames([...Object.keys(compare.online.album), ...compare.online.tracks.flatMap((x) => Object.keys(x.tags))]) : []);
   const proposalCount = () => rows.reduce((n, r) => n + onlineNames().filter((name) => proposal(r, name)).length, 0);
   const titleKey = (s: string) => s.normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
-  /** Rows to online tracks: by order when the lengths agree, else by title, else by a length within 2 s. */
-  function autoMap(online: Online): Map<string, number | null> {
-    const out = new Map<string, number | null>();
-    const used = new Set<number>();
+  const firstNumber = (v: string[] | undefined) => (v?.length ? parseInt(v[0], 10) || null : null);
+  /**
+   * Rows to online tracks, the surest pairs first. The same title counts most (also a title with more around
+   * it, as titles taken from file names have), then a length within a few seconds, the file's own track
+   * number, and the row's place in the list (the place alone when lengths are unknown), so rows in the wrong
+   * order still find their tracks. Rows already in `fixed` keep theirs; a row with no close track gets none.
+   */
+  function autoMap(online: Online, fixed = new Map<string, number | null>()): Map<string, number | null> {
+    const out = new Map(fixed);
+    const used = new Set([...fixed.values()].filter((v): v is number => v != null));
+    const keys = online.tracks.map((x) => titleKey(x.title));
+    const pairs: { row: string; k: number; score: number; off: number; gap: number }[] = [];
     rows.forEach((r, i) => {
-      const t = online.tracks[i];
-      const d = durationOf(r);
-      if (t && (!d || !t.duration_ms || Math.abs(d * 1000 - t.duration_ms) <= 3000 || titleKey(join(values(r, 'title'))) === titleKey(t.title))) {
-        out.set(r.id, i);
-        used.add(i);
-      }
-    });
-    for (const r of rows) {
-      if (out.has(r.id)) continue;
+      if (out.has(r.id)) return;
       const title = titleKey(join(values(r, 'title')) || r.entry);
-      let j = online.tracks.findIndex((t, k) => !used.has(k) && titleKey(t.title) === title);
-      if (j < 0) {
-        const d = durationOf(r);
-        const near = d ? online.tracks.map((t, k) => [t, k] as const).filter(([t, k]) => !used.has(k) && t.duration_ms && Math.abs(t.duration_ms - d * 1000) <= 2000) : [];
-        if (near.length === 1) j = near[0][1];
-      }
-      out.set(r.id, j >= 0 ? j : null);
-      if (j >= 0) used.add(j);
+      const d = durationOf(r);
+      const number = firstNumber(original(r).tracknumber);
+      const disc = firstNumber(original(r).discnumber) ?? 1;
+      online.tracks.forEach((x, k) => {
+        if (used.has(k)) return;
+        const key = keys[k];
+        let score = 0;
+        if (title && title === key) score += 10;
+        else if (title && key && Math.min(title.length, key.length) >= 3
+          && (title.endsWith(key) || title.startsWith(key) || key.endsWith(title) || key.startsWith(title))) score += 3;
+        const gap = d && x.duration_ms ? Math.abs(d * 1000 - x.duration_ms) : null;
+        if (gap !== null) score += gap <= 1500 ? 3 : gap <= 3000 ? 2 : gap <= 6000 ? 0 : -6;
+        if (number === x.position && disc === x.disc) score += 2;
+        if (i === k) score += gap === null ? 3 : 1;
+        if (score >= 3) pairs.push({ row: r.id, k, score, off: Math.abs(i - k), gap: gap ?? Infinity });
+      });
+    });
+    pairs.sort((a, b) => b.score - a.score || a.off - b.off || a.gap - b.gap);
+    for (const p of pairs) {
+      if (out.has(p.row) || used.has(p.k)) continue;
+      out.set(p.row, p.k);
+      used.add(p.k);
     }
+    for (const r of rows) if (!out.has(r.id)) out.set(r.id, null);
     return out;
+  }
+  /**
+   * The track list in the online release's order: the rows with an online track take the places such rows
+   * hold now, in the online order; the others stay where they are.
+   */
+  function onlineOrder(): Row[] {
+    const rank = (r: Row) => onlineOf(r)!.disc * 10000 + onlineOf(r)!.position;
+    const sorted = rows.filter((r) => onlineOf(r)).sort((a, b) => rank(a) - rank(b));
+    let k = 0;
+    return rows.map((r) => (onlineOf(r) ? sorted[k++] : r));
+  }
+  /** How many rows the online order moves (to another place, or to another disc). */
+  const orderMoves = (): number =>
+    compare ? onlineOrder().filter((r, i) => r !== rows[i] || (onlineOf(r)?.disc ?? r.disc) !== r.disc).length : 0;
+  function takeOrder() {
+    if (!compare || !orderMoves()) return;
+    rows = onlineOrder();
+    for (const r of rows) {
+      const o = onlineOf(r);
+      if (o) r.disc = o.disc;
+    }
+    remember();
   }
   function takeAll() {
     if (!compare) return;
@@ -735,12 +772,14 @@ export function initEditor(data: EditorData) {
       const title = f.original.title?.[0] ?? f.name.replace(/\.[^.]+$/, '').replace(/^\d{1,3}[\s._-]+/, '');
       rows.push({ id: `new:${f.id}`, disc: rows.at(-1)?.disc ?? 1, tags: newTags(title), cover: null, entry: title, duration: null });
       links.delete(f.id);
+      if (compare) compare.mapping = autoMap(compare.online, compare.mapping); // the new row finds its online track
       render();
     } else if (b?.dataset.act === 'blank') {
       const title = prompt(t('新曲目的标题'))?.trim();
       if (!title) return;
       blank += 1;
       rows.push({ id: `blank:${blank}`, disc: rows.at(-1)?.disc ?? 1, tags: newTags(title), cover: null, entry: title, duration: null, title });
+      if (compare) compare.mapping = autoMap(compare.online, compare.mapping);
       render();
     }
   });
@@ -939,15 +978,17 @@ export function initEditor(data: EditorData) {
     const extraOnline = online.tracks.map((x, i) => [x, i] as const).filter(([, i]) => !mapped.has(i));
     const extraLocal = rows.filter((r) => compare!.mapping.get(r.id) == null);
     const n = proposalCount();
+    const moves = orderMoves();
     compareBar.innerHTML = `
       <div class="cmp-head">
         ${online.cover ? `<a href="${esc(online.cover.url)}" target="_blank" rel="noopener" title="${esc(t('打开在线原图'))}"><img class="cmp-thumb" src="${esc(online.cover.thumb)}" alt="" onerror="this.style.display='none'" /></a>` : ''}
         <div class="cmp-what">
           <b>${esc(t('正在对比：{label}', { label: online.label }))}</b> <a href="${esc(online.url)}" target="_blank" rel="noopener">↗</a><br />
-          <span class="muted small">${esc(n ? t('{n} 处不同：旧值划掉、新值标绿，逐项 ✓ 采用或 ✕ 不采用。对比本身不改动任何东西，采用后和手动修改一样，保存后才生效。', { n }) : t('没有不同之处（或都已处理）。'))}</span>
+          <span class="muted small">${esc(n ? t('{n} 处不同：旧值划掉、新值标绿，逐项 ✓ 采用或 ✕ 不采用。对比本身不改动任何东西，采用后和手动修改一样，保存后才生效。', { n })
+            : moves ? t('标签都一致，只有曲目顺序不同。') : t('没有不同之处（或都已处理）。'))}</span>
         </div>
         <div class="cmp-actions">
-          <button type="button" class="primary" data-cmp="all" ${n || compare.cover ? '' : 'disabled'}>${esc(t('全部应用'))}</button>
+          <button type="button" class="primary" data-cmp="all" ${n || moves || compare.cover ? '' : 'disabled'}>${esc(t('全部应用'))}</button>
           <button type="button" data-cmp="other">${esc(t('换一个候选'))}</button>
           <button type="button" data-cmp="stop">${esc(t('取消对比'))}</button>
         </div>
@@ -963,6 +1004,8 @@ export function initEditor(data: EditorData) {
         <label class="inline-check small"><input type="checkbox" data-cmp-cover ${compare.cover ? 'checked' : ''} /> ${esc(t('同时采用在线封面（存进本版根目录，替换全部曲目的正面封面）'))}</label>
         <button type="button" class="linkish small" data-cmp="cover">${esc(t('现在就采用封面'))}</button>`;
       })() : ''}
+      ${moves ? `<div class="cmp-order small"><span>${esc(t('曲目顺序和在线版不同：{n} 首的位置会变（「全部应用」也会一并排好）。', { n: moves }))}</span>
+        <button type="button" class="linkish" data-cmp="order">${esc(t('按在线版排列'))}</button></div>` : ''}
       ${extraOnline.length ? `<div class="cmp-extra"><b>${esc(t('在线版多出的曲目（{n}）', { n: extraOnline.length }))}</b> ${extraOnline.map(([x, i]) =>
         `<span class="chip">${x.disc > 1 ? `${x.disc}-` : ''}${x.position} ${esc(x.title)} <button type="button" class="linkish" data-cmp-add="${i}">${esc(t('新建一行'))}</button></span>`).join(' ')}</div>` : ''}
       ${extraLocal.length ? `<div class="cmp-extra"><b>${esc(t('本地多出的曲目（{n}，没有对应的在线曲目）', { n: extraLocal.length }))}</b> ${extraLocal.map((r) => `<span class="chip">${esc(join(values(r, 'title')) || r.entry)}</span>`).join(' ')}
@@ -1012,11 +1055,15 @@ export function initEditor(data: EditorData) {
       compare = null;
       render();
     } else if (act === 'other') openLookup();
-    else if (act === 'cover') {
+    else if (act === 'order') {
+      takeOrder();
+      render();
+    } else if (act === 'cover') {
       if (await takeCover()) render();
     } else if (act === 'all') {
       (el as HTMLButtonElement).disabled = true;
       takeAll();
+      takeOrder();
       if (compare?.cover) await takeCover();
       render();
     }
