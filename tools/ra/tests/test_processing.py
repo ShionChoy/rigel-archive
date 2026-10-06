@@ -198,6 +198,31 @@ def test_fingerprints_find_encodings_and_tracks_inside_longer_files(tmp_path):
     assert not any("other" in pair for pair in matches)
 
 
+def _flipped(values: np.ndarray, rates: np.ndarray, rng) -> np.ndarray:
+    """The values with each bit flipped with its value's rate (about 1 − rate of the bits agree)."""
+    bits = rng.random((values.size, 32)) < rates[:, None]
+    return values ^ (bits * (1 << np.arange(32, dtype=np.uint64))).sum(axis=1).astype(np.uint32)
+
+
+def test_another_master_that_agrees_moderately_throughout_matches_as_a_whole():
+    # RTCD-002 «Early Winter», CD and Bandcamp: ~103 s that agree 0.65–0.8 all along, so the smoothed
+    # agreement keeps dipping under MATCH_LEVEL and no single matching part reaches 30 s.
+    rng = np.random.default_rng(7)
+    a = rng.integers(0, 2**32, 830, dtype=np.uint32)
+    rates = np.where((np.arange(a.size) // 64) % 2 == 0, 0.35, 0.20)
+    b = _flipped(a, rates, rng)
+    score, longest = fp.verify(a, b, 0)
+    assert longest * fp.ITEM_SECONDS < fp.MIN_MATCH_SECONDS  # the longest part alone would not count
+    matches = fp.find_matches({"a": a, "b": b}, ["a", "b"])
+    assert len(matches) == 1 and matches[0].offset_ms == 0
+    assert abs(matches[0].matched_ms - a.size * fp.ITEM_SECONDS * 1000) < 500  # all of it
+    assert 0.7 <= matches[0].score < 0.8
+    # Under a minute such agreement is common by chance (the same beat); unrelated values never match.
+    assert fp.find_matches({"a": a[:400], "b": b[:400]}, ["a"]) == []
+    c = rng.integers(0, 2**32, 830, dtype=np.uint32)
+    assert fp.find_matches({"a": a, "c": c}, ["a"]) == []
+
+
 # ---------------------------------------------------------------- the queue, against a fake site
 
 

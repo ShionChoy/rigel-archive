@@ -13,7 +13,12 @@ Matching looks for runs of values that agree at a constant time offset:
    silence, do not vote);
 2. verification: at that offset, the share of equal bits in each second is smoothed over a few seconds;
    the seconds above MATCH_LEVEL form the matching part, which must be long enough (MIN_MATCH_SECONDS),
-   or cover at least half of a short file with close agreement (STRICT_SCORE).
+   or cover at least half of a short file with close agreement (STRICT_SCORE);
+3. the whole overlap: a different mix or master of a quiet or uneven piece agrees only moderately
+   throughout (0.65–0.8), so its smoothed agreement keeps dipping under MATCH_LEVEL and no single part
+   is long enough (RTCD-002 «Early Winter»: CD and Bandcamp, 23 s at most of 103 s). When the files
+   overlap for long enough at that offset and agree as a whole (WHOLE_*), all of the overlap is the
+   matching part.
 
 Only the new fingerprints are compared (against all of them) unless everything is matched again.
 """
@@ -38,6 +43,17 @@ MIN_MATCH_SECONDS = 30.0
 MIN_SHARE_OF_SHORTER = 0.5
 STRICT_SCORE = 0.85
 MAX_CANDIDATES = 40  # per file, verified in order of votes
+# The whole overlap counts when it is long, covers most of the shorter file, agrees on average, and has no
+# stretch near chance. Checked against every candidate pair of the archive (2026-10-06): above these, all
+# the pairs not matched before were versions of one piece (another master, mix, demo, cut of a video);
+# just below them came unrelated club tracks with the same beat, and short files (under a minute) agree
+# that much by chance.
+WHOLE_MIN_SECONDS = 60.0
+WHOLE_SHARE_OF_SHORTER = 0.8
+WHOLE_LEVEL = 0.70  # mean share of equal bits over the overlap
+WHOLE_FLOOR = 0.62  # of ~5 s stretches, the lowest tenth agrees at least this much
+WINDOW = 40  # values (~5 s)
+COMPLETE = 0.9  # a matching part this much of the shorter file is already all of it (as the site reads it)
 
 
 class FingerprintError(Exception):
@@ -107,6 +123,20 @@ def verify(a: np.ndarray, b: np.ndarray, shift: int) -> tuple[float, int] | None
     best = int(np.argmax(lengths))
     lo, hi = runs[best]
     return float(agree[lo:hi].mean()), int(hi - lo)
+
+
+def whole(a: np.ndarray, b: np.ndarray, shift: int) -> tuple[float, int] | None:
+    """Compare a[i] with b[i + shift] over all of their overlap: (score, values) when it agrees as a whole."""
+    start_a, start_b = max(0, -shift), max(0, shift)
+    n = min(a.size - start_a, b.size - start_b)
+    if n * ITEM_SECONDS < WHOLE_MIN_SECONDS or n < WHOLE_SHARE_OF_SHORTER * min(a.size, b.size):
+        return None
+    agree = _agreement(a[start_a:start_a + n], b[start_b:start_b + n])
+    stretches = agree[: n // WINDOW * WINDOW].reshape(-1, WINDOW).mean(axis=1)
+    score = float(agree.mean())
+    if score < WHOLE_LEVEL or float(np.percentile(stretches, 10)) < WHOLE_FLOOR:
+        return None
+    return score, int(n)
 
 
 def _keys(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -194,20 +224,32 @@ def find_matches(prints: dict[str, np.ndarray], query: list[str]) -> list[Match]
             pair = (name, other) if name < other else (other, name)
             if pair in found:
                 continue
-            best = None
+            best = None  # the longest matching part
+            overall = None  # the whole overlap, where it agrees as a whole
             for s in (shift - 1, shift, shift + 1):
                 result = verify(values, prints[other], s)
                 if result and (best is None or result[1] > best[1][1] or
                                (result[1] == best[1][1] and result[0] > best[1][0])):
                     best = (s, result)
-            if best is None:
+                result = whole(values, prints[other], s)
+                if result and (overall is None or result[0] > overall[1][0]):
+                    overall = (s, result)
+            shorter_values = min(values.size, prints[other].size)
+            if best is not None:
+                score, length = best[1]
+                seconds = length * ITEM_SECONDS
+                whole_short = seconds >= MIN_SHARE_OF_SHORTER * shorter_values * ITEM_SECONDS and score >= STRICT_SCORE
+                if seconds < MIN_MATCH_SECONDS and not whole_short:
+                    best = None
+            # The longest part when it is (nearly) all of the shorter file, else the whole overlap when it agrees.
+            if best is not None and best[1][1] >= COMPLETE * shorter_values:
+                chosen = best
+            else:
+                chosen = overall or best
+            if chosen is None:
                 continue
-            s, (score, length) = best
+            s, (score, length) = chosen
             seconds = length * ITEM_SECONDS
-            shorter = min(values.size, prints[other].size) * ITEM_SECONDS
-            whole_short = seconds >= MIN_SHARE_OF_SHORTER * shorter and score >= STRICT_SCORE
-            if seconds < MIN_MATCH_SECONDS and not whole_short:
-                continue
             offset = s if name == pair[0] else -s
             found[pair] = Match(pair[0], pair[1], score, round(offset * ITEM_SECONDS * 1000),
                                 round(seconds * 1000))
