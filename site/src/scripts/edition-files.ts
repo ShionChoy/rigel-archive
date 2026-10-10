@@ -1,6 +1,8 @@
 // The edition page's 「文件」 (pages/admin/editions/[id].astro): the edition's files and folders as a small
 // file manager. Tick rows (Shift for a range) or click them (Ctrl / Shift to add), then move, rename, ignore
-// or delete them from the bar, the ⋯ button or the right-click menu, or drag them onto a folder. Every
+// or delete them from the bar, the ⋯ button or the right-click menu, or drag them onto a folder. A folder
+// is chosen with everything in it: moving or deleting it takes its contents along, and what is done to
+// files (ignore, rights, 公开权限) is done to the files in it too. Every
 // action is the 整理台's own (the same requests, one history entry each, 「撤销」 in the message); the
 // section is fetched again afterwards, and the track list takes the new files when it has nothing unsaved.
 
@@ -13,7 +15,8 @@ import { openPicker, rememberPlace, resetPickerOptions } from './place-picker';
 import { namingProblem, renderName, type NameParts } from '../lib/naming';
 import type { Editor } from './edition';
 
-type Sel = { files: string[]; folders: string[] };
+/** What is chosen: the outermost files and folders (a folder stands for what is in it), and every file. */
+type Sel = { files: string[]; folders: string[]; every: string[] };
 
 // The Workers types clash with the DOM's ParentNode here; these take any element.
 const $ = <E extends Element = HTMLElement>(sel: string, root: unknown = document) => (root as ParentNode).querySelector<E>(sel);
@@ -21,7 +24,7 @@ const $$ = <E extends Element = HTMLElement>(sel: string, root: unknown = docume
 const editor = () => (window as unknown as { rigelEditor?: Editor }).rigelEditor;
 
 const section = $('#files');
-const selected = new Set<string>(); // row keys: f:<file id>, d:<folder id>
+const selected = new Set<string>(); // row keys: f:<file id>, d:<folder id>; a chosen folder's rows are in it too
 const closed = new Set<string>(); // folders shown closed (their triangle), kept when the list comes again
 let anchor: string | null = null; // where a Shift range starts
 
@@ -33,14 +36,52 @@ const selectable = (r: HTMLElement) => r.dataset.role !== 'root';
 const home = () => section?.dataset.home ?? '';
 const folderKey = (id: string) => `fd:${id}`;
 
+/** The rows inside a folder's row, open or not (they follow it, one level deeper or more). */
+function inside(key: string): HTMLTableRowElement[] {
+  if (isFile(key)) return [];
+  const all = rows();
+  const i = all.findIndex((r) => r.dataset.key === key);
+  if (i < 0) return [];
+  const depth = Number(all[i].dataset.depth || 0);
+  const out: HTMLTableRowElement[] = [];
+  for (let j = i + 1; j < all.length && Number(all[j].dataset.depth || 0) > depth; j += 1) out.push(all[j]);
+  return out;
+}
+
+/** The folders a row is in, the nearest first. */
+function around(key: string): string[] {
+  const out: string[] = [];
+  for (let parent = rowOf(key)?.dataset.parent; parent; ) {
+    const row = rowOf(`d:${parent}`);
+    if (!row) break;
+    out.push(row.dataset.key!);
+    parent = row.dataset.parent;
+  }
+  return out;
+}
+
 function current(): Sel {
   const keys = rows().map((r) => r.dataset.key!).filter((k) => selected.has(k));
-  return { files: keys.filter(isFile).map(idOf), folders: keys.filter((k) => !isFile(k)).map(idOf) };
+  const outer = keys.filter((k) => !around(k).some((a) => selected.has(a)));
+  return { files: outer.filter(isFile).map(idOf), folders: outer.filter((k) => !isFile(k)).map(idOf), every: keys.filter(isFile).map(idOf) };
+}
+
+/** Choose a row, and with a folder all that is in it. */
+function choose(key: string) {
+  selected.add(key);
+  for (const r of inside(key)) selected.add(r.dataset.key!);
+}
+
+/** Leave a row out, with all that is in it; the folders around it are then no longer chosen whole. */
+function unchoose(key: string) {
+  selected.delete(key);
+  for (const r of inside(key)) selected.delete(r.dataset.key!);
+  for (const k of around(key)) selected.delete(k);
 }
 
 // ------------------------------------------------------------------------------------------ opening and closing folders
 
-/** Rows inside a closed folder are hidden (and no longer selected). */
+/** Rows inside a closed folder are hidden (and no longer selected, unless the folder is). */
 function applyClosed() {
   let cut = Infinity;
   for (const r of rows()) {
@@ -51,7 +92,7 @@ function applyClosed() {
     r.classList.toggle('closed', shut);
     r.querySelector('[data-twisty]')?.setAttribute('aria-expanded', String(!shut));
     r.hidden = cut !== Infinity;
-    if (r.hidden) selected.delete(key);
+    if (r.hidden && !around(key).some((k) => selected.has(k))) selected.delete(key);
     if (!r.hidden && shut) cut = d;
   }
 }
@@ -71,11 +112,16 @@ function paint() {
     const on = selected.has(r.dataset.key!);
     r.classList.toggle('selected', on);
     const box = $<HTMLInputElement>('input[data-sel]', r);
-    if (box) box.checked = on;
+    if (box) {
+      box.checked = on;
+      // A folder some of whose contents are chosen.
+      box.indeterminate = !on && !isFile(r.dataset.key!) && inside(r.dataset.key!).some((x) => selected.has(x.dataset.key!));
+    }
   }
-  const n = selected.size;
-  const all = $<HTMLInputElement>('input[data-sel-all]', section!);
+  // Counted as ticked: the rows in sight.
   const choosable = rows().filter((r) => selectable(r) && !r.hidden);
+  const n = choosable.filter((r) => selected.has(r.dataset.key!)).length;
+  const all = $<HTMLInputElement>('input[data-sel-all]', section!);
   if (all) {
     all.checked = n > 0 && n === choosable.length;
     all.indeterminate = n > 0 && n < choosable.length;
@@ -90,7 +136,7 @@ function paint() {
   const rename = $<HTMLButtonElement>('[data-files-act="rename"]', bar)!;
   rename.disabled = !(sel.files.length > 0 && sel.folders.length === 0) && !(sel.files.length === 0 && sel.folders.length === 1 && rowOf(`d:${sel.folders[0]}`)?.dataset.role !== 'root');
   rename.textContent = sel.files.length > 1 ? t('批量重命名…') : t('重命名');
-  $<HTMLButtonElement>('[data-files-act="ignore"]', bar)!.disabled = sel.files.length === 0;
+  $<HTMLButtonElement>('[data-files-act="ignore"]', bar)!.disabled = sel.every.length === 0;
   const fixed = sel.folders.some((id) => rowOf(`d:${id}`)?.dataset.role !== 'plain');
   $<HTMLButtonElement>('[data-files-act="delete"]', bar)!.disabled = fixed;
   $<HTMLButtonElement>('[data-files-act="move"]', bar)!.disabled = fixed;
@@ -98,7 +144,7 @@ function paint() {
 
 function selectOnly(key: string) {
   selected.clear();
-  selected.add(key);
+  choose(key);
   anchor = key;
   paint();
 }
@@ -109,13 +155,13 @@ function toggle(key: string, range: boolean) {
     const a = keys.indexOf(anchor);
     const b = keys.indexOf(key);
     if (a >= 0 && b >= 0) {
-      for (const k of keys.slice(Math.min(a, b), Math.max(a, b) + 1)) selected.add(k);
+      for (const k of keys.slice(Math.min(a, b), Math.max(a, b) + 1)) choose(k);
       paint();
       return;
     }
   }
-  if (selected.has(key)) selected.delete(key);
-  else selected.add(key);
+  if (selected.has(key)) unchoose(key);
+  else choose(key);
   anchor = key;
   paint();
 }
@@ -195,6 +241,7 @@ async function refresh() {
   const naming = doc.querySelector('#dlg-naming [data-naming]');
   if (naming) $('#dlg-naming [data-naming]')!.textContent = naming.textContent;
   for (const k of [...selected]) if (!rowOf(k)) selected.delete(k);
+  for (const k of [...selected]) if (!isFile(k)) choose(k); // what came into a chosen folder is chosen with it
   applyClosed();
   paint();
   const ed = editor();
@@ -219,7 +266,7 @@ function below(id: string): Set<string> {
   return out;
 }
 
-async function moveTo(sel: Sel, key: string, newFolder = '') {
+async function moveTo(sel: Pick<Sel, 'files' | 'folders'>, key: string, newFolder = '') {
   await run(async () => {
     let under = key;
     if (sel.folders.length) {
@@ -420,18 +467,20 @@ function menuFor(sel: Sel): MenuEntry[] {
   if (folder && role === 'plain') {
     entries.push({ label: t('解散文件夹（里面的东西移到上一级）'), run: () => run(() => folderOp({ op: 'merge', id: sel.folders[0], into: folderKey(folder.dataset.parent!) })) });
   }
-  if (sel.files.length) {
+  if (sel.every.length) {
+    // Done to every chosen file, those in chosen folders too.
+    const files = sel.every;
     entries.push(
       '-',
-      { label: t('忽略'), keys: 'I', run: () => run(() => fileAction('ignore', sel.files)) },
-      { label: t('退回未归档'), run: () => run(() => fileAction('reset', sel.files)) },
-      { label: t('标为重复'), run: () => run(() => fileAction('dup', sel.files)) },
+      { label: t('忽略'), keys: 'I', run: () => run(() => fileAction('ignore', files)) },
+      { label: t('退回未归档'), run: () => run(() => fileAction('reset', files)) },
+      { label: t('标为重复'), run: () => run(() => fileAction('dup', files)) },
       '-',
-      { label: t('设为社团自有'), run: () => run(() => fileAction('rights', sel.files, { rights_value: 'own' }), { keep: true }) },
-      { label: t('设为第三方'), run: () => run(() => fileAction('rights', sel.files, { rights_value: 'third_party' }), { keep: true }) },
-      { label: t('设为已授权'), run: () => run(() => fileAction('rights', sel.files, { rights_value: 'licensed' }), { keep: true }) },
-      { label: t('权利改回未知'), run: () => run(() => fileAction('rights', sel.files, { rights_value: 'unknown' }), { keep: true }) },
-      { label: t('公开权限…'), run: () => window.dispatchEvent(new CustomEvent('rigel:access-select', { detail: sel.files })) },
+      { label: t('设为社团自有'), run: () => run(() => fileAction('rights', files, { rights_value: 'own' }), { keep: true }) },
+      { label: t('设为第三方'), run: () => run(() => fileAction('rights', files, { rights_value: 'third_party' }), { keep: true }) },
+      { label: t('设为已授权'), run: () => run(() => fileAction('rights', files, { rights_value: 'licensed' }), { keep: true }) },
+      { label: t('权利改回未知'), run: () => run(() => fileAction('rights', files, { rights_value: 'unknown' }), { keep: true }) },
+      { label: t('公开权限…'), run: () => window.dispatchEvent(new CustomEvent('rigel:access-select', { detail: files })) },
     );
   }
   entries.push('-', {
@@ -673,7 +722,7 @@ function init() {
         case 'new-folder': newFolder(sel.folders.length === 1 && !sel.files.length ? sel.folders[0] : home()); break;
         case 'move': pickAndMove(sel); break;
         case 'rename': renameSelection(); break;
-        case 'ignore': run(() => fileAction('ignore', sel.files)); break;
+        case 'ignore': run(() => fileAction('ignore', sel.every)); break;
         case 'delete': remove(sel); break;
         case 'clear': clearSelection(); break;
         case 'naming': namingDialog(); break;
@@ -689,7 +738,7 @@ function init() {
     if (el.matches('input[data-sel-all]')) {
       const on = (el as HTMLInputElement).checked;
       selected.clear();
-      if (on) for (const r of rows().filter((x) => selectable(x) && !x.hidden)) selected.add(r.dataset.key!);
+      if (on) for (const r of rows().filter((x) => selectable(x) && !x.hidden)) choose(r.dataset.key!);
       paint();
       return;
     }
@@ -730,7 +779,7 @@ function init() {
       if (selectable(row)) selectOnly(row.dataset.key!);
       else {
         // The edition's own folder: its menu without selecting it.
-        openMenu(menuFor({ files: [], folders: [idOf(row.dataset.key!)] }), ev.clientX, ev.clientY);
+        openMenu(menuFor({ files: [], folders: [idOf(row.dataset.key!)], every: [] }), ev.clientX, ev.clientY);
         return;
       }
     }
@@ -753,9 +802,9 @@ function init() {
     } else if ((ev.key === 'm' || ev.key === 'M') && !ev.ctrlKey && !ev.metaKey) {
       ev.preventDefault();
       pickAndMove(sel);
-    } else if ((ev.key === 'i' || ev.key === 'I') && !ev.ctrlKey && !ev.metaKey && sel.files.length) {
+    } else if ((ev.key === 'i' || ev.key === 'I') && !ev.ctrlKey && !ev.metaKey && sel.every.length) {
       ev.preventDefault();
-      run(() => fileAction('ignore', sel.files));
+      run(() => fileAction('ignore', sel.every));
     } else if (ev.key === 'Enter' && sel.files.length === 1 && !sel.folders.length && el.matches('tr[data-key]')) {
       location.href = `/admin/files/${sel.files[0]}`;
     } else if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && (ev.key === 'N' || ev.key === 'n')) {
