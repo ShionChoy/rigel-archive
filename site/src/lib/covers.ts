@@ -1,8 +1,9 @@
 // The cover of an edition as pages show it. Covers go with the tracks: an edition with a track list shows
 // its rows' covers (the one chosen for a row on the 版本页, else the one its file carries), the most used
 // first, as the public album page does; one without a track list shows what its audio carries, unless a
-// picture was chosen by hand. An edition without audio (scans, a PV) shows a picture named like a cover
-// (cover, front, folder, 封面, 表紙 …), else its first picture. Releases have no cover of their own: where
+// picture was chosen by hand, else a picture of its own named like a cover (cover, front, folder, 封面,
+// 表紙 …: the cover.jpg of a Bandcamp download). An edition without audio (scans, a PV) shows a picture
+// named like a cover, else its first picture. Releases have no cover of their own: where
 // one picture is needed for a release, it is the first cover of its first collected edition.
 
 import { env } from 'cloudflare:workers';
@@ -82,10 +83,12 @@ export async function editionCovers(
        GROUP BY f.edition_id, m.cover ORDER BY n DESC`,
     ).bind(ids),
     database.prepare(
-      `SELECT f.edition_id, f.id, f.name, f.download_name, f.sha256, f.blob_key, f.folder_id, f.format, f.size, f.ext FROM files f
-       JOIN editions e ON e.id = f.edition_id
+      `SELECT f.edition_id, f.id, f.name, f.download_name, f.sha256, f.blob_key, f.folder_id, f.format, f.size, f.ext,
+              EXISTS (SELECT 1 FROM files a WHERE a.edition_id = f.edition_id AND a.kind = 'audio' AND a.sealed_in IS NULL AND a.state != 'ignored') AS audio
+       FROM files f JOIN editions e ON e.id = f.edition_id
        WHERE f.edition_id IN (SELECT value FROM json_each(?)) AND f.kind = 'image' AND f.sealed_in IS NULL AND f.state != 'ignored' ${open}
-         AND NOT EXISTS (SELECT 1 FROM files a WHERE a.edition_id = f.edition_id AND a.kind = 'audio' AND a.sealed_in IS NULL AND a.state != 'ignored')
+         AND (NOT EXISTS (SELECT 1 FROM edition_tracks et WHERE et.edition_id = f.edition_id)
+              OR NOT EXISTS (SELECT 1 FROM files a WHERE a.edition_id = f.edition_id AND a.kind = 'audio' AND a.sealed_in IS NULL AND a.state != 'ignored'))
        ORDER BY f.edition_id, coalesce(f.download_name, f.name)`,
     ).bind(ids),
     database.prepare('SELECT edition_id, track_id, cover FROM edition_tracks WHERE edition_id IN (SELECT value FROM json_each(?)) ORDER BY edition_id, disc, position').bind(ids),
@@ -99,7 +102,7 @@ export async function editionCovers(
   ]);
   const chosenRows = chosen.results as ImageRow[];
   const embeddedRows = embedded.results as { edition_id: string; cover: string; n: number }[];
-  const imageRows = images.results as ImageRow[];
+  const imageRows = images.results as (ImageRow & { audio: number })[];
   // A track list's covers: per row its chosen picture or picture file, else the picture its file carries.
   const rowList = (trackRows.results as { edition_id: string; track_id: string; cover: string | null }[]).map((r) => ({ ...r, chosen: parseCover(r.cover) }));
   const carriedBy = new Map<string, string>();
@@ -166,12 +169,13 @@ export async function editionCovers(
     if (byRows.get(r.edition_id)?.size || chosenRows.some((c) => c.edition_id === r.edition_id)) continue;
     out.set(r.edition_id, [...(out.get(r.edition_id) ?? []), fromPicture(r.cover, r.n, 'embedded')]);
   }
-  const byEdition = new Map<string, ImageRow[]>();
+  const byEdition = new Map<string, (ImageRow & { audio: number })[]>();
   for (const r of imageRows) byEdition.set(r.edition_id, [...(byEdition.get(r.edition_id) ?? []), r]);
   for (const [id, list] of byEdition) {
     if (out.has(id)) continue;
-    const pick = list.find((r) => COVER_NAME.test((r.download_name || r.name).replace(/\.[^.]+$/, ''))) ?? list[0];
-    out.set(id, [fromFile(pick, 'image')]);
+    // With audio, only a picture named like a cover; without, any picture will do.
+    const pick = list.find((r) => COVER_NAME.test((r.download_name || r.name).replace(/\.[^.]+$/, ''))) ?? (list[0].audio ? undefined : list[0]);
+    if (pick) out.set(id, [fromFile(pick, 'image')]);
   }
   return out;
 }

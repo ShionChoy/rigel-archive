@@ -7,6 +7,7 @@ import { parseTags } from './tagging/model';
 import { VISIBLE } from './locations';
 import { loadTypes, type TypeList } from './types';
 import { FILED_FILE, PUBLIC_EDITION, PUBLIC_RELEASE } from './public/rules';
+import { COVER_NAME } from './covers';
 
 export interface CheckItem {
   label: string;
@@ -31,12 +32,24 @@ function cap(items: CheckItem[]): { items: CheckItem[]; more: number } {
 type EditionInfo = { id: string; slot: string; name: string; release_id: string; catalog_no: string | null; title: string };
 const editionLabel = (e: EditionInfo, t: T, types: TypeList) => `${e.catalog_no ?? e.title} · ${types.editionLabel(e, t)}`;
 
-/** SQL (on `editions` e): has audio, but no cover: none of its audio carries a picture and none was chosen. */
+/**
+ * SQL (on `editions` e): has audio, but no cover: none was chosen (for the edition, or for a row of its
+ * track list on the 版本页, the way covers are chosen now) and none of its audio carries a picture.
+ * An edition without a track list may still show a picture of its own named like a cover (the cover.jpg of a
+ * Bandcamp download): NO_COVER_PICS lists its pictures' names for hasNoCover to look at.
+ */
 const NO_COVER = `e.cover_file_id IS NULL
   AND EXISTS (SELECT 1 FROM files f WHERE f.edition_id = e.id AND f.kind = 'audio' AND f.sealed_in IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM edition_tracks et WHERE et.edition_id = e.id AND CASE WHEN json_valid(et.cover) THEN
+                    EXISTS (SELECT 1 FROM files c WHERE c.id = json_extract(et.cover, '$.file'))
+                    OR EXISTS (SELECT 1 FROM pictures p WHERE p.sha256 = json_extract(et.cover, '$.picture')) ELSE 0 END)
   AND NOT EXISTS (SELECT 1 FROM files f LEFT JOIN embedded m ON m.sha256 = f.sha256
                   WHERE f.edition_id = e.id AND f.kind = 'audio' AND f.sealed_in IS NULL
                     AND (m.cover IS NOT NULL OR (m.sha256 IS NULL AND json_extract(f.format, '$.cover') = 1)))`;
+const NO_COVER_PICS = `CASE WHEN NOT EXISTS (SELECT 1 FROM edition_tracks et WHERE et.edition_id = e.id) THEN
+    (SELECT group_concat(coalesce(f.download_name, f.name), char(31)) FROM files f
+     WHERE f.edition_id = e.id AND f.kind = 'image' AND f.sealed_in IS NULL AND f.state != 'ignored') END AS pics`;
+const hasNoCover = (e: { pics: string | null }) => !(e.pics ?? '').split('\x1f').some((n) => n && COVER_NAME.test(n.replace(/\.[^.]+$/, '')));
 
 export async function runChecks(t: T): Promise<Check[]> {
   const database = db();
@@ -70,7 +83,7 @@ export async function runChecks(t: T): Promise<Check[]> {
        ORDER BY f.edition_id, f.name`,
     ),
     // Editions with audio but no cover (no track carries one, none chosen).
-    database.prepare(`SELECT e.id, e.slot, e.name, e.release_id, r.catalog_no, r.title FROM editions e JOIN releases r ON r.id = e.release_id WHERE ${NO_COVER}`),
+    database.prepare(`SELECT e.id, e.slot, e.name, e.release_id, r.catalog_no, r.title, ${NO_COVER_PICS} FROM editions e JOIN releases r ON r.id = e.release_id WHERE ${NO_COVER}`),
     // Unplaced files whose suggestion is sure (80% or more).
     database.prepare(
       `SELECT dir, count(*) AS n FROM files
@@ -128,7 +141,7 @@ export async function runChecks(t: T): Promise<Check[]> {
   });
   checks.push({
     id: 'cover', title: N_('版本没有封面'), hint: N_('曲目都没有自带封面，也没有手动指定：在版本页选一张图片，或用「查找元数据」从 MusicBrainz、Bandcamp 取回。'),
-    ...cap((noCover.results as EditionInfo[]).map((e) => edItem(e))),
+    ...cap((noCover.results as (EditionInfo & { pics: string | null })[]).filter(hasNoCover).map((e) => edItem(e))),
   });
   checks.push({
     id: 'sure', title: N_('把握度高的建议还没确认'), hint: N_('这些文件的建议把握度在 80% 以上，可以在整理台「按建议归档」。'),
@@ -241,7 +254,7 @@ export async function editionProblems(): Promise<Map<string, EditionProblem[]>> 
          AND EXISTS (SELECT 1 FROM files f WHERE f.edition_id = e.id AND f.kind = 'audio' AND f.sealed_in IS NULL)
          AND NOT EXISTS (SELECT 1 FROM files f WHERE f.edition_id = e.id AND lower(f.ext) = 'log')`,
     ),
-    database.prepare(`SELECT e.id FROM editions e WHERE ${NO_COVER}`),
+    database.prepare(`SELECT e.id, ${NO_COVER_PICS} FROM editions e WHERE ${NO_COVER}`),
   ]);
   const out = new Map<string, EditionProblem[]>();
   const add = (rows: unknown[], p: EditionProblem) => {
@@ -249,6 +262,6 @@ export async function editionProblems(): Promise<Map<string, EditionProblem[]>> 
   };
   add(counts.results, 'count');
   add(noLog.results, 'log');
-  add(noCover.results, 'cover');
+  add((noCover.results as { id: string; pics: string | null }[]).filter(hasNoCover), 'cover');
   return out;
 }
