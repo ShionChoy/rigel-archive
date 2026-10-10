@@ -16,6 +16,7 @@ import type { Derived } from '../../lib/media';
 import type { FileTagView } from '../../lib/tagedit';
 import { tagLabel } from '../../lib/tagging/names';
 import { tagOrder } from '../../lib/tagging/model';
+import { COVER_MAX } from '../../lib/tags';
 
 type Props =
   | { mode: 'folder'; places: Places; view: FolderView; selected?: boolean }
@@ -264,10 +265,10 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
               <h4>{t('封面')}</h4>
               {f.cover_of ? (
                 <p><span class="chip collected">{t('是这个版本的封面')}</span></p>
-              ) : /^(jpe?g|png)$/i.test(f.ext) && f.size < 12000000 ? (
+              ) : /^(jpe?g|png)$/i.test(f.ext) && f.size < COVER_MAX ? (
                 <button type="button" data-act="set-cover" data-file={f.id}>{t('设为这个版本的封面')}</button>
               ) : (
-                <p class="muted small">{t('整理版只能嵌入 12 MB 以内的 JPEG 或 PNG 图片。')}</p>
+                <p class="muted small">{t('整理版只能嵌入 16 MB 以内的 JPEG 或 PNG 图片。')}</p>
               )}
             </section>
           )}

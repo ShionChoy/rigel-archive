@@ -22,7 +22,7 @@ import { Places, folderKey } from '../../../lib/locations';
 import { imageSrc } from '../../../lib/media';
 import { derivedFor } from '../../../lib/processing';
 import { COVER_SQL } from '../../../lib/tagedit';
-import { editionContext, nameParts, preloadOriginals, taggedSource } from '../../../lib/tags';
+import { COVER_MAX, editionContext, nameParts, preloadOriginals, taggedSource } from '../../../lib/tags';
 import { NAMING_PRESETS } from '../../../lib/naming';
 import { NEW_TYPE } from '../../../lib/types';
 import { setRights } from '../../../lib/rights';
@@ -81,7 +81,7 @@ if (Astro.request.method === 'POST') {
         const fileId = String(form.get('cover_file_id') ?? '') || null;
         if (fileId) {
           const ok = await database.prepare(`SELECT 1 FROM files WHERE id = ? AND edition_id = ? AND ${COVER_SQL}`).bind(fileId, edition.id).first();
-          if (!ok) throw new UserError('封面要从这个版本的 JPEG / PNG 图片里选（12 MB 以内）');
+          if (!ok) throw new UserError('封面要从这个版本的 JPEG / PNG 图片里选');
         }
         const cs = new ChangeSet(database, actor, summary(fileId ? N_('版本 {edition}：设置封面') : N_('版本 {edition}：取消封面'), { edition: `${release.catalog_no ?? release.title} ${edition.name}`.trim() }));
         cs.updateKnown('edition', { id: edition.id }, { cover_file_id: edition.cover_file_id }, { cover_file_id: fileId });
@@ -175,7 +175,7 @@ const images = files.filter((f) => f.kind === 'image' && f.state !== 'ignored');
 const derived = await derivedFor(database, images.map((f) => f.sha256));
 const thumb = (f: F, size: 240 | 640 = 240) => imageSrc(f.blob_key ? `/admin/media/${f.blob_key}` : null, f.sha256 ? derived.get(f.sha256) : undefined, size);
 const covers = withTracks ? [] : (await editionCovers([edition.id])).get(edition.id) ?? [];
-const coverChoices = images.filter((f) => /^(jpe?g|png)$/i.test(f.ext) && f.size < 12_000_000);
+const coverChoices = images.filter((f) => /^(jpe?g|png)$/i.test(f.ext) && f.size < COVER_MAX);
 const kindLabel = (k: string) => t(FILE_KIND_LABELS[k] ?? k);
 // 公开站: whether the public site shows this edition (a published work, an edition collected at least in
 // part and shown) and what visitors may do with each of its files (lib/access.ts, lib/edition-access.ts).
@@ -667,7 +667,7 @@ const KIND_FILTERS: Record<string, string> = { audio: N_('音频'), image: N_('�
               <label class="inline-check"><input type="radio" name="mode" value="add" /> {t('追加一张图片')}</label>
             </span>
           </div>
-          <p class="muted small">{t('可选 JPEG / PNG；超过 12 MB 的高清扫图，下载时嵌入处理程序缩成 1600 px 的副本，原图不变。')}</p>
+          <p class="muted small">{t('可选 JPEG / PNG。下载时按原图嵌入，不缩小也不重新压缩；只有超过 16 MB 的（整页扫图一类，FLAC 装不下）改嵌 1600 px 的副本，原图照样作为单独的文件放进整理版 zip。')}</p>
           <p class="err-line" data-err></p>
           <div class="dlg-buttons">
             <button value="restore" data-restore>{t('恢复为曲目自带')}</button>

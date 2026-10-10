@@ -7,10 +7,11 @@ import { db, type EditionRow, type FileRow, type ReleaseRow } from './db';
 import { embeddedFor, pictureUrl } from './embedded';
 import { N_, summary, UserError } from './i18n';
 import { effectiveTags, parseTags, type Tags } from './tagging/model';
-import { parseCover } from './tags';
+import { COVER_MAX, parseCover } from './tags';
 
-/** Pictures a download can embed as they are. */
-export const COVER_SQL = "kind = 'image' AND lower(ext) IN ('jpg', 'jpeg', 'png') AND size < 12000000 AND sealed_in IS NULL";
+/** Pictures a download can embed: as they are, or (the largest) as their copy. */
+export const COVER_SQL = `kind = 'image' AND lower(ext) IN ('jpg', 'jpeg', 'png') AND sealed_in IS NULL
+  AND (size < ${COVER_MAX} OR EXISTS (SELECT 1 FROM derived d WHERE d.sha256 = files.sha256 AND d.kind = 'embed'))`;
 
 export interface FileTagView {
   file: { id: string; name: string; edition_id: string | null };
@@ -73,10 +74,10 @@ export async function setCover(actor: string, fileId: string): Promise<{ changed
   const name = f.download_name || f.name;
   let cover: { file?: string; picture?: string; mode: 'replace' };
   if (f.kind === 'image') {
-    const large = f.size >= 12_000_000
+    const large = f.size >= COVER_MAX
       ? await database.prepare("SELECT 1 FROM derived WHERE sha256 = ? AND kind = 'embed'").bind(f.sha256 ?? '').first()
       : null;
-    if (!(/^(jpe?g|png)$/i.test(f.ext) && (f.size < 12_000_000 || large))) throw new UserError('下载时只能嵌入 JPEG 或 PNG（超过 12 MB 的要等处理程序生成缩小副本）');
+    if (!(/^(jpe?g|png)$/i.test(f.ext) && (f.size < COVER_MAX || large))) throw new UserError('下载时只能嵌入 JPEG 或 PNG（超过 16 MB 的要等处理程序生成缩小副本）');
     cover = { file: f.id, mode: 'replace' };
   } else if (f.kind === 'audio') {
     const own = f.sha256 ? (await embeddedFor([f.sha256])).get(f.sha256) : undefined;

@@ -16,8 +16,14 @@ import { renumberOgg } from './tagging/ogg';
 import { WRITABLE, layoutLength, taggedLayout, type Layout, type Part, type WriteSpec } from './tagging/write';
 import type { ZipEntry } from './tagging/zip';
 
-/** Pictures a download can embed as they are; larger ones use their 1600 px copy (derived «embed»). */
-export const COVER_MAX = 12_000_000;
+/**
+ * Covers go into downloads as they are, at full size, never scaled down or compressed again. The one limit is
+ * FLAC's: a metadata block holds less than 16 MiB (the picture with its type, MIME type and description), so
+ * a larger picture (a whole-booklet scan) goes in as its 1600 px JPEG copy (derived «embed», which the
+ * processing program makes for pictures of 12 MB or more); the other formats keep to the same limit, which
+ * keeps a download within the Worker's memory. The picture file itself goes into the edition's zip as it is.
+ */
+export const COVER_MAX = (1 << 24) - 1024;
 
 export interface RowCover {
   file?: string; // a picture file's id
@@ -213,6 +219,7 @@ export async function coverBytes(media: R2Bucket, cover: RowCover | null): Promi
  * FLAC instead (a WAV asked for as FLAC, an AIFF): the stream leaves pictures out, the download keeps them.
  */
 async function originalPictures(media: R2Bucket, sha256: string | null): Promise<NonNullable<WriteSpec['pictures']>> {
+  // (A FLAC cannot carry a picture of COVER_MAX or more: such a one is left out.)
   if (!sha256) return [];
   const own = (await embeddedFor([sha256])).get(sha256);
   if (!own?.pictures.length) return [];
@@ -227,7 +234,7 @@ async function originalPictures(media: R2Bucket, sha256: string | null): Promise
   }
   return own.pictures.flatMap((p) => {
     const image = bytes.get(p.sha256);
-    return image ? [{ image, mime: p.mime, type: p.type, description: p.description }] : [];
+    return image && image.length < COVER_MAX ? [{ image, mime: p.mime, type: p.type, description: p.description }] : [];
   });
 }
 
@@ -294,12 +301,18 @@ export async function taggedResponse(media: R2Bucket, src: TaggedSource): Promis
 }
 
 export async function taggedEntry(media: R2Bucket, src: TaggedSource, folder: string): Promise<ZipEntry> {
-  const layout = await taggedParts(media, src);
+  // A layout holds its pictures (the cover at full size) in memory: it is made once for its size, then again
+  // when its turn in the zip comes, so that a zip holds one track's pictures at a time, not every track's.
+  const size = layoutLength(await taggedParts(media, src));
   return {
     name: `${folder}${src.name}`,
-    size: layoutLength(layout),
+    size,
     mtime: src.file.mtime ? new Date(src.file.mtime) : new Date(),
-    body: async () => bodyStream(media, src.key, layout.parts),
+    body: async () => {
+      const layout = await taggedParts(media, src);
+      if (layoutLength(layout) !== size) throw new Error(`${src.name} changed while the zip was made`);
+      return bodyStream(media, src.key, layout.parts);
+    },
   };
 }
 
