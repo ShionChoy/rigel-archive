@@ -2,6 +2,7 @@
 // Import editions from MusicBrainz: every release of the matching release group(s), each to be made a
 // new edition, merged into an existing one, or skipped. The chosen releases' track lists become the
 // editions' track lists (see importOnline in lib/lookup.ts).
+import { env } from 'cloudflare:workers';
 import Admin from '../../../../layouts/Admin.astro';
 import { ChangeSet, batchSince } from '../../../../lib/changes';
 import { db, type EditionRow, type ReleaseRow } from '../../../../lib/db';
@@ -12,6 +13,7 @@ import { newId } from '../../../../lib/ids';
 import { MBID, editionFor, mbCandidates, scoreCandidate, type MbCandidate } from '../../../../lib/metadata';
 import { importOnline, mbFull } from '../../../../lib/lookup';
 import { loadTypes } from '../../../../lib/types';
+import { wakeAfter } from '../../../../lib/schedule';
 
 const { id } = Astro.params;
 const { t } = Astro.locals;
@@ -28,6 +30,7 @@ if (Astro.request.method === 'POST') {
     const chosen = form.getAll('mbid').map(String).filter((x) => MBID.test(x));
     if (chosen.length === 0) throw new UserError('请至少勾选一个发行');
     let done = 0;
+    let covers = 0;
     for (const mbid of chosen) {
       const target = String(form.get(`target_${mbid}`) ?? 'new');
       const online = await mbFull(mbid);
@@ -53,9 +56,12 @@ if (Astro.request.method === 'POST') {
       }
       // An edition that already has a track list keeps it: its rows only get the ids where the titles
       // agree (titles are compared and taken on the edition's 「查找元数据」).
-      await importOnline(actor, release, edition, online, form.get(`cover_${mbid}`) === '1');
+      const withCover = form.get(`cover_${mbid}`) === '1';
+      await importOnline(actor, release, edition, online, withCover);
+      if (withCover) covers += 1;
       done += 1;
     }
+    if (covers) wakeAfter(Astro.locals, env); // the covers' previews right away
     // Each release is its own batch (undone one by one in 修改记录); the button undoes the last one.
     const undo = await batchSince(database, actor, started);
     return Astro.redirect(`/admin/releases/${release.id}?msg=${encodeURIComponent(t('已从 MusicBrainz 导入 {n} 个发行', { n: done }))}${undo ? `&undo=${undo}` : ''}#editions`, 303);

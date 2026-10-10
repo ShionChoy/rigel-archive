@@ -4,10 +4,12 @@
 //   GET ?op=cover-info&url=<image>    an online cover's size in pixels and bytes
 //   POST {"op": "cover", "url": …, "fallback": …}  store an online cover in the edition's folder → {id}
 import type { APIRoute } from 'astro';
+import { env } from 'cloudflare:workers';
 import { fromAdminPage, json, readJson } from '../../../../lib/api';
 import { db, type EditionRow, type ReleaseRow } from '../../../../lib/db';
 import { errorText, UserError } from '../../../../lib/i18n';
 import { candidates, coverInfo, fetchOnline, storeOnlineCover } from '../../../../lib/lookup';
+import { wakeAfter } from '../../../../lib/schedule';
 
 async function load(id: string | undefined) {
   const database = db();
@@ -38,7 +40,9 @@ export const POST: APIRoute = async ({ params, request, url, locals }) => {
     const body = await readJson(request);
     if (body.op !== 'cover') throw new UserError('未知的操作');
     const fallback = typeof body.fallback === 'string' ? body.fallback : null;
-    return json({ ok: true, id: await storeOnlineCover(locals.admin!.email, edition, release, String(body.url ?? ''), fallback) });
+    const id = await storeOnlineCover(locals.admin!.email, edition, release, String(body.url ?? ''), fallback);
+    wakeAfter(locals, env); // its previews right away (the public site shows a large cover only by them)
+    return json({ ok: true, id });
   } catch (e) {
     return json({ ok: false, err: errorText(e, t) }, 400);
   }

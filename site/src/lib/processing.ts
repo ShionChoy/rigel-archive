@@ -80,7 +80,7 @@ export async function pendingCounts(db: D1Database): Promise<Record<Task, number
   ]);
   const counts = Object.fromEntries(SQL_TASKS.map((task, i) => [task, (rows[i].results[0] as { n: number }).n])) as Record<Task, number>;
   counts.clip = (await clipItems(db, 1000)).length;
-  counts.derive += (rows[TASKS.length].results[0] as { n: number }).n;
+  counts.derive += (rows[SQL_TASKS.length].results[0] as { n: number }).n;
   return counts;
 }
 

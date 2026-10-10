@@ -31,7 +31,12 @@ export async function wakeIfPending(env: Env): Promise<void> {
 
 export async function onSchedule(cron: string, env: Env): Promise<void> {
   if (cron === BACKUP_CRON && backupSettings(env)) return wakeProcessor(env, true);
-  await wakeIfPending(env);
+  // Each job on its own: one that fails must not hold up the other.
+  try {
+    await wakeIfPending(env);
+  } catch (e) {
+    console.error('looking for pending work failed:', e instanceof Error ? e.message : e);
+  }
   // 文件原值: read the tags and pictures of stored audio not read yet (a few hundred per run).
   try {
     await readPending(env.DB, env.MEDIA, 25_000);
