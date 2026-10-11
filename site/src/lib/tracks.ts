@@ -147,10 +147,19 @@ export function trackNumber(file: { dir: string; name: string; format: string | 
   };
   const folderDisc = file.dir.match(/(?:disc|disk|cd)[\s_-]*(\d{1,2})\b/i);
   const disc = num(tags.disc) ?? (folderDisc ? Number(folderDisc[1]) : null) ?? 1;
-  const lead = file.name.match(/^(?:(\d)[-.](?=\d))?(\d{1,3})(?=[\s._\-)]|$)/);
-  const track = num(tags.track) ?? (lead ? Number(lead[2]) : null);
+  const lead = file.name.match(LEAD_NUMBER);
+  const shop = lead ? null : BANDCAMP_NAME.exec(file.name.replace(/\.[^.]+$/, ''));
+  const track = num(tags.track) ?? (lead ? Number(lead[2]) : shop ? Number(shop[2]) : null);
   return { disc: lead?.[1] && !tags.disc ? Number(lead[1]) : disc, track };
 }
+
+/** «01 Title», «1-01 Title»: the number a file name starts with (and the disc before it). */
+const LEAD_NUMBER = /^(?:(\d)[-.](?=\d))?(\d{1,3})(?=[\s._\-)]|$)/;
+/**
+ * Bandcamp names its downloads «Artist - Album - 01 Title»; artists may hold « - » themselves, so the last
+ * number set off like this is the track's.
+ */
+const BANDCAMP_NAME = /^(.+ - .+) - (\d{1,3}) (.+)$/;
 
 /** A readable track title from tags or the file name ("01 Riddika.flac" → "Riddika"). */
 export function titleFromFile(file: { name: string; format: string | null }): string {
@@ -158,6 +167,8 @@ export function titleFromFile(file: { name: string; format: string | null }): st
   const tag = parseFormat(file.format).tags?.title?.trim().replace(/^\d{1,3}\s*[.．)）]\s+/, '');
   if (tag) return tag;
   const stem = file.name.replace(/\.[^.]+$/, '');
+  const shop = LEAD_NUMBER.test(stem) ? null : BANDCAMP_NAME.exec(stem);
+  if (shop?.[3].trim()) return shop[3].trim();
   // «Rigel Theatre - Phantom Swing.wav»: the circle's name in front is not part of the title.
   const title = stem.replace(/^Rig[eë]l Theatre\s+-\s+/i, '');
   return title.replace(/^(?:\d[-.])?\d{1,3}\s*[-._)\]]*\s*/, '').trim() || title;
