@@ -202,7 +202,7 @@ export const PRESETS: Preset[] = [
   { key: 'recent', name: N_('最近上传'), hint: N_('7 天内在后台上传的文件。'), sql: "files.origin = 'upload' AND files.created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')" },
   { key: 'gone', name: N_('原件已不存在'), hint: N_('最近一次导入时合辑里已找不到原件的文件，可以删除。'), sql: originalGone('files') },
   {
-    key: 'unlinked', name: N_('音频没有对应曲目'), hint: N_('版本已有曲目顺序、但还没对应到曲目的音频：在版本页的曲目列表下方点「按曲号、标题和时长自动对应」。'),
+    key: 'unlinked', name: N_('音频没有对应曲目'), hint: N_('版本已有曲目顺序、但还没对应到曲目的音频：在版本页的曲目列表下方点「按标题、音频和时长自动对应」。'),
     sql: `files.kind = 'audio' AND files.edition_id IS NOT NULL AND files.track_id IS NULL AND files.state != 'ignored' AND files.dup_of IS NULL
       AND EXISTS (SELECT 1 FROM edition_tracks et WHERE et.edition_id = files.edition_id)
       AND NOT EXISTS (SELECT 1 FROM files n WHERE n.replaces = files.id)`,

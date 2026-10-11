@@ -6,17 +6,11 @@ import { ChangeSet } from './changes';
 import { summary, UserError } from './i18n';
 import { db, parseFormat, type ReleaseRow, type TrackRow } from './db';
 import { newId } from './ids';
+import { exactTitleKey, titleKey } from './titles';
 
 export { newId };
-
-/** Title comparison key: width, case, punctuation and bracketed version notes do not matter. */
-export function titleKey(title: string): string {
-  return title
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/[(（[【<〈『「][^)）\]】>〉』」]*[)）\]】>〉』」]/g, '')
-    .replace(/[\s\-‐‑–—~〜～_.,:;!?'"’“”・･·/\\]+/g, '');
-}
+// Title comparison keys (width, case, punctuation, accents and bracketed notes do not matter): lib/titles.ts.
+export { exactTitleKey, titleKey };
 
 export function parseDuration(text: string): number | null {
   const t = text.trim();
@@ -173,7 +167,7 @@ export async function dropTrackRows(cs: ChangeSet, editionId: string, trackIds: 
 }
 
 /** Songs no track is a version of once these tracks are gone, unless something was written for them by hand. */
-async function dropSongs(cs: ChangeSet, songIds: string[], goneTracks: string[]): Promise<void> {
+export async function dropSongs(cs: ChangeSet, songIds: string[], goneTracks: string[]): Promise<void> {
   if (songIds.length === 0) return;
   const { results } = await db()
     .prepare(

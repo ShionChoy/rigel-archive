@@ -68,9 +68,9 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
                 <table>
                   <thead><tr><th></th>{compare.editions.map((e) => <th><a href={editionHref(e.id)}>{view.compareNames.get(e.id) ?? e.name}</a><div class="muted">{e.catalog_no ?? ''}</div></th>)}</tr></thead>
                   <tbody>
-                    {compare.rows.map(({ track, cells }) => (
+                    {compare.rows.map(({ label, cells }) => (
                       <tr>
-                        <td>{track.title}</td>
+                        <td>{label}</td>
                         {cells.map((c) => (
                           <td class={c ? `r-${c.relation}` : ''} title={c ? t(RELATION_TEXT[c.relation]) : t('这一版没有')}>
                             {c ? `${c.position ?? '·'} ${RELATION_MARK[c.relation]}${c.relation === 'part' && c.share !== undefined ? ` ${Math.round(c.share * 100)}%` : ''}` : '—'}

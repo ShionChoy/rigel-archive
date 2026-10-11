@@ -12,6 +12,7 @@
 
 import { t } from './i18n';
 import { NUMBERS, esc, join, parse, same } from './tag-values';
+import { titleKey as looseKey, exactTitleKey } from '../lib/titles';
 
 type Tags = Record<string, string[]>;
 interface Cover { file?: string; picture?: string; mode: 'replace' | 'add' }
@@ -28,6 +29,7 @@ export interface EditorData {
   files: Record<string, EdFile>;
   unlinked: string[];
   extra: string[];
+  waiting: number;
   pictures: EdPicture[];
   display: string[];
   tagDefs: { name: string; label: string; group: string }[];
@@ -148,13 +150,14 @@ export function initEditor(data: EditorData) {
   };
   const onlineNames = (): string[] => (compare ? sortNames([...Object.keys(compare.online.album), ...compare.online.tracks.flatMap((x) => Object.keys(x.tags))]) : []);
   const proposalCount = () => rows.reduce((n, r) => n + onlineNames().filter((name) => proposal(r, name)).length, 0);
-  const titleKey = (s: string) => s.normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+  const titleKey = exactTitleKey; // accents, case and punctuation aside
   const firstNumber = (v: string[] | undefined) => (v?.length ? parseInt(v[0], 10) || null : null);
   /**
-   * Rows to online tracks, the surest pairs first. The same title counts most (also a title with more around
-   * it, as titles taken from file names have), then a length within a few seconds, the file's own track
-   * number, and the row's place in the list (the place alone when lengths are unknown), so rows in the wrong
-   * order still find their tracks. Rows already in `fixed` keep theirs; a row with no close track gets none.
+   * Rows to online tracks, the surest pairs first. The same title counts most (also without notes in
+   * brackets, or with more around it, as titles taken from file names have), then a length within a few
+   * seconds; the file's own track number and the row's place only settle between those, never alone (an
+   * edition with a track more or less numbers differently), so rows in the wrong order still find their
+   * tracks. Rows already in `fixed` keep theirs; a row with no close track gets none.
    */
   function autoMap(online: Online, fixed = new Map<string, number | null>()): Map<string, number | null> {
     const out = new Map(fixed);
@@ -172,13 +175,16 @@ export function initEditor(data: EditorData) {
         const key = keys[k];
         let score = 0;
         if (title && title === key) score += 10;
+        else if (title && looseKey(join(values(r, 'title')) || r.entry) === looseKey(x.title)) score += 6;
         else if (title && key && Math.min(title.length, key.length) >= 3
           && (title.endsWith(key) || title.startsWith(key) || key.endsWith(title) || key.startsWith(title))) score += 3;
         const gap = d && x.duration_ms ? Math.abs(d * 1000 - x.duration_ms) : null;
         if (gap !== null) score += gap <= 1500 ? 3 : gap <= 3000 ? 2 : gap <= 6000 ? 0 : -6;
-        if (number === x.position && disc === x.disc) score += 2;
-        if (i === k) score += gap === null ? 3 : 1;
-        if (score >= 3) pairs.push({ row: r.id, k, score, off: Math.abs(i - k), gap: gap ?? Infinity });
+        // Evidence of its own: a title, or a length within 3 seconds; numbers and places only add to it.
+        const evidence = score > 0 && (score >= 3 || (gap !== null && gap <= 3000));
+        if (number === x.position && disc === x.disc) score += 1;
+        if (i === k) score += 1;
+        if (evidence && score >= 3) pairs.push({ row: r.id, k, score, off: Math.abs(i - k), gap: gap ?? Infinity });
       });
     });
     pairs.sort((a, b) => b.score - a.score || a.off - b.off || a.gap - b.gap);
@@ -706,7 +712,9 @@ export function initEditor(data: EditorData) {
     const generate = rows.length === 0 && data.rows.length === 0
       ? `<div class="empty-tracks"><p class="muted">${esc(t('这个版本还没有曲目表。可以从版本里的音频文件生成（标题取自文件），也可以逐个「新建一行」，或用「查找元数据」从 MusicBrainz、Bandcamp 导入。'))}</p>
          <form method="post" class="inline"><input type="hidden" name="section" value="generate" /><input type="hidden" name="anchor" value="tracks" />
-         <button class="primary" type="submit">${esc(t('从 {n} 个音频文件生成曲目表', { n: Object.keys(data.files).filter((f) => !extras.has(f)).length }))}</button></form></div>`
+         ${data.waiting ? `<input type="hidden" name="force" value="1" /><button type="submit">${esc(t('仍然生成'))}</button>
+           <span class="muted small">${esc(t('还有 {n} 个音频在处理（音频校验或声学指纹还没算完），现在生成只能按标题对应已有的曲目条目，建议几分钟后刷新再生成。', { n: data.waiting }))}</span>`
+           : `<button class="primary" type="submit">${esc(t('从 {n} 个音频文件生成曲目表', { n: Object.keys(data.files).filter((f) => !extras.has(f)).length }))}</button>`}</form></div>`
       : '';
     const allTags = sortNames([...data.tagDefs.map((d) => d.name).filter((x) => !NUMBERS.includes(x)), ...columns]);
     tracks.innerHTML = `
@@ -738,7 +746,7 @@ export function initEditor(data: EditorData) {
             <select data-link="${esc(id)}" aria-label="${esc(t('对应到'))}"><option value="">${esc(t('对应到…'))}</option>${rows.map((r) => `<option value="${esc(r.id)}">${String(n.of.get(r.id)!.pos).padStart(2, '0')} ${esc(join(values(r, 'title')) || r.entry)}</option>`).join('')}</select></li>`;
         }).join('')}</ul>
         <form method="post" class="inline"><input type="hidden" name="section" value="match" /><input type="hidden" name="anchor" value="tracks" />
-          <button type="submit">${esc(t('按曲号、标题和时长自动对应'))}</button></form>
+          <button type="submit">${esc(t('按标题、音频和时长自动对应'))}</button></form>
       </div>` : ''}
       ${extras.size ? `<div class="loose extras">
         <b>${esc(t('附加音频（不是曲目，{n} 个）', { n: extras.size }))}</b>

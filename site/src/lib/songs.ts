@@ -4,6 +4,7 @@
 import { ChangeSet } from './changes';
 import { db } from './db';
 import { newId, titleKey } from './tracks';
+import { foldLatin } from './titles';
 import { N_, summary, UserError } from './i18n';
 
 export interface SongVersion {
@@ -42,13 +43,16 @@ export interface SongSummary {
 }
 
 /**
- * Groups of songs that may be the same piece: same title (ignoring width, case, punctuation and
- * bracketed notes), tracks whose files decode to identical audio, or tracks whose files sound like the
- * same recording (acoustic fingerprints).
+ * Groups of songs that may be the same piece: the same title (width, case, punctuation, accents and notes in
+ * brackets aside), tracks whose files decode to identical audio, or a recording of one heard in a file of the
+ * other (acoustic fingerprints covering most of the shorter file: another master, an edit, a DEMO cut).
+ * Fingerprints never join two songs listed in one edition (two tracks of one album), nor through a file that
+ * holds several songs (an XFD, a medley), so that groups do not chain into one. The song to keep comes
+ * first: the one with the most tracks, then the one written with its accents.
  */
 export async function mergeCandidates(): Promise<{ songs: SongSummary[]; reasons: string[] }[]> {
   const database = db();
-  const [{ results: songs }, { results: sameAudio }, { results: sameRecording }] = await Promise.all([
+  const [{ results: songs }, { results: sameAudio }, { results: heard }, { results: listed }] = await Promise.all([
     database
       .prepare('SELECT s.id, s.title, count(t.id) AS n FROM songs s LEFT JOIN tracks t ON t.song_id = s.id GROUP BY s.id')
       .all<SongSummary>(),
@@ -60,15 +64,19 @@ export async function mergeCandidates(): Promise<{ songs: SongSummary[]; reasons
          WHERE f1.pcm_md5 IS NOT NULL AND f1.track_id IS NOT NULL AND f2.track_id IS NOT NULL AND t1.song_id < t2.song_id`,
       )
       .all<{ a: string; b: string }>(),
-    // Acoustic fingerprints: files that sound like the same recording (layer 3), linked to tracks.
+    // Acoustic fingerprints: a recording heard over most of the shorter file.
     database
       .prepare(
-        `SELECT DISTINCT t1.song_id AS a, t2.song_id AS b FROM acoustic_matches m
+        `SELECT DISTINCT m.a AS fa, m.b AS fb, t1.song_id AS a, t2.song_id AS b FROM acoustic_matches m
+         JOIN fingerprints pa ON pa.sha256 = m.a JOIN fingerprints pb ON pb.sha256 = m.b
          JOIN files f1 ON f1.sha256 = m.a JOIN files f2 ON f2.sha256 = m.b
          JOIN tracks t1 ON t1.id = f1.track_id JOIN tracks t2 ON t2.id = f2.track_id
-         WHERE t1.song_id IS NOT NULL AND t2.song_id IS NOT NULL AND t1.song_id != t2.song_id`,
+         WHERE t1.song_id IS NOT NULL AND t2.song_id IS NOT NULL AND t1.song_id != t2.song_id
+           AND m.score >= 0.9 AND m.matched_ms >= 800 * min(pa.duration, pb.duration)`,
       )
-      .all<{ a: string; b: string }>(),
+      .all<{ fa: string; fb: string; a: string; b: string }>(),
+    database.prepare('SELECT DISTINCT t.song_id, et.edition_id FROM edition_tracks et JOIN tracks t ON t.id = et.track_id WHERE t.song_id IS NOT NULL')
+      .all<{ song_id: string; edition_id: string }>(),
   ]);
   const byId = new Map(songs.map((s) => [s.id, s]));
   const parent = new Map<string, string>();
@@ -89,13 +97,27 @@ export async function mergeCandidates(): Promise<{ songs: SongSummary[]; reasons
   };
   for (const ids of byKey.values()) if (ids.length > 1) note(ids, N_('同名'));
   for (const { a, b } of sameAudio) if (byId.has(a) && byId.has(b)) note([a, b], N_('音频相同'));
-  for (const { a, b } of sameRecording) if (byId.has(a) && byId.has(b)) note([a, b], N_('声学指纹：同一录音'));
+  // A file heard in three songs or more holds several pieces (an XFD, a medley): it joins none of them.
+  const songsIn = new Map<string, Set<string>>();
+  for (const m of heard) {
+    songsIn.set(m.fa, (songsIn.get(m.fa) ?? new Set()).add(m.b));
+    songsIn.set(m.fb, (songsIn.get(m.fb) ?? new Set()).add(m.a));
+  }
+  const editionsOf = new Map<string, Set<string>>();
+  for (const r of listed) editionsOf.set(r.song_id, (editionsOf.get(r.song_id) ?? new Set()).add(r.edition_id));
+  const together = (a: string, b: string) => [...(editionsOf.get(a) ?? [])].some((e) => editionsOf.get(b)?.has(e));
+  for (const m of heard) {
+    if (!byId.has(m.a) || !byId.has(m.b) || together(m.a, m.b)) continue;
+    if ((songsIn.get(m.fa)?.size ?? 0) >= 3 || (songsIn.get(m.fb)?.size ?? 0) >= 3) continue;
+    note([m.a, m.b], N_('声学指纹：同一录音'));
+  }
+  const accented = (x: SongSummary) => Number(foldLatin(x.title) !== x.title);
   const groups = new Map<string, SongSummary[]>();
   for (const id of reasons.keys()) groups.set(find(id), [...(groups.get(find(id)) ?? []), byId.get(id)!]);
   return [...groups.values()]
     .filter((g) => g.length > 1)
     .map((g) => ({
-      songs: g.sort((x, y) => y.n - x.n || x.title.localeCompare(y.title, 'ja')),
+      songs: g.sort((x, y) => y.n - x.n || accented(y) - accented(x) || x.title.localeCompare(y.title, 'ja')),
       reasons: [...new Set(g.flatMap((s) => [...(reasons.get(s.id) ?? [])]))],
     }))
     .sort((x, y) => x.songs[0].title.localeCompare(y.songs[0].title, 'ja'));

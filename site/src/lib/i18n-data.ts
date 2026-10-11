@@ -14,4 +14,6 @@ export const FROM_HISTORY = [
   N_('实体 CD'),
   N_('扫图'),
   N_('版本 {edition}：修改曲目与标签'),
+  N_('版本 {edition}：按曲号、标题与时长对应文件'),
+  N_('作品 {release}：曲目条目「{drop}」并入「{keep}」'),
 ];

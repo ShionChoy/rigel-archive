@@ -58,7 +58,7 @@ if (Astro.request.method === 'POST') {
         await deleteEdition(actor, release, edition);
         return Astro.redirect(`/admin/releases/${release.id}?msg=${encodeURIComponent(t('已删除版本'))}`, 303);
       case 'generate':
-        msg = t('已生成曲目表（{n} 处改动）', { n: await generateEditionTracks(actor, release, edition) });
+        msg = t('已生成曲目表（{n} 处改动）', { n: await generateEditionTracks(actor, release, edition, form.get('force') === '1') });
         break;
       case 'match': {
         const r = await matchEditionFiles(actor, release, edition);
@@ -440,7 +440,9 @@ const KIND_FILTERS: Record<string, string> = { audio: N_('音频'), image: N_('�
           <form method="post" class="inline">
             <input type="hidden" name="section" value="generate" />
             <input type="hidden" name="anchor" value="tracks" />
-            <button class="primary" type="submit">{t('从 {n} 个音频文件生成曲目表', { n: audio.filter((f) => f.role !== EXTRA_AUDIO).length })}</button>
+            {editor.waiting > 0 && <input type="hidden" name="force" value="1" />}
+            <button class:list={[{ primary: !editor.waiting }]} type="submit">{editor.waiting ? t('仍然生成') : t('从 {n} 个音频文件生成曲目表', { n: audio.filter((f) => f.role !== EXTRA_AUDIO).length })}</button>
+            {editor.waiting > 0 && <span class="muted small">{t('还有 {n} 个音频在处理（音频校验或声学指纹还没算完），现在生成只能按标题对应已有的曲目条目，建议几分钟后刷新再生成。', { n: editor.waiting })}</span>}
           </form>
         </>
       ) : <p class="muted">{t('正在载入…')}</p>}

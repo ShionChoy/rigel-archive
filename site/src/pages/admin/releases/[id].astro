@@ -6,7 +6,7 @@ import { editionCovers } from '../../../lib/covers';
 import { loadForms } from '../../../lib/forms';
 import { db, type ReleaseRow } from '../../../lib/db';
 import {
-  EDITION_STATUSES, EDITION_STATUS_LABELS, RELATION_MARK, RELATION_TEXT, comparison, createEdition, loadEditions, mergeTracks, parseIds,
+  EDITION_STATUSES, EDITION_STATUS_LABELS, RELATION_MARK, RELATION_TEXT, comparison, createEdition, DUPLICATE_REASONS, loadEditions, mergeTrackGroup, parseIds,
 } from '../../../lib/editions';
 import { formatDuration, percent, withParams } from '../../../lib/format';
 import { N_, UserError, errorText, translateHtml } from '../../../lib/i18n';
@@ -48,7 +48,7 @@ if (Astro.request.method === 'POST') {
         return Astro.redirect(`/admin/editions/${editionId}?msg=${encodeURIComponent(t('已新建版本'))}`, 303);
       }
       case 'merge':
-        msg = saved(await mergeTracks(actor, release, String(form.get('keep') ?? ''), String(form.get('drop') ?? '')));
+        msg = saved(await mergeTrackGroup(actor, release, form.getAll('track').map(String), String(form.get('title') ?? '')));
         break;
       case 'rights': {
         // The files not set yet in the editions the public site shows.
@@ -113,6 +113,7 @@ const publicHref = `/${siteLangOf(lang)}/works/${release.id}/`;
 const tr = (field: string, code: string) => translations.results.find((x) => x.field === field && x.lang === code)?.value ?? '';
 const LANG_NAMES: Record<string, string> = { zh: N_('中文'), ja: N_('日文'), en: N_('英文') };
 const editionLabel = (e: { slot: string; name: string }) => places.editionLabel(e, t);
+const entryName = (x: { title: string; version_label: string | null }) => (x.version_label ? `${x.title} (${x.version_label})` : x.title);
 const types = places.types;
 const hasMatrix = matrix.editions.length > 1 && matrix.rows.length > 0;
 const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>) => {
@@ -229,7 +230,7 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
             <table class="grid compare">
               <thead>
                 <tr>
-                  <th>{t('曲目条目')}</th>
+                  <th>{t('曲目')}</th>
                   {matrix.editions.map((e) => (
                     <th>
                       <a href={`/admin/editions/${e.id}`}>{editionLabel(e)}</a>
@@ -239,9 +240,12 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
                 </tr>
               </thead>
               <tbody>
-                {matrix.rows.map(({ track, cells }) => (
+                {matrix.rows.map(({ track, label, cells }) => (
                   <tr>
-                    <td>{track.title}{track.version_label && <span class="muted"> ({track.version_label})</span>}</td>
+                    <td>
+                      {label}
+                      {label !== entryName(track) && <div class="muted small" title={t('作品的曲目条目（在下方「曲目条目」里改）')}>{t('条目：{title}', { title: entryName(track) })}</div>}
+                    </td>
                     {cells.map((c) => (
                       <td class:list={['cell', c ? `r-${c.relation}` : 'r-none']} title={c ? `${t(RELATION_TEXT[c.relation])}${c.score ? ` · ${t('一致度 {s}', { s: c.score.toFixed(2) })}` : ''}${c.file ? ` · ${c.file.name}` : ''}` : t('这一版没有')}>
                         {c ? (c.file ? <a href={`/admin/files/${c.file.id}`}>{cellText(c)}</a> : cellText(c)) : '—'}
@@ -253,17 +257,31 @@ const cellText = (c: NonNullable<(typeof matrix.rows)[number]['cells'][number]>)
             </table>
           </div>
           <p class="muted legend" set:html={translateHtml(lang, '<b>=</b> 解码后完全相同　<b>≈</b> 同一母带（格式、采样率或编码不同）　<b>△</b> 同一编曲，重新混音或母带　<b>◐ 47%</b> 只有一部分相同　<b>≠</b> 听不出相同（多为重录）　<b>+</b> 这一版新增　<b>—</b> 这一版没有。与每行最早有文件的版本比较，依据 PCM MD5 与声学指纹。')} />
-          {matrix.merges.length > 0 && (
+          {matrix.duplicates.length > 0 && (
             <div class="merges">
-              <b>{t('可能是同一录音的不同条目')}</b>
-              {matrix.merges.map((m) => (
-                <form method="post" class="inline-form">
+              <b>{t('可能是同一首的曲目条目（{n} 组）', { n: matrix.duplicates.length })}</b>
+              <p class="muted small">{t('这些条目从没在同一个版本里同时出现，音频或标题又相同，多半是生成曲目表时没认出来的同一首。合并后各版本都指向一个条目，各版保留自己的曲名；可以撤销。')}</p>
+              {matrix.duplicates.map((g, i) => (
+                <form method="post" class="merge-group">
                   <input type="hidden" name="section" value="merge" />
                   <input type="hidden" name="anchor" value="compare" />
-                  <input type="hidden" name="keep" value={m.a.id} />
-                  <input type="hidden" name="drop" value={m.b.id} />
-                  <span>{t('「{a}」与「{b}」（一致度 {s}）', { a: m.a.title, b: m.b.title, s: m.score.toFixed(2) })}</span>
-                  <button type="submit" title={t('合并后两个版本都指向同一个曲目条目，各版保留自己的曲名')}>{t('把「{b}」并入「{a}」', { a: m.a.title, b: m.b.title })}</button>
+                  <ul>
+                    {g.tracks.map(({ track, editions }) => (
+                      <li>
+                        <label class="inline-check">
+                          <input type="checkbox" name="track" value={track.id} checked />
+                          「{entryName(track)}」
+                        </label>
+                        <span class="muted small"> {editions.map((id) => editionLabel(matrix.editions.find((e) => e.id === id)!)).join('、')}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p class="small">
+                    <span class="muted">{t('依据：{reasons}', { reasons: g.reasons.map((r) => t(DUPLICATE_REASONS[r])).join(t('、')) })}</span>
+                    <label>{t('合并后的标题')} <input name="title" value={g.title} list={`dup-titles-${i}`} required /></label>
+                    <datalist id={`dup-titles-${i}`}>{g.titles.map((x) => <option value={x} />)}</datalist>
+                    <button type="submit">{t('合并为一个条目')}</button>
+                  </p>
                 </form>
               ))}
             </div>

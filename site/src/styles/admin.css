@@ -397,7 +397,9 @@ table.compare td.r-other { background: var(--bad-soft); color: var(--bad); }
 table.compare td.r-none, table.compare td.r-nofile { color: var(--idle); }
 .legend { font-size: 12px; }
 .merges { margin-top: 10px; }
-.merges .inline-form { margin-top: 4px; }
+.merges .merge-group { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.merges .merge-group ul { margin: 0 0 4px; padding-left: 0; list-style: none; }
+.merges .merge-group p { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0; }
 
 /* metadata lookup */
 tr.changed td { background: var(--changed); }

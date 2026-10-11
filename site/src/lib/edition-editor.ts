@@ -16,7 +16,7 @@ import { summary, UserError, type T } from './i18n';
 import { newId } from './ids';
 import { imageSrc } from './media';
 import { Places, ensureEntityFolder, folderKey, freeFileName } from './locations';
-import { derivedFor } from './processing';
+import { derivedFor, waitingAudio } from './processing';
 import { newRowTags } from './rowtags';
 import { COMMON_TAGS, TAG_DEFS, tagLabel } from './tagging/names';
 import { cleanTags, parseTags, sameValues, type Tags } from './tagging/model';
@@ -73,6 +73,7 @@ export interface EditorData {
   files: Record<string, EdFile>;
   unlinked: string[]; // audio files of the edition with no row
   extra: string[]; // audio files marked as not a track (an XFD, a preview cut): never in a row
+  waiting: number; // audio files still being analysed (generating a track list now links by titles only)
   pictures: EdPicture[];
   display: string[]; // tags always shown (common ones and the team's list)
   tagDefs: { name: string; label: string; group: string }[];
@@ -226,6 +227,7 @@ export async function editorData(edition: EditionRow, release: ReleaseRow, place
     files,
     unlinked: Object.keys(files).filter((id) => !linked.has(id) && !notTracks.has(id)),
     extra: [...notTracks],
+    waiting: rawRows.length ? 0 : await waitingAudio(database, edition.id),
     pictures,
     display: await displayTags(),
     tagDefs: TAG_DEFS.map((d) => ({ name: d.name, label: tagText(d.name), group: d.group })),

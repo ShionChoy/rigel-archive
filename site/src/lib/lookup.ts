@@ -13,6 +13,7 @@ import { Places, ensureEntityFolder, folderKey, freeFileName } from './locations
 import { MBID, MB_UA, bandcampAlbum, mbCandidates, mbGet, scoreCandidate, type MbCandidate } from './metadata';
 import type { Tags } from './tagging/model';
 import { concat, imageSize } from './tagging/bytes';
+import { exactTitleKey } from './titles';
 
 export interface OnlineTrack {
   disc: number;
@@ -393,7 +394,7 @@ export async function importOnline(actor: string, release: ReleaseRow & { era_na
   const coverId = withCover && online.cover ? await storeOnlineCover(actor, edition, release, online.cover.url, online.cover.large) : null;
   const source = online.source === 'musicbrainz' ? 'MusicBrainz' : 'Bandcamp';
   const cs = new ChangeSet(database, actor, summary('版本 {edition}：采用 {source} 的元数据', { edition: `${release.catalog_no ?? release.title} ${edition.name}`.trim(), source }));
-  const key = (s: string) => s.normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+  const key = exactTitleKey; // accents, case and punctuation aside
   const cover = coverId ? JSON.stringify({ file: coverId, mode: 'replace' }) : null;
   const IDS = ['musicbrainz_recordingid', 'musicbrainz_trackid', 'musicbrainz_albumid', 'musicbrainz_releasegroupid', 'musicbrainz_artistid', 'musicbrainz_albumartistid', 'musicbrainz_workid', 'isrc'];
   if (rows.length === 0) {

@@ -432,7 +432,7 @@ export async function loadReleaseView(
 /** 版本对照 among the shown editions only, without the tracks none of them has. */
 async function publicComparison(releaseId: string, shown: Set<string>) {
   const matrix = await comparison(releaseId, (e) => shown.has(e.id));
-  return { ...matrix, rows: matrix.rows.filter((r) => r.cells.some((c) => c !== null)), merges: [] };
+  return { ...matrix, rows: matrix.rows.filter((r) => r.cells.some((c) => c !== null)), duplicates: [] };
 }
 
 export { clock as formatClock };

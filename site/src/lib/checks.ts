@@ -138,7 +138,7 @@ export async function runChecks(t: T): Promise<Check[]> {
   checks.push({ id: 'tags', title: TITLE_CHECK.name, hint: TITLE_CHECK.hint, ...cap(tagDiff) });
 
   checks.push({
-    id: 'unlinked', title: N_('音频没有对应曲目'), hint: N_('在版本页的曲目列表下方点「按曲号、标题和时长自动对应」，或逐个「对应到…」；XFD、试听剪辑这类不是曲目的音频，点「不是曲目」。'),
+    id: 'unlinked', title: N_('音频没有对应曲目'), hint: N_('在版本页的曲目列表下方点「按标题、音频和时长自动对应」，或逐个「对应到…」；XFD、试听剪辑这类不是曲目的音频，点「不是曲目」。'),
     ...cap((unlinked.results as { id: string; name: string; edition_id: string }[]).map((f) => ({ label: f.name, href: `/admin/editions/${f.edition_id}#files` }))),
   });
   checks.push({

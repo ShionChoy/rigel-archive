@@ -73,6 +73,18 @@ export const WANTED_PICTURES = `NOT EXISTS (SELECT 1 FROM files f WHERE f.sha256
     OR (t.state = 'running' AND t.started_at > ${ago(STALE_MINUTES)})
     OR (t.state = 'failed' AND t.updated_at > ${ago(RETRY_AFTER_MINUTES)})))`;
 
+/**
+ * An edition's audio files still waiting to be checked or fingerprinted: until they are, their audio
+ * cannot be compared with the release's other files (a track list made now is linked by titles only).
+ */
+export async function waitingAudio(db: D1Database, editionId: string): Promise<number> {
+  const row = await db
+    .prepare(`SELECT count(*) AS n FROM files f WHERE f.edition_id = ? AND f.kind = 'audio' AND ((${WANTED.check}) OR (${WANTED.fingerprint}))`)
+    .bind(editionId)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
 export async function pendingCounts(db: D1Database): Promise<Record<Task, number>> {
   const rows = await db.batch([
     ...SQL_TASKS.map((task) => db.prepare(`SELECT count(DISTINCT f.sha256) AS n FROM files f WHERE ${WANTED[task]}`)),
