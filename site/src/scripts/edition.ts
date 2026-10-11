@@ -189,14 +189,21 @@ export function initEditor(data: EditorData) {
     return out;
   }
   /**
-   * The track list in the online release's order: the rows with an online track take the places such rows
-   * hold now, in the online order; the others stay where they are.
+   * The track list in the online release's order: disc by disc, the rows with an online track first, in the
+   * online order, then the rows the online release does not have (an XFD, a bonus track) in their own order,
+   * so that the tracks get the online release's numbers.
    */
   function onlineOrder(): Row[] {
-    const rank = (r: Row) => onlineOf(r)!.disc * 10000 + onlineOf(r)!.position;
-    const sorted = rows.filter((r) => onlineOf(r)).sort((a, b) => rank(a) - rank(b));
-    let k = 0;
-    return rows.map((r) => (onlineOf(r) ? sorted[k++] : r));
+    const place = new Map(rows.map((r, i) => [r.id, i]));
+    const rank = (r: Row): [number, number, number] => {
+      const o = onlineOf(r);
+      return o ? [o.disc, 0, o.position] : [r.disc, 1, place.get(r.id)!];
+    };
+    return [...rows].sort((a, b) => {
+      const x = rank(a);
+      const y = rank(b);
+      return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+    });
   }
   /** How many rows the online order moves (to another place, or to another disc). */
   const orderMoves = (): number =>
