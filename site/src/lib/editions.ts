@@ -4,7 +4,7 @@
 // to the release's tracks (files.track_id), so the same track can be compared across editions.
 
 import { ChangeSet } from './changes';
-import { isOneOf } from './constants';
+import { EXTRA_AUDIO, isOneOf } from './constants';
 import { db, parseFormat, type EditionRow, type EditionStatus, type EditionTrackRow, type ReleaseRow, type TrackRow } from './db';
 import { N_, summary, UserError } from './i18n';
 import { newId } from './ids';
@@ -205,13 +205,17 @@ interface EditionAudio {
   pcm_md5: string | null;
   track_id: string | null;
   format: string | null;
+  role: string | null;
 }
 
-/** The edition's audio files that stand for its tracks (not ignored, not a copy, not an old version). */
+/**
+ * The edition's audio files that stand for its tracks (not ignored, not a copy, not an old version). Those
+ * marked as not a track (EXTRA_AUDIO: an XFD, a preview cut) are among them; the track list leaves them out.
+ */
 export async function editionAudio(editionId: string): Promise<EditionAudio[]> {
   const { results } = await db()
     .prepare(
-      `SELECT id, dir, name, sha256, pcm_md5, track_id, format FROM files f
+      `SELECT id, dir, name, sha256, pcm_md5, track_id, format, role FROM files f
        WHERE edition_id = ? AND kind = 'audio' AND state != 'ignored' AND dup_of IS NULL AND sealed_in IS NULL
          AND NOT EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id)
        ORDER BY dir, name`,
@@ -253,11 +257,11 @@ async function heardTracks(releaseId: string, files: EditionAudio[]): Promise<Ma
  * disc and track number (or, without numbers, the same title) are one row: a FLAC and a WAV of the same
  * track. Each row is linked to the release's track it already is (same audio or recording as a linked
  * file, else the same title) or to a new track, and its files are linked to that track. A whole-disc
- * image (over 25 minutes next to at least three other files) is left out.
+ * image (over 25 minutes next to at least three other files) and audio marked as not a track are left out.
  */
 export async function generateEditionTracks(actor: string, release: ReleaseRow, edition: EditionRow): Promise<number> {
   if ((await loadEditionTracks(edition.id)).length) throw new UserError('这个版本已经有曲目顺序了；要重新生成，先删除现有的行');
-  const all = await editionAudio(edition.id);
+  const all = (await editionAudio(edition.id)).filter((f) => f.role !== EXTRA_AUDIO);
   const long = (f: EditionAudio) => (parseFormat(f.format).duration ?? 0) > 25 * 60;
   const files = all.length > 3 ? all.filter((f) => !long(f)) : all;
   if (files.length === 0) throw new UserError('这个版本里没有音频文件');
@@ -330,7 +334,7 @@ export async function matchEditionFiles(actor: string, release: ReleaseRow, edit
   }
   const groups = new Map<string, string[]>();
   let left = 0;
-  for (const f of files.filter((x) => !x.track_id)) {
+  for (const f of files.filter((x) => !x.track_id && x.role !== EXTRA_AUDIO)) {
     const n = trackNumber(f);
     const seconds = parseFormat(f.format).duration ?? 0;
     const byLength = rows.filter((r) => r.duration_ms && Math.abs(r.duration_ms / 1000 - seconds) <= 2);

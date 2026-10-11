@@ -62,7 +62,11 @@ export const ROLE_LABELS: Record<string, string> = {
   illustration: N_('插画'),
   bms: 'BMS',
   score: N_('乐谱'),
+  extra: N_('附加音频（不是曲目）'),
 };
+
+/** The role of audio in an edition that is not one of its tracks (an XFD, a preview cut): marked on the 版本页. */
+export const EXTRA_AUDIO = 'extra';
 
 /** Folder-tree nodes with these endings are archives opened by `ra extract`. */
 export const ARCHIVE_NAME = /\.(zip|rar|7z|lzh|lha|iso|exe)$/i;

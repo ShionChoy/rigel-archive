@@ -8,6 +8,7 @@ import { VISIBLE } from './locations';
 import { loadTypes, type TypeList } from './types';
 import { FILED_FILE, PUBLIC_EDITION, PUBLIC_RELEASE } from './public/rules';
 import { COVER_NAME } from './covers';
+import { EXTRA_AUDIO } from './constants';
 
 export interface CheckItem {
   label: string;
@@ -74,10 +75,11 @@ export async function runChecks(t: T): Promise<Check[]> {
       `SELECT dir, group_concat(DISTINCT lower(ext)) AS exts FROM files
        WHERE kind = 'audio' AND ${VISIBLE} AND state != 'ignored' GROUP BY dir`,
     ),
-    // Audio in an edition that has a track order but is not linked to a track.
+    // Audio in an edition that has a track order but is not linked to a track (nor marked as not a track).
     database.prepare(
       `SELECT f.id, f.name, f.edition_id FROM files f
        WHERE f.kind = 'audio' AND f.edition_id IS NOT NULL AND f.track_id IS NULL AND f.sealed_in IS NULL AND f.state != 'ignored' AND f.dup_of IS NULL
+         AND coalesce(f.role, '') != '${EXTRA_AUDIO}'
          AND EXISTS (SELECT 1 FROM edition_tracks et WHERE et.edition_id = f.edition_id)
          AND NOT EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id)
        ORDER BY f.edition_id, f.name`,
@@ -136,7 +138,7 @@ export async function runChecks(t: T): Promise<Check[]> {
   checks.push({ id: 'tags', title: TITLE_CHECK.name, hint: TITLE_CHECK.hint, ...cap(tagDiff) });
 
   checks.push({
-    id: 'unlinked', title: N_('音频没有对应曲目'), hint: N_('在版本页的曲目列表下方点「按曲号、标题和时长自动对应」，或逐个「对应到…」。'),
+    id: 'unlinked', title: N_('音频没有对应曲目'), hint: N_('在版本页的曲目列表下方点「按曲号、标题和时长自动对应」，或逐个「对应到…」；XFD、试听剪辑这类不是曲目的音频，点「不是曲目」。'),
     ...cap((unlinked.results as { id: string; name: string; edition_id: string }[]).map((f) => ({ label: f.name, href: `/admin/editions/${f.edition_id}#files` }))),
   });
   checks.push({

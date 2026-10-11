@@ -7,6 +7,7 @@
 
 import { env } from 'cloudflare:workers';
 import { ChangeSet } from './changes';
+import { EXTRA_AUDIO } from './constants';
 import { db, parseFormat, type EditionRow, type ReleaseRow } from './db';
 import { editionAudio, parseIds } from './editions';
 import { embeddedFor, pictureUrl, picturesFor, readNow } from './embedded';
@@ -20,7 +21,7 @@ import { newRowTags } from './rowtags';
 import { COMMON_TAGS, TAG_DEFS, tagLabel } from './tagging/names';
 import { cleanTags, parseTags, sameValues, type Tags } from './tagging/model';
 import { COVER_MAX, parseCover, type RowCover } from './tags';
-import { titleFromFile, titleKey } from './tracks';
+import { dropTrackRows, titleFromFile, titleKey } from './tracks';
 
 export type { RowCover };
 
@@ -71,6 +72,7 @@ export interface EditorData {
   rows: EdRow[];
   files: Record<string, EdFile>;
   unlinked: string[]; // audio files of the edition with no row
+  extra: string[]; // audio files marked as not a track (an XFD, a preview cut): never in a row
   pictures: EdPicture[];
   display: string[]; // tags always shown (common ones and the team's list)
   tagDefs: { name: string; label: string; group: string }[];
@@ -175,11 +177,12 @@ export async function editorData(edition: EditionRow, release: ReleaseRow, place
   }
   // A row's files: the lossless ones first (FLAC before WAV), its tags are shown from the first.
   const rank = (f: EdFile) => (f.lossless ? 0 : 2) + (f.ext === 'flac' ? 0 : 1);
+  const notTracks = new Set(audio.filter((f) => f.role === EXTRA_AUDIO).map((f) => f.id));
   const rows: EdRow[] = rawRows.map((r) => ({
     id: r.id, disc: r.disc, position: r.position, track_id: r.track_id,
     entry_title: r.version_label ? `${r.entry_title} (${r.version_label})` : r.entry_title,
     duration_ms: r.duration_ms ?? r.entry_duration, tags: parseTags(r.tags), cover: parseCover(r.cover),
-    files: Object.values(files).filter((f) => f.track_id === r.track_id).sort((a, b) => rank(a) - rank(b)).map((f) => f.id),
+    files: Object.values(files).filter((f) => f.track_id === r.track_id && !notTracks.has(f.id)).sort((a, b) => rank(a) - rank(b)).map((f) => f.id),
   }));
   const linked = new Set(rows.flatMap((r) => r.files));
   // Pictures: the edition's picture files (with their place below it), then the pictures its audio carries.
@@ -221,7 +224,8 @@ export async function editorData(edition: EditionRow, release: ReleaseRow, place
     version: await listVersion(rawRows),
     rows,
     files,
-    unlinked: Object.keys(files).filter((id) => !linked.has(id)),
+    unlinked: Object.keys(files).filter((id) => !linked.has(id) && !notTracks.has(id)),
+    extra: [...notTracks],
     pictures,
     display: await displayTags(),
     tagDefs: TAG_DEFS.map((d) => ({ name: d.name, label: tagText(d.name), group: d.group })),
@@ -244,6 +248,7 @@ export interface SaveBody {
   edition_ids?: { musicbrainz_release?: string; bandcamp?: string } | null; // the source whose data was taken (查找元数据)
   rows: SaveRow[]; // every row, in the order wanted
   links?: { file: string; row: string | null }[]; // audio files to link to a row (or to none)
+  extra?: string[]; // the audio files marked as not a track, all of them (left out: no change)
 }
 
 function checkCover(raw: unknown): RowCover | null {
@@ -257,8 +262,9 @@ const coverJson = (c: RowCover | null) => (c ? JSON.stringify(c.file ? { file: c
 
 /**
  * Save the track list as the page sends it. Rows keep their ids; positions are renumbered per disc in the
- * order sent. Rows missing from the list are removed; rows «new:<file>» become a new track of the release
- * with that file linked; «blank:<n>» a new track with only a title. Returns the rows changed.
+ * order sent. Rows missing from the list are removed (their files leave them; a track no track list has any
+ * more goes, see dropTrackRows); rows «new:<file>» become a new track of the release with that file linked;
+ * «blank:<n>» a new track with only a title. Audio marked as not a track leaves its row. Returns the rows changed.
  */
 export async function saveEditionTags(actor: string, edition: EditionRow, release: ReleaseRow & { era_name: string }, body: SaveBody): Promise<{ changed: number; batchId: string }> {
   const database = db();
@@ -274,6 +280,9 @@ export async function saveEditionTags(actor: string, edition: EditionRow, releas
   const { results: entries } = await database.prepare('SELECT id, title, position FROM tracks WHERE release_id = ?').bind(release.id).all<{ id: string; title: string; position: number }>();
   let nextPosition = entries.reduce((m, e) => Math.max(m, e.position), 0);
   const madeFor = new Map<string, string>(); // page row id → track id (new rows)
+  const handled = new Set<string>(); // files this save links (or marks) itself
+  // Audio marked as not a track (or no longer): it is in no row.
+  const extra = Array.isArray(body.extra) ? new Set(body.extra.map(String).filter((id) => audioById.has(id))) : null;
   const albumRows = current.map((r) => r.tags);
   for (const [i, r] of body.rows.entries()) {
     const disc = Number(r.disc) || 1;
@@ -321,9 +330,13 @@ export async function saveEditionTags(actor: string, edition: EditionRow, releas
       id: newId('et'), edition_id: edition.id, disc, position, track_id: trackId, duration_ms: null, external_ids: '{}',
       tags: JSON.stringify(start), cover: coverJson(cover),
     });
-    if (file && file.track_id !== trackId) cs.updateFiles([file.id], { track_id: trackId });
+    if (file && file.track_id !== trackId) {
+      cs.updateFiles([file.id], { track_id: trackId });
+      handled.add(file.id);
+    }
   }
-  for (const r of current) if (!kept.has(r.id)) await cs.delete('edition_track', { id: r.id });
+  const removed = current.filter((r) => !kept.has(r.id));
+  for (const r of removed) await cs.delete('edition_track', { id: r.id });
   // The release whose data was taken is recorded with the edition (its external links).
   if (body.edition_ids && typeof body.edition_ids === 'object') {
     const ids = { ...parseIds(edition.external_ids) };
@@ -334,17 +347,28 @@ export async function saveEditionTags(actor: string, edition: EditionRow, releas
     cs.updateKnown('edition', { id: edition.id }, { external_ids: edition.external_ids }, { external_ids: JSON.stringify(ids) });
   }
   // Files linked to rows by hand.
+  if (extra) {
+    const mark = audio.filter((f) => extra.has(f.id) && !handled.has(f.id) && (f.role !== EXTRA_AUDIO || f.track_id)).map((f) => f.id);
+    const unmark = audio.filter((f) => !extra.has(f.id) && f.role === EXTRA_AUDIO).map((f) => f.id);
+    if (mark.length) cs.updateFiles(mark, { role: EXTRA_AUDIO, track_id: null });
+    if (unmark.length) cs.updateFiles(unmark, { role: null });
+    for (const id of [...mark, ...unmark]) handled.add(id);
+  }
   const trackOfRow = new Map([...current.map((r) => [r.id, r.track_id] as const), ...madeFor]);
   const groups = new Map<string, string[]>();
   for (const l of body.links ?? []) {
     const f = audioById.get(String(l.file));
-    if (!f) continue;
+    if (!f || extra?.has(f.id)) continue;
+    handled.add(f.id);
     const track = l.row ? trackOfRow.get(String(l.row)) : null;
     if (l.row && !track) throw new UserError('所选曲目不在这个版本里');
     if ((f.track_id ?? null) === (track ?? null)) continue;
     groups.set(track ?? '', [...(groups.get(track ?? '') ?? []), f.id]);
   }
   for (const [track, ids] of groups) cs.updateFiles(ids, { track_id: track || null });
+  // The rows taken out: their files leave them, and their tracks go when no track list has them any more.
+  const used = new Set([...current.filter((r) => kept.has(r.id)).map((r) => r.track_id), ...madeFor.values()]);
+  await dropTrackRows(cs, edition.id, [...new Set(removed.map((r) => r.track_id))].filter((id) => !used.has(id)), handled);
   const changed = await cs.commit();
   return { changed, batchId: cs.batchId };
 }

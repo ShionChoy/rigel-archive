@@ -135,7 +135,55 @@ export async function saveTracks(actor: string, release: ReleaseRow, current: Tr
     for (const r of rows) await cs.delete('edition_track', { id: r.id });
   }
   for (const t of gone) await cs.delete('track', { id: t.id });
+  // Their songs go too when nothing else is a version of them (or is being made one here).
+  const kept = new Set(rows.map((r) => r.song).filter((s): s is string => !!s && s !== 'new'));
+  await dropSongs(cs, gone.map((t) => t.song_id).filter((s): s is string => !!s && !kept.has(s)), gone.map((t) => t.id));
   return cs.commit();
+}
+
+/**
+ * Rows taken out of an edition's track list (版本页): the edition's files leave those tracks, and a track no
+ * track list has any more goes (a release's tracks are the tracks its editions list), with the files
+ * anywhere still pointing at it and with its song when nothing else is a version of it. A track or song
+ * with something written by hand (credits, a note, a version label, a translation) stays. Everything is in
+ * the change set, so 撤销 brings it back. `handled`: files this change links elsewhere itself.
+ */
+export async function dropTrackRows(cs: ChangeSet, editionId: string, trackIds: string[], handled: Set<string>): Promise<void> {
+  if (trackIds.length === 0) return;
+  const database = db();
+  const ids = JSON.stringify(trackIds);
+  const [listed, bare, linked] = await database.batch([
+    database.prepare('SELECT DISTINCT track_id FROM edition_tracks WHERE track_id IN (SELECT value FROM json_each(?1)) AND edition_id != ?2').bind(ids, editionId),
+    database.prepare(
+      `SELECT t.id, t.song_id FROM tracks t WHERE t.id IN (SELECT value FROM json_each(?1))
+         AND coalesce(t.credits, '') IN ('', '[]', '{}') AND coalesce(t.note, '') = '' AND coalesce(t.version_label, '') = ''
+         AND NOT EXISTS (SELECT 1 FROM translations x WHERE x.entity = 'track' AND x.entity_id = t.id)`,
+    ).bind(ids),
+    database.prepare('SELECT id, edition_id, track_id FROM files WHERE track_id IN (SELECT value FROM json_each(?1))').bind(ids),
+  ]);
+  const listedElsewhere = new Set((listed.results as { track_id: string }[]).map((r) => r.track_id));
+  const gone = (bare.results as { id: string; song_id: string | null }[]).filter((t) => !listedElsewhere.has(t.id));
+  const goneIds = new Set(gone.map((t) => t.id));
+  const unlink = (linked.results as { id: string; edition_id: string | null; track_id: string }[])
+    .filter((f) => !handled.has(f.id) && (f.edition_id === editionId || goneIds.has(f.track_id)))
+    .map((f) => f.id);
+  if (unlink.length) cs.updateFiles(unlink, { track_id: null });
+  for (const t of gone) await cs.delete('track', { id: t.id });
+  await dropSongs(cs, gone.map((t) => t.song_id).filter((s): s is string => !!s), [...goneIds]);
+}
+
+/** Songs no track is a version of once these tracks are gone, unless something was written for them by hand. */
+async function dropSongs(cs: ChangeSet, songIds: string[], goneTracks: string[]): Promise<void> {
+  if (songIds.length === 0) return;
+  const { results } = await db()
+    .prepare(
+      `SELECT s.id FROM songs s WHERE s.id IN (SELECT value FROM json_each(?1)) AND coalesce(s.note, '') = ''
+         AND NOT EXISTS (SELECT 1 FROM tracks t WHERE t.song_id = s.id AND t.id NOT IN (SELECT value FROM json_each(?2)))
+         AND NOT EXISTS (SELECT 1 FROM translations x WHERE x.entity = 'song' AND x.entity_id = s.id)`,
+    )
+    .bind(JSON.stringify([...new Set(songIds)]), JSON.stringify(goneTracks))
+    .all<{ id: string }>();
+  for (const s of results) await cs.delete('song', { id: s.id });
 }
 
 /** Disc and track number of an audio file, from its tags, else from its name and folder. */

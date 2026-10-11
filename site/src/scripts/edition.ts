@@ -27,6 +27,7 @@ export interface EditorData {
   rows: EdRow[];
   files: Record<string, EdFile>;
   unlinked: string[];
+  extra: string[];
   pictures: EdPicture[];
   display: string[];
   tagDefs: { name: string; label: string; group: string }[];
@@ -67,6 +68,7 @@ export function initEditor(data: EditorData) {
   const savedNumbers = new Map<string, string>();
   for (const d of new Set(data.rows.map((r) => r.disc))) data.rows.filter((r) => r.disc === d).forEach((r, i) => savedNumbers.set(r.id, `${d}-${i + 1}`));
   const links = new Map<string, string | null>(); // file → row it is linked to on this page (null: none)
+  let extras = new Set(data.extra); // audio files marked as not a track (an XFD, a preview cut)
   const selected = new Set<string>();
   const expanded = new Set<string>();
   const shown = new Set<string>(); // names added to the display on this page
@@ -79,7 +81,7 @@ export function initEditor(data: EditorData) {
   } catch {
     // default columns
   }
-  const snapshot = () => JSON.stringify({ rows: rows.map((r) => [r.id, r.disc, r.tags, r.cover]), links: [...links] });
+  const snapshot = () => JSON.stringify({ rows: rows.map((r) => [r.id, r.disc, r.tags, r.cover]), links: [...links], extras: [...extras].sort() });
   let initial = snapshot();
 
   const filesOf = (row: Row): string[] => {
@@ -239,6 +241,22 @@ export function initEditor(data: EditorData) {
     }
     remember();
   }
+  /**
+   * Take rows out of the track list (kept on the page until 「保存」, like every change here). Saving lets
+   * their files go and takes out the release's track entries no other track list has.
+   */
+  function removeRows(ids: string[]) {
+    if (ids.length === 0) return;
+    if (!confirm(t('删除 {n} 行？它们的文件会回到「还没对应到曲目的音频」；别的版本的曲目表里也没有的曲目，作品里的曲目条目会一并删除。保存前都可以放弃，保存后也可以撤销。', { n: ids.length }))) return;
+    const gone = new Set(ids);
+    rows = rows.filter((r) => !gone.has(r.id));
+    for (const id of ids) {
+      selected.delete(id);
+      expanded.delete(id);
+    }
+    for (const [f, r] of links) if (r && gone.has(r)) links.set(f, null);
+    render();
+  }
   /** Taking a release's data also records its id on the edition (归档信息 → 外部链接). */
   function remember() {
     if (!compare) return;
@@ -251,7 +269,7 @@ export function initEditor(data: EditorData) {
   };
   const unlinked = (): string[] => {
     const linked = new Set(rows.flatMap((r) => filesOf(r)));
-    return Object.keys(data.files).filter((f) => !linked.has(f));
+    return Object.keys(data.files).filter((f) => !linked.has(f) && !extras.has(f));
   };
   const changes = (): number => {
     if (snapshot() === initial) return 0;
@@ -263,7 +281,8 @@ export function initEditor(data: EditorData) {
       if (!b || b !== JSON.stringify([r.disc, r.tags, r.cover]) || data.rows[i]?.id !== r.id) n += 1;
     });
     for (const r of data.rows) if (!now.has(r.id)) n += 1;
-    return n + links.size;
+    const marked = [...extras].filter((f) => !data.extra.includes(f)).length + data.extra.filter((f) => !extras.has(f)).length;
+    return n + links.size + marked;
   };
 
   // ------------------------------------------------------------------ 版本信息
@@ -687,13 +706,15 @@ export function initEditor(data: EditorData) {
     const generate = rows.length === 0 && data.rows.length === 0
       ? `<div class="empty-tracks"><p class="muted">${esc(t('这个版本还没有曲目表。可以从版本里的音频文件生成（标题取自文件），也可以逐个「新建一行」，或用「查找元数据」从 MusicBrainz、Bandcamp 导入。'))}</p>
          <form method="post" class="inline"><input type="hidden" name="section" value="generate" /><input type="hidden" name="anchor" value="tracks" />
-         <button class="primary" type="submit">${esc(t('从 {n} 个音频文件生成曲目表', { n: Object.keys(data.files).length }))}</button></form></div>`
+         <button class="primary" type="submit">${esc(t('从 {n} 个音频文件生成曲目表', { n: Object.keys(data.files).filter((f) => !extras.has(f)).length }))}</button></form></div>`
       : '';
     const allTags = sortNames([...data.tagDefs.map((d) => d.name).filter((x) => !NUMBERS.includes(x)), ...columns]);
     tracks.innerHTML = `
       <div class="tracks-head">
         <h2>${esc(t('曲目列表'))} <small class="muted">${esc(t('{n} 首 · {time}', { n: rows.length, time: clock(total) }))}</small></h2>
-        <span class="muted small">${esc(t('勾选曲目后，上方「版本信息」只显示和修改所选曲目'))}</span>
+        ${selected.size
+          ? `<button type="button" class="danger-link" data-act="remove-selected">${esc(t('删除所选的 {n} 行', { n: selected.size }))}</button>`
+          : `<span class="muted small">${esc(t('勾选曲目后，上方「版本信息」只显示和修改所选曲目；也可以删除所选的行'))}</span>`}
         <details class="col-pick"><summary class="button">${esc(t('列：{names}', { names: columns.map(label).join(' · ') }))}</summary>
           <div class="col-list">${allTags.map((c) => `<label><input type="checkbox" data-col="${esc(c)}" ${columns.includes(c) ? 'checked' : ''} /> ${esc(label(c))}</label>`).join('')}</div>
         </details>
@@ -713,10 +734,19 @@ export function initEditor(data: EditorData) {
           const f = data.files[id];
           return `<li><a href="/admin/files/${esc(id)}">${esc(f.name)}</a> <span class="muted">${esc(f.spec)}${f.path ? ` · ${esc(f.path)}` : ''}</span>
             <button type="button" data-new-row="${esc(id)}">${esc(t('新建一行'))}</button>
+            <button type="button" data-extra="${esc(id)}" title="${esc(t('XFD、试听剪辑这类不对应任何曲目的音频：不再算作没对应的音频，生成曲目表时也跳过'))}">${esc(t('不是曲目'))}</button>
             <select data-link="${esc(id)}" aria-label="${esc(t('对应到'))}"><option value="">${esc(t('对应到…'))}</option>${rows.map((r) => `<option value="${esc(r.id)}">${String(n.of.get(r.id)!.pos).padStart(2, '0')} ${esc(join(values(r, 'title')) || r.entry)}</option>`).join('')}</select></li>`;
         }).join('')}</ul>
         <form method="post" class="inline"><input type="hidden" name="section" value="match" /><input type="hidden" name="anchor" value="tracks" />
           <button type="submit">${esc(t('按曲号、标题和时长自动对应'))}</button></form>
+      </div>` : ''}
+      ${extras.size ? `<div class="loose extras">
+        <b>${esc(t('附加音频（不是曲目，{n} 个）', { n: extras.size }))}</b>
+        <ul>${[...extras].filter((id) => data.files[id]).map((id) => {
+          const f = data.files[id];
+          return `<li><a href="/admin/files/${esc(id)}">${esc(f.name)}</a> <span class="muted">${esc(f.spec)}${f.path ? ` · ${esc(f.path)}` : ''}</span>
+            <button type="button" data-unextra="${esc(id)}">${esc(t('改回曲目音频'))}</button></li>`;
+        }).join('')}</ul>
       </div>` : ''}`;
   }
 
@@ -786,10 +816,14 @@ export function initEditor(data: EditorData) {
       if (r) r.tags = {};
       render();
     } else if (b?.dataset.rowAdd) addTag(b.dataset.rowAdd);
-    else if (b?.dataset.rowRemove) {
-      if (!confirm(t('删除这一行？它的文件会回到「还没对应到曲目的音频」（保存前都可以放弃）。'))) return;
-      rows = rows.filter((r) => r.id !== b.dataset.rowRemove);
-      selected.delete(b.dataset.rowRemove);
+    else if (b?.dataset.rowRemove) removeRows([b.dataset.rowRemove]);
+    else if (b?.dataset.act === 'remove-selected') removeRows(rows.filter((r) => selected.has(r.id)).map((r) => r.id));
+    else if (b?.dataset.extra) {
+      extras.add(b.dataset.extra);
+      links.delete(b.dataset.extra);
+      render();
+    } else if (b?.dataset.unextra) {
+      extras.delete(b.dataset.unextra);
       render();
     } else if (b?.dataset.unlink) {
       links.set(b.dataset.unlink, null);
@@ -1044,8 +1078,8 @@ export function initEditor(data: EditorData) {
         <button type="button" class="linkish" data-cmp="order">${esc(t('按在线版排列'))}</button></div>` : ''}
       ${extraOnline.length ? `<div class="cmp-extra"><b>${esc(t('在线版多出的曲目（{n}）', { n: extraOnline.length }))}</b> ${extraOnline.map(([x, i]) =>
         `<span class="chip">${x.disc > 1 ? `${x.disc}-` : ''}${x.position} ${esc(x.title)} <button type="button" class="linkish" data-cmp-add="${i}">${esc(t('新建一行'))}</button></span>`).join(' ')}</div>` : ''}
-      ${extraLocal.length ? `<div class="cmp-extra"><b>${esc(t('本地多出的曲目（{n}，没有对应的在线曲目）', { n: extraLocal.length }))}</b> ${extraLocal.map((r) => `<span class="chip">${esc(join(values(r, 'title')) || r.entry)}</span>`).join(' ')}
-        <span class="muted small">${esc(t('可以在曲目列表的「对应在线」一列里手动对应。'))}</span></div>` : ''}`;
+      ${extraLocal.length ? `<div class="cmp-extra"><b>${esc(t('本地多出的曲目（{n}，没有对应的在线曲目）', { n: extraLocal.length }))}</b> ${extraLocal.map((r) => `<span class="chip">${esc(join(values(r, 'title')) || r.entry)} <button type="button" class="linkish" data-cmp-del="${esc(r.id)}">${esc(t('删除这一行'))}</button></span>`).join(' ')}
+        <span class="muted small">${esc(t('它们排在在线版的曲目之后；可以在曲目列表的「对应在线」一列里手动对应，不需要的可以删除。'))}</span></div>` : ''}`;
   }
 
   let busy = '';
@@ -1077,6 +1111,11 @@ export function initEditor(data: EditorData) {
   compareBar.addEventListener('click', async (e) => {
     const el = e.target as HTMLElement;
     const act = (el.closest('[data-cmp]') as HTMLElement | null)?.dataset.cmp;
+    const del = el.closest('[data-cmp-del]') as HTMLElement | null;
+    if (del) {
+      removeRows([del.dataset.cmpDel!]);
+      return;
+    }
     const add = el.closest('[data-cmp-add]') as HTMLElement | null;
     if (add && compare) {
       const x = compare.online.tracks[Number(add.dataset.cmpAdd)];
@@ -1234,7 +1273,7 @@ export function initEditor(data: EditorData) {
     try {
       const body = {
         version: data.version, rows: rows.map((r) => ({ id: r.id, disc: r.disc, tags: r.tags, cover: r.cover, title: r.title })),
-        links: [...links].map(([file, row]) => ({ file, row })), edition_ids: editionIds,
+        links: [...links].map(([file, row]) => ({ file, row })), extra: [...extras], edition_ids: editionIds,
       };
       const res = await fetch(`/admin/editions/${data.edition.id}/tags`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-admin-request': '1' }, body: JSON.stringify(body),
@@ -1325,6 +1364,7 @@ export function initEditor(data: EditorData) {
     baseFiles.clear();
     for (const r of data.rows) baseFiles.set(r.id, r.files);
     links.clear();
+    extras = new Set(data.extra);
     for (const id of [...selected]) if (!rows.some((r) => r.id === id)) selected.delete(id);
     initial = snapshot();
     render();

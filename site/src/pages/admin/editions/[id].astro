@@ -8,7 +8,7 @@ import Dialogs from '../../../components/desk/Dialogs.astro';
 import FileIcon from '../../../components/desk/FileIcon.astro';
 import FolderIcon from '../../../components/desk/FolderIcon.astro';
 import PlacePicker from '../../../components/PlacePicker.astro';
-import { FILE_KIND_LABELS, RIGHTS_LABELS } from '../../../lib/constants';
+import { EXTRA_AUDIO, FILE_KIND_LABELS, RIGHTS_LABELS } from '../../../lib/constants';
 import { editionCovers } from '../../../lib/covers';
 import { db, parseFormat, type EditionRow, type FileRow, type ReleaseRow } from '../../../lib/db';
 import {
@@ -440,7 +440,7 @@ const KIND_FILTERS: Record<string, string> = { audio: N_('音频'), image: N_('�
           <form method="post" class="inline">
             <input type="hidden" name="section" value="generate" />
             <input type="hidden" name="anchor" value="tracks" />
-            <button class="primary" type="submit">{t('从 {n} 个音频文件生成曲目表', { n: audio.length })}</button>
+            <button class="primary" type="submit">{t('从 {n} 个音频文件生成曲目表', { n: audio.filter((f) => f.role !== EXTRA_AUDIO).length })}</button>
           </form>
         </>
       ) : <p class="muted">{t('正在载入…')}</p>}
