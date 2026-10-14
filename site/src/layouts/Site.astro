@@ -22,7 +22,7 @@ const { t, lang } = Astro.locals;
 const pages = pagesFor(lang);
 const url = Astro.url;
 const fullTitle = title ? `${title} · ${SITE.name}` : `${SITE.name} · ${SITE.tagline}`;
-const summary = description ?? t('Rigël Theatre 全作品的非官方档案站：所有人都可以在线收听无损全曲。');
+const summary = description ?? t('Rigël Theatre 全作品的非官方档案站。');
 const canonical = new URL(url.pathname + url.search, url.origin).href;
 const nav = [
   { id: 'works', href: pages.works(), label: t('作品') },

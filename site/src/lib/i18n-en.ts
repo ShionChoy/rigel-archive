@@ -6,7 +6,7 @@
 
 export const EN: Record<string, string> = {
   // The site around the pages
-  'Rigël Theatre 全作品的非官方档案站：所有人都可以在线收听无损全曲。': 'An unofficial archive of everything Rigël Theatre has released — every collected work streams in full, lossless, for everyone.',
+  'Rigël Theatre 全作品的非官方档案站。': 'An unofficial archive of everything Rigël Theatre has released.',
   '作品': 'Works',
   '关于': 'About',
   '栏目': 'Sections',
@@ -24,8 +24,8 @@ export const EN: Record<string, string> = {
 
   // Home
   'Rigël Theatre 全作品档案': 'The Rigël Theatre Archive',
-  'Rigël Theatre 是东京的同人音乐厂牌，以天使、妖精、星辰与消逝的记忆为主题创作幻想民谣。本站收录 2003 年至今各个名义下的作品，所有人都可以在线收听无损全曲。':
-    'Rigël Theatre is a doujin music label from Tokyo making fantasy folk about angels, fairies, stars and fading memories. This site collects their works under every name from 2003 to today — and anyone can listen to them in full, lossless.',
+  'Rigël Theatre 是东京的同人音乐厂牌，以天使、妖精、星辰与消逝的记忆为主题创作幻想民谣。本站收录 2003 年至今各个名义下的作品。':
+    'Rigël Theatre is a doujin music label from Tokyo making fantasy folk about angels, fairies, stars and fading memories. This site collects their works under every name from 2003 to today.',
   '随机播放': 'Shuffle play',
   '已收录 {works} 个作品 · {tracks} 首可以播放': '{works} {works:work|works} · {tracks} {tracks:track|tracks} to play',
   '最新作品': 'Latest works',
