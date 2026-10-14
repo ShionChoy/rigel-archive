@@ -213,7 +213,8 @@ rclone copy vault:blobs ./blobs           # 取回全部原件（文件名就是
 方案见设计文档的标签页「公开站方案」。页面在 `site/src/pages/[lang]/`，每页有中、日、英三个网址（`/zh/…`、`/ja/…`、`/en/…`），
 打开 `/` 时按上次选的语言，否则按浏览器语言。外框是 `layouts/Site.astro`（深色星空，访客可切浅色，记在 `rigel.site.theme`），
 作品页与后台「预览公开页」共用 `components/ReleaseView.astro` 和 `lib/release-view.ts`，播放器 `components/Player.astro`
-（换页不中断、队列、随机、循环、锁屏控制、无损 / 省流，记在 `rigel.player`）。
+（换页不中断、队列、随机、循环、锁屏控制、无损 / 省流，记在 `rigel.player`；网络跟不上无损、一分钟内累计卡住 6 秒时，
+本次访问自动改播省流，访客在播放版本菜单里选过就不再自动切换）。
 
 - **地址**（`lib/hosts.ts`，`wrangler.jsonc` 的 `PUBLIC_HOST` / `ADMIN_HOST`）：公开站在 `rigeltheatre.fans`，后台在
   `admin.rigeltheatre.fans`（那里的其他网址转到公开站），公开站域名上的 `/admin` 是 404；`www` 与 `http://` 转到

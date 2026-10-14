@@ -34,6 +34,7 @@ const labels = {
   shuffleOn: t('随机播放：开'),
   shuffleOff: t('随机播放：关'),
   failed: t('这一首无法播放，已跳到下一首'),
+  slow: t('网络跟不上无损播放，已改为省流；可在播放版本中换回'),
   nothing: t('没有可以播放的曲目'),
 };
 ---
@@ -158,7 +159,7 @@ const labels = {
   .pl-queue li.on button { background: var(--now); color: var(--accent); font-weight: 600; }
   .pl-queue .q-n { color: var(--muted); font-variant-numeric: tabular-nums; }
   .pl-queue .q-sub { display: block; color: var(--muted); font-size: 12px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .pl-toast { position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 6px 14px; border-radius: 16px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity 0.2s; white-space: nowrap; }
+  .pl-toast { position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 6px 14px; border-radius: 16px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity 0.2s; width: max-content; max-width: min(92vw, 520px); text-align: center; }
   .pl-toast.on { opacity: 1; }
   @media (max-width: 760px) {
     body:has(#player:not([hidden])) { padding-bottom: 76px; }

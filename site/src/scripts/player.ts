@@ -6,7 +6,8 @@
 // A track comes in versions (lib/playback.ts): 无损 (the stream FLAC), 原件 (the file as collected) and 省流
 // (AAC), as far as the track's access allows; a track limited to a preview clip comes as the clip only.
 // 无损 plays unless the browser cannot or the visitor picked another version in the menu (kept in this
-// browser for every track).
+// browser for every track). Where the connection cannot keep up with 无损 (playback keeps stopping to wait),
+// the rest of the visit plays 省流, unless the visitor picks a version in the menu.
 
 type Kind = 'lossless' | 'original' | 'lossy';
 interface Source { src: string; type: string; label?: string; lossless?: boolean; kind?: Kind; size?: number | null; same?: boolean; locked?: boolean; span?: [number, number] }
@@ -55,6 +56,10 @@ function setUp(root: HTMLElement) {
   let lastSave = 0;
   /** Tracks that failed in a row: when the whole queue has, stop instead of going round it for ever. */
   let failures = 0;
+  /** The connection could not keep up: this visit prefers 省流 (not kept; see «a slow connection» below). */
+  let slow = false;
+  /** The visitor picked a version in the menu during this visit: theirs stands, slow or not. */
+  let picked = false;
 
 
   // ------------------------------------------------------------ keeping it
@@ -108,7 +113,7 @@ function setUp(root: HTMLElement) {
 
   // ------------------------------------------------------------ playing
   /** The version to play: the preferred kind first, among those open here that this browser plays. */
-  function pick(item: Item, prefer: Kind = state.pref): Source | null {
+  function pick(item: Item, prefer: Kind = slow ? 'lossy' : state.pref): Source | null {
     const open = (item.sources ?? []).filter((s) => s.src && !s.locked);
     const list = open.filter((s) => audio.canPlayType(s.type) !== '');
     if (list.length === 0) return open.at(-1) ?? null;
@@ -151,6 +156,15 @@ function setUp(root: HTMLElement) {
     else audio.load();
     render();
     save(true);
+  }
+
+  /** Play another version of the loaded track from the same second. */
+  function switchTo(next: Source) {
+    const wasPlaying = !audio.paused;
+    source = next;
+    pendingTime = audio.currentTime;
+    audio.src = next.src;
+    if (wasPlaying) audio.play().catch(() => render());
   }
 
   /** The current track cannot be played: say so and go on to the next, unless nothing in the queue plays. */
@@ -315,12 +329,12 @@ function setUp(root: HTMLElement) {
   }
 
   let toastTimer = 0;
-  function toast(text: string) {
+  function toast(text: string, ms = 3500) {
     const box = $<HTMLElement>('.pl-toast');
     box.textContent = text;
     box.classList.add('on');
     clearTimeout(toastTimer);
-    toastTimer = window.setTimeout(() => box.classList.remove('on'), 3500);
+    toastTimer = window.setTimeout(() => box.classList.remove('on'), ms);
   }
 
   // ------------------------------------------------------------ the audio element
@@ -372,6 +386,46 @@ function setUp(root: HTMLElement) {
   audio.addEventListener('playing', () => {
     failures = 0;
   });
+
+  // ------------------------------------------------------------ a slow connection
+  // 无损 needs about 1 Mbit/s for as long as it plays. Far from Cloudflare's nearest data centre or on a busy
+  // evening a connection may not keep up, and playback keeps stopping to wait. Every second while it should
+  // be playing, the time that went by without the sound moving on is counted; once that adds up to STALL_MS
+  // within a minute, the track goes on as 省流 from the same second, and so do the tracks after it during this
+  // visit (the saved preference is not changed).
+  const STALL_MS = 6000;
+  let lost: { at: number; ms: number }[] = [];
+  let last: { wall: number; media: number; src: string } | null = null;
+  function goSlow() {
+    if (slow || picked || !source || source.span || kindOf(source) === 'lossy') return;
+    const item = current();
+    if (!item || loaded !== state.index) return;
+    const next = pick(item, 'lossy');
+    if (!next || kindOf(next) !== 'lossy') return;
+    slow = true;
+    lost = [];
+    last = null;
+    switchTo(next);
+    toast(L.slow, 8000);
+    render();
+  }
+  window.setInterval(() => {
+    if (audio.paused || audio.ended || audio.seeking || seeking || loaded !== state.index || !audio.currentSrc) {
+      last = null;
+      return;
+    }
+    const now = Date.now();
+    const media = audio.currentTime;
+    if (last && last.src === audio.currentSrc) {
+      const wall = now - last.wall;
+      const moved = ((media - last.media) * 1000) / (audio.playbackRate || 1);
+      // A jump (a seek the events did not show) is no measure; otherwise what did not move on was waiting.
+      if (moved >= 0 && moved <= wall * 2 && wall - moved > 250) lost.push({ at: now, ms: wall - moved });
+      lost = lost.filter((l) => now - l.at < 60_000);
+      if (lost.reduce((n, l) => n + l.ms, 0) >= STALL_MS) goSlow();
+    }
+    last = { wall: now, media, src: audio.currentSrc };
+  }, 1000);
 
   // ------------------------------------------------------------ the player's own controls
   $('.pl-toggle').addEventListener('click', toggle);
@@ -453,17 +507,13 @@ function setUp(root: HTMLElement) {
     const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-kind]');
     if (!b || b.disabled) return;
     state.pref = b.dataset.kind as Kind;
+    picked = true;
+    slow = false;
     const item = current();
     // Switch the playing track over at the same second.
     if (item && loaded === state.index) {
       const next = pick(item);
-      if (next && next.src !== source?.src) {
-        const wasPlaying = !audio.paused;
-        source = next;
-        pendingTime = audio.currentTime;
-        audio.src = next.src;
-        if (wasPlaying) audio.play().catch(() => render());
-      }
+      if (next && next.src !== source?.src) switchTo(next);
     }
     closeVersions();
     render();

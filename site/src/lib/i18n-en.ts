@@ -124,6 +124,7 @@ export const EN: Record<string, string> = {
   '随机播放：开': 'Shuffle: on',
   '随机播放：关': 'Shuffle: off',
   '这一首无法播放，已跳到下一首': 'This track could not be played; skipped to the next',
+  '网络跟不上无损播放，已改为省流；可在播放版本中换回': 'Your connection cannot keep up with lossless, so data saver is playing; switch back under Versions',
   '没有可以播放的曲目': 'Nothing to play',
   '上一首': 'Previous',
   '下一首': 'Next',
