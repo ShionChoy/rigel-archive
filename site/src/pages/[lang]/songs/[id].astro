@@ -2,7 +2,7 @@
 // 乐曲页 (设计文档「公开站方案」): one piece of music across the circle's works — every public recording of it,
 // oldest first, each playable and linked to its edition's page. Lyrics and music-game appearances come in S3.
 import Site from '../../../layouts/Site.astro';
-import { db } from '../../../lib/db';
+import { publicDb } from '../../../lib/db';
 import { isSiteLang } from '../../../lib/i18n';
 import { songPage } from '../../../lib/public/catalog';
 import { NO_MEDIA, publicUrls } from '../../../lib/public/media';
@@ -10,7 +10,7 @@ import { formatClock } from '../../../lib/release-view';
 
 if (!isSiteLang(Astro.params.lang)) return new Response(null, { status: 404 });
 const { t, lang } = Astro.locals;
-const page = await songPage(db(), Astro.params.id ?? '', { t, lang, urls: (await publicUrls()) ?? NO_MEDIA });
+const page = await songPage(publicDb(), Astro.params.id ?? '', { t, lang, urls: (await publicUrls()) ?? NO_MEDIA });
 if (!page) return new Response(null, { status: 404 });
 const { song, lines } = page;
 const releases = new Set(lines.map((l) => l.release.id)).size;

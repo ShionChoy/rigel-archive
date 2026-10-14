@@ -5,7 +5,7 @@
 import { env } from 'cloudflare:workers';
 import Site from '../../../layouts/Site.astro';
 import ReleaseView from '../../../components/ReleaseView.astro';
-import { db } from '../../../lib/db';
+import { publicDb } from '../../../lib/db';
 import { isSiteLang } from '../../../lib/i18n';
 import { publicEras } from '../../../lib/public/catalog';
 import { NO_MEDIA, publicUrls } from '../../../lib/public/media';
@@ -14,7 +14,7 @@ import { loadReleaseView } from '../../../lib/release-view';
 
 if (!isSiteLang(Astro.params.lang)) return new Response(null, { status: 404 });
 const { t, lang } = Astro.locals;
-const database = db();
+const database = publicDb();
 const id = Astro.params.id ?? '';
 const published = await database.prepare("SELECT id FROM releases WHERE id = ? AND state = 'published'").bind(id).first<{ id: string }>();
 if (!published) return new Response(null, { status: 404 });

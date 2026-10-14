@@ -39,7 +39,7 @@
 | 资源 | 名称 |
 | --- | --- |
 | Worker | `rigel-archive`（workers.dev，版本预览网址已关闭） |
-| D1 | `rigel-archive`（APAC），迁移在 `site/migrations/` |
+| D1 | `rigel-archive`（主库 APAC，开启读取副本：公开站就近读取），迁移在 `site/migrations/` |
 | R2 | `rigel-archive-media`（APAC）：原件 `blobs/<SHA-256>`，推流版与预览 `derived/…` |
 | 容器 | `rigel-archive-processor`（standard-4：4 vCPU、12 GiB、20 GB 磁盘，最多 1 个实例），由 Durable Object `Processor` 启停 |
 | 定时任务 | 每 10 分钟：有待处理的工作就唤醒容器；每天 19:17 UTC（日本 4:17）：备份（设置好 B2 后才运行，现在跳过） |
@@ -214,14 +214,20 @@ rclone copy vault:blobs ./blobs           # 取回全部原件（文件名就是
 作品页与后台「预览公开页」共用 `components/ReleaseView.astro` 和 `lib/release-view.ts`，播放器 `components/Player.astro`
 （换页不中断、队列、随机、循环、锁屏控制、无损 / 省流，记在 `rigel.player`）。
 
+- **就近读取**：公开页、`/api/*`、媒体地址的检查用 `publicDb()`（`lib/db.ts`，D1 Sessions API），从离访客最近的数据库副本读取；
+  副本可能比后台刚保存的改动晚一点点。写入照常进主库。
+
 - **公开规则**集中在 `site/src/lib/public/rules.ts`：作品要改为「已发布」才出现；版本只列已收录与部分缺档；文件按权属——
   社团自有、已获授权的可看可听，第三方只列条目，**权属未定的不显示**（检查清单「已发布的作品里有权属未定的文件」列出）。
 - **媒体地址**（`lib/public/media.ts`，`pages/media/[...path].ts`）：页面给出的地址都带签名，别的地址一律 404。图片预览与封面是
   长期地址；声音、视频、文字是 2 小时内有效的地址，过期后播放器向 `/api/play` 要新地址接着播。带其他网站 Referer 的请求返回 403。
   签名密钥是 `MEDIA_KEY`：线上 `wrangler secret put MEDIA_KEY`（`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`），
   本地开发没有设置时用固定的开发密钥。线上没有这个密钥时页面照常显示，但没有可播放、可查看的内容。换密钥会让所有旧地址失效。
-- **缓存**（`lib/public/cache.ts`）：页面按「网址 + 目录版本 + 构建」存进 Workers 缓存 10 分钟；后台每次保存让目录版本加一
-  （`meta.public_version`），所以改动立即可见。workers.dev 上 Cache API 不起作用，绑定正式域名后才生效。
+- **缓存**（`lib/public/cache.ts`）：页面按「网址 + 目录版本 + 构建」存进 Workers 缓存；后台每次保存让目录版本加一
+  （`meta.public_version`），所以改动立即可见。10 分钟内算新鲜；之后 1 小时内的访问先拿到缓存里的页面，同时在后台重新生成
+  （远处的访客生成一页要 1 秒以上，这样很少需要等）。浏览器每次都重新确认（`max-age=0`），不用 Cloudflare 默认的 4 小时。
+  图片（长期地址，25 MB 以内）在检查地址之后按存储键存进同一缓存（`pages/media/[...path].ts`）；声音与视频直接从 R2 读。
+  Cache API 按 Cloudflare 数据中心分别缓存，只在正式域名上起作用。
 - **界面文字**：代码里写中文，日文在 `i18n-ja.ts`，英文在 `site/src/lib/i18n-en.ts`（只需公开站用到的文字）；
   `npm run check:i18n` 同时检查公开站文字缺不缺英文。英文可按数字选词：`{n} {n:track|tracks}`。
 - 站名、官网链接、联系方式、是否禁止搜索引擎收录都在 `site/src/lib/site.ts` 一处（站名与域名定下之前全站 noindex）。

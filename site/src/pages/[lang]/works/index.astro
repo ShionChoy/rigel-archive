@@ -4,7 +4,7 @@
 // works without scripts and every view has its own address.
 import Site from '../../../layouts/Site.astro';
 import WorkCard from '../../../components/site/WorkCard.astro';
-import { db } from '../../../lib/db';
+import { publicDb } from '../../../lib/db';
 import { isSiteLang } from '../../../lib/i18n';
 import { publicEras, publicWorks } from '../../../lib/public/catalog';
 import { NO_MEDIA, publicUrls } from '../../../lib/public/media';
@@ -12,7 +12,7 @@ import { pagesFor } from '../../../lib/public/paths';
 
 if (!isSiteLang(Astro.params.lang)) return new Response(null, { status: 404 });
 const { t, lang } = Astro.locals;
-const database = db();
+const database = publicDb();
 const urls = (await publicUrls()) ?? NO_MEDIA;
 const [all, eras] = await Promise.all([publicWorks(database, { t, lang, urls }), publicEras(database, lang)]);
 const pages = pagesFor(lang);

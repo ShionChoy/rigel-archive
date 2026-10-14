@@ -16,6 +16,7 @@
 
 import { createHmac } from 'node:crypto';
 import { env } from 'cloudflare:workers';
+import { publicDb } from '../db';
 import type { MediaUrls, MediaFile } from '../media';
 
 const LIFETIME = 2 * 3600;
@@ -34,9 +35,10 @@ const sign = (text: string, key: string) => createHmac('sha256', key).update(tex
 /** meta.media_epoch, read at most every few seconds per Worker instance. */
 let known: { value: number; at: number } | null = null;
 
+/** The epoch from the nearest copy of the database, or with `fresh` from the primary itself. */
 export async function mediaEpoch(now = Date.now(), fresh = false): Promise<number> {
   if (!fresh && known && now - known.at < 5000) return known.value;
-  const row = await env.DB.prepare("SELECT value FROM meta WHERE key = 'media_epoch'").first<{ value: string }>();
+  const row = await (fresh ? env.DB : publicDb()).prepare("SELECT value FROM meta WHERE key = 'media_epoch'").first<{ value: string }>();
   known = { value: Number(row?.value) || 1, at: now };
   return known.value;
 }

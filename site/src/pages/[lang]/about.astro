@@ -3,7 +3,7 @@
 // under (from the catalogue), the unofficial notice, and how to ask for something to be taken down.
 // The page is prose, so each language has its own text here rather than a sentence-by-sentence table.
 import Site from '../../layouts/Site.astro';
-import { db } from '../../lib/db';
+import { publicDb } from '../../lib/db';
 import { isSiteLang, type SiteLang } from '../../lib/i18n';
 import { publicEras } from '../../lib/public/catalog';
 import { pagesFor } from '../../lib/public/paths';
@@ -11,7 +11,7 @@ import { SITE } from '../../lib/site';
 
 if (!isSiteLang(Astro.params.lang)) return new Response(null, { status: 404 });
 const { t, lang } = Astro.locals;
-const eras = await publicEras(db(), lang);
+const eras = await publicEras(publicDb(), lang);
 const pages = pagesFor(lang);
 
 interface Text { title: string; lead: string; what: [string, string[]]; eras: string; unofficial: [string, string]; buy: [string, string]; takedown: [string, string, string] }

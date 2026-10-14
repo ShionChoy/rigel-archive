@@ -10,7 +10,15 @@ import { checkAddress } from '../../lib/public/media';
  */
 const TYPES: Record<string, string> = { flac: 'audio/flac', m4a: 'audio/mp4', mp4: 'video/mp4', webp: 'image/webp', jpg: 'image/jpeg', json: 'application/json' };
 
-const handler: APIRoute = async ({ request, params, url }) => {
+/**
+ * Pictures (lasting addresses) are kept in the edge cache under their stored key, after the address has been
+ * checked: a visitor far from the storage (Asia-Pacific) gets them from the nearest Cloudflare data centre once
+ * someone there has seen them, and a picture the site has closed is still refused by its address. Sound and
+ * video stream from storage (ranges, large files). The Cache API works on the site's domain, not workers.dev.
+ */
+const EDGE_LIMIT = 25 * 1048576;
+
+const handler: APIRoute = async ({ request, params, url, locals }) => {
   const referer = request.headers.get('referer');
   if (referer) {
     let origin = '';
@@ -29,6 +37,12 @@ const handler: APIRoute = async ({ request, params, url }) => {
       ? new Response('Expired', { status: 410, headers: { 'cache-control': 'no-store' } })
       : new Response('Not found', { status: 404, headers: { 'cache-control': 'no-store' } });
   }
+  const cache = checked.lasting && request.method === 'GET' && !request.headers.has('range') ? (globalThis as { caches?: { default?: Cache } }).caches?.default : undefined;
+  const cacheKey = new Request(`${url.origin}/media/cached/${checked.key}`);
+  if (cache) {
+    const hit = await cache.match(cacheKey);
+    if (hit) return hit;
+  }
   const response = await serveObject(env.MEDIA, checked.key, request);
   if (response.status >= 400) return response;
   const headers = new Headers(response.headers);
@@ -39,7 +53,11 @@ const handler: APIRoute = async ({ request, params, url }) => {
     checked.lasting ? 'public, max-age=31536000, immutable' : `private, max-age=${Math.max(0, (checked.expires ?? 0) - Math.floor(Date.now() / 1000))}`,
   );
   headers.set('cross-origin-resource-policy', 'same-origin');
-  return new Response(response.body, { status: response.status, headers });
+  const out = new Response(response.body, { status: response.status, headers });
+  if (cache && out.status === 200 && Number(headers.get('content-length')) <= EDGE_LIMIT && locals.cfContext) {
+    locals.cfContext.waitUntil(cache.put(cacheKey, out.clone()).catch(() => {}));
+  }
+  return out;
 };
 
 export const GET = handler;

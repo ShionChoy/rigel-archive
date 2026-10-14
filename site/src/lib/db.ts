@@ -3,6 +3,23 @@ import type { FileState, Rights } from './constants';
 
 export const db = (): D1Database => env.DB;
 
+/**
+ * The public site's reads: from the copy of the database nearest the visitor (D1 read replication, turned on
+ * for the database in Cloudflare), so a page rendered in Europe or America does not wait on Asia for every
+ * query. A copy may trail the admin's last change by a moment. Writes (e.g. tags read while a page renders)
+ * still go to the primary; without replication this is simply the database.
+ */
+export function publicDb(): D1Database {
+  const session = env.DB.withSession('first-unconstrained');
+  return {
+    prepare: (query) => session.prepare(query),
+    batch: (statements) => session.batch(statements),
+    exec: (query) => env.DB.exec(query),
+    withSession: (constraint) => env.DB.withSession(constraint),
+    dump: () => env.DB.dump(),
+  };
+}
+
 export interface ReleaseRow {
   id: string;
   catalog_no: string | null;
