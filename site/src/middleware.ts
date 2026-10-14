@@ -1,6 +1,7 @@
 import { defineMiddleware } from 'astro:middleware';
 import { env } from 'cloudflare:workers';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { route } from './lib/hosts';
 import { isLang, langFromHeader, translator, type Lang } from './lib/i18n';
 import { cachedPage } from './lib/public/cache';
 import { langOfPath } from './lib/public/paths';
@@ -22,13 +23,14 @@ let jwks: ReturnType<typeof createRemoteJWKSet> | undefined;
 /**
  * /admin sits behind Cloudflare Access. Access has already logged the user in; we verify its JWT and
  * then require the email to be on the site's own admins list. Without ACCESS_* settings the admin is
- * closed everywhere except `astro dev`.
+ * closed everywhere except `astro dev`. ACCESS_AUD may name several Access applications (comma-separated),
+ * e.g. the admin's host and an older preview host while moving from one to the other.
  */
 async function adminFromAccess(request: Request): Promise<Admin | null> {
   const team = env.ACCESS_TEAM_DOMAIN;
-  const audience = env.ACCESS_AUD;
+  const audience = (env.ACCESS_AUD ?? '').split(',').map((a) => a.trim()).filter(Boolean);
   const token = request.headers.get('cf-access-jwt-assertion');
-  if (!team || !audience || !token) return null;
+  if (!team || !audience.length || !token) return null;
   jwks ??= createRemoteJWKSet(new URL(`https://${team}/cdn-cgi/access/certs`));
   try {
     const { payload } = await jwtVerify(token, jwks, { issuer: `https://${team}`, audience });
@@ -53,10 +55,14 @@ function workerToken(request: Request): boolean {
   return diff === 0;
 }
 
+/** On the site's own hosts browsers are told to keep to HTTPS (not its subdomains: they may be other services later). */
+const HSTS = 'max-age=31536000';
+
 /** Headers of every public page: never framed by other sites, file names not leaked, kept out of search engines until launch. */
-function publicHeaders(given: Response): Response {
+function publicHeaders(given: Response, ours: boolean): Response {
   // A copy: responses from the edge cache and redirects have headers that cannot be changed.
   const response = new Response(given.body, given);
+  if (ours) response.headers.set('strict-transport-security', HSTS);
   response.headers.set('x-frame-options', 'SAMEORIGIN');
   response.headers.set('referrer-policy', 'strict-origin-when-cross-origin');
   response.headers.set('x-content-type-options', 'nosniff');
@@ -69,14 +75,22 @@ export const onRequest = defineMiddleware(async (context, next) => {
   context.locals.lang = langFromHeader(context.request.headers.get('accept-language'));
   context.locals.t = translator(context.locals.lang);
 
+  // Which host: the public site (rigeltheatre.fans), the admin (admin.…), or anywhere else (both; lib/hosts.ts).
+  const where = route(context.url, { public: env.PUBLIC_HOST ?? '', admin: env.ADMIN_HOST ?? '' });
+  if ('redirect' in where) return new Response(null, { status: where.status, headers: { location: where.redirect, 'cache-control': 'public, max-age=3600' } });
+  if ('notFound' in where) {
+    const response = await context.rewrite('/404');
+    return publicHeaders(new Response(response.body, { status: 404, headers: response.headers }), true);
+  }
+
   // The public site: /zh/…, /ja/…, /en/… (lib/public/paths.ts), kept at the edge (lib/public/cache.ts).
   const siteLang = langOfPath(path);
   if (siteLang) {
     context.locals.lang = siteLang;
     context.locals.t = translator(siteLang);
-    return publicHeaders(await cachedPage(context.request, context.url, context.locals.cfContext?.waitUntil.bind(context.locals.cfContext), () => next()));
+    return publicHeaders(await cachedPage(context.request, context.url, context.locals.cfContext?.waitUntil.bind(context.locals.cfContext), () => next()), where.ours);
   }
-  if (path !== '/admin' && !path.startsWith('/admin/')) return publicHeaders(await next());
+  if (path !== '/admin' && !path.startsWith('/admin/')) return publicHeaders(await next(), where.ours);
 
   if (path.startsWith('/admin/api/worker/')) {
     // In production Cloudflare Access also sits in front; the worker passes a service token there.
@@ -103,5 +117,6 @@ export const onRequest = defineMiddleware(async (context, next) => {
   response.headers.set('x-frame-options', 'SAMEORIGIN');
   response.headers.set('referrer-policy', 'same-origin');
   response.headers.set('x-content-type-options', 'nosniff');
+  if (where.ours) response.headers.set('strict-transport-security', HSTS);
   return response;
 });

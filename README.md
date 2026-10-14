@@ -2,8 +2,7 @@
 
 设计文档：https://claude.ai/code/artifact/5ee23162-4144-4a62-9504-ab7e28d2607d
 
-线上预览（Cloudflare Access 保护，只有管理组能进）：https://rigel-archive.shionchoy.workers.dev/admin ；
-公开站（开发中，正式上线前同样只有管理组能进）：https://rigel-archive.shionchoy.workers.dev/zh/
+公开站：https://rigeltheatre.fans/ ；后台（Cloudflare Access 保护，只有管理组能进）：https://admin.rigeltheatre.fans/admin/ 。
 整理工作都在线上进行。上传后的核对与解包、推流版与预览、声学指纹，都由 Cloudflare 容器里的
 处理程序自动完成（每晚的加密备份也由它做，但 B2 尚未开通，见「加密备份」），本机不需要常驻任何程序；
 本机只在导入新的合辑文件时用 `ra push` 把原件传上去。
@@ -38,12 +37,13 @@
 
 | 资源 | 名称 |
 | --- | --- |
-| Worker | `rigel-archive`（workers.dev，版本预览网址已关闭） |
+| 域名 | `rigeltheatre.fans`（Cloudflare Registrar，DNS 在同一账号） |
+| Worker | `rigel-archive`：自定义域名 `rigeltheatre.fans`（公开站）、`admin.rigeltheatre.fans`（后台）、`www.rigeltheatre.fans`（转到公开站）；workers.dev 与版本预览网址都已关闭 |
 | D1 | `rigel-archive`（主库 APAC，开启读取副本：公开站就近读取），迁移在 `site/migrations/` |
 | R2 | `rigel-archive-media`（APAC）：原件 `blobs/<SHA-256>`，推流版与预览 `derived/…` |
 | 容器 | `rigel-archive-processor`（standard-4：4 vCPU、12 GiB、20 GB 磁盘，最多 1 个实例），由 Durable Object `Processor` 启停 |
 | 定时任务 | 每 10 分钟：有待处理的工作就唤醒容器；每天 19:17 UTC（日本 4:17）：备份（设置好 B2 后才运行，现在跳过） |
-| Access | 团队 `rigel-archive.cloudflareaccess.com`；Worker 级保护；服务令牌 `ra-worker` 走 Service Auth 策略 |
+| Access | 团队 `rigel-archive.cloudflareaccess.com`；应用保护整个 `admin.rigeltheatre.fans`（AUD 填在 `wrangler.jsonc` 的 `ACCESS_AUD`，可逗号分隔填多个）；服务令牌 `ra-worker` 走 Service Auth 策略 |
 | 密钥 | `WORKER_TOKEN`（`wrangler secret put`），与 `cloud.env` 里的 `RA_WORKER_TOKEN` 相同；`MEDIA_KEY`：公开站媒体地址的签名密钥（任意长随机串，见「公开站」）；备份用的 5 个见下文「加密备份」 |
 
 ```sh
@@ -119,7 +119,8 @@ cd ../../site && npm run db:reset && npm run dev
 - 检查与测试照常：`npx astro check`、`npm run check:i18n`、`cd tools/ra && uv run pytest`（缺 ffmpeg、metaflac、
   rclone 的测试自动跳过）。
 - 部署要 Cloudflare API 令牌（环境变量 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`）和 Docker（构建处理容器的镜像）。
-  没有 Docker 的环境只改代码、跑测试，部署回本机做。
+  `wrangler.jsonc` 里有自定义域名，令牌除了账号的 Workers、D1、Containers 编辑权限，还要 `rigeltheatre.fans` 这个区域的
+  Zone 读取与 Workers Routes 编辑权限。没有 Docker 的环境只改代码、跑测试，部署回本机做。
 
 ## 处理程序（云端容器）
 
@@ -214,6 +215,9 @@ rclone copy vault:blobs ./blobs           # 取回全部原件（文件名就是
 作品页与后台「预览公开页」共用 `components/ReleaseView.astro` 和 `lib/release-view.ts`，播放器 `components/Player.astro`
 （换页不中断、队列、随机、循环、锁屏控制、无损 / 省流，记在 `rigel.player`）。
 
+- **地址**（`lib/hosts.ts`，`wrangler.jsonc` 的 `PUBLIC_HOST` / `ADMIN_HOST`）：公开站在 `rigeltheatre.fans`，后台在
+  `admin.rigeltheatre.fans`（那里的其他网址转到公开站），公开站域名上的 `/admin` 是 404；`www` 与 `http://` 转到
+  `https://rigeltheatre.fans`。其他主机（本地开发、容器访问的 `site.internal`）两边都提供，和有域名之前一样。
 - **就近读取**：公开页、`/api/*`、媒体地址的检查用 `publicDb()`（`lib/db.ts`，D1 Sessions API），从离访客最近的数据库副本读取；
   副本可能比后台刚保存的改动晚一点点。写入照常进主库。
 
@@ -230,7 +234,8 @@ rclone copy vault:blobs ./blobs           # 取回全部原件（文件名就是
   Cache API 按 Cloudflare 数据中心分别缓存，只在正式域名上起作用。
 - **界面文字**：代码里写中文，日文在 `i18n-ja.ts`，英文在 `site/src/lib/i18n-en.ts`（只需公开站用到的文字）；
   `npm run check:i18n` 同时检查公开站文字缺不缺英文。英文可按数字选词：`{n} {n:track|tracks}`。
-- 站名、官网链接、联系方式、是否禁止搜索引擎收录都在 `site/src/lib/site.ts` 一处（站名与域名定下之前全站 noindex）。
+- 站名、官网链接、联系方式、是否禁止搜索引擎收录都在 `site/src/lib/site.ts` 一处；`robots.txt`（`pages/robots.txt.ts`）
+  跟着它：允许收录时只挡 `/api/` 和声音、视频地址，后台域名一律禁止。
 - 本地查看：在后台把作品改为「已发布」，打开 http://localhost:4321/zh/ 。
 
 ## 界面语言

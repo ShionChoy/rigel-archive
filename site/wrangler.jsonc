@@ -1,13 +1,21 @@
 {
-  // Site name and domain are still undecided; "rigel-archive" is a placeholder.
+  // The Worker's own name (not shown to visitors; the site's name is in src/lib/site.ts).
   "name": "rigel-archive",
   // The Astro site plus the scheduled jobs and the processing container (src/worker.ts).
   "main": "./src/worker.ts",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
-  // Private preview on <name>.<account>.workers.dev behind Cloudflare Access. Version preview URLs are
-  // off: every deployment is reached through the one protected hostname.
-  "workers_dev": true,
+  // The site's own domain (src/lib/hosts.ts): the public site at rigeltheatre.fans, the admin at
+  // admin.rigeltheatre.fans (the whole host behind Cloudflare Access), www sent on to the domain. Custom
+  // domains: `wrangler deploy` makes their DNS records and certificates in the rigeltheatre.fans zone.
+  "routes": [
+    { "pattern": "rigeltheatre.fans", "custom_domain": true },
+    { "pattern": "www.rigeltheatre.fans", "custom_domain": true },
+    { "pattern": "admin.rigeltheatre.fans", "custom_domain": true }
+  ],
+  // The workers.dev address was the private preview before the domain; it is off, as are version preview
+  // URLs: every deployment is reached through the hosts above only.
+  "workers_dev": false,
   "preview_urls": false,
   "observability": { "enabled": true },
   // A whole edition downloads as a zip made on the fly (CRC-32 of every byte, ~6 s of CPU for 2 GB);
@@ -44,10 +52,14 @@
   // src/lib/schedule.ts: look for waiting work every 10 minutes; the backup at 04:17 Japan time.
   "triggers": { "crons": ["*/10 * * * *", "17 19 * * *"] },
   "vars": {
-    // Cloudflare Access (Zero Trust) for /admin: team domain and the application's AUD tag (not secrets).
+    // The hosts above, by role (src/lib/hosts.ts); any other host (astro dev, the container) serves both.
+    "PUBLIC_HOST": "rigeltheatre.fans",
+    "ADMIN_HOST": "admin.rigeltheatre.fans",
+    // Cloudflare Access (Zero Trust) for /admin: team domain and the AUD tag of the Access application that
+    // covers admin.rigeltheatre.fans (not secrets; several may be given, comma-separated).
     // Empty = the admin answers 403 to everyone except in `astro dev`.
     "ACCESS_TEAM_DOMAIN": "rigel-archive.cloudflareaccess.com",
-    "ACCESS_AUD": "677aebdd055244aba44acb38f35cfd3db6d656d84ca6894a9e21959df912f702",
+    "ACCESS_AUD": "1139debb0ccd28a30f93ccba2440739de0c88490d2c70201eb8b7762475d483e",
     // Base URL of `uv run ra serve` for admin previews; set in .dev.vars for local development only.
     "MEDIA_DEV_BASE": "",
     // Days a deleted file's stored content is kept (so the deletion can be undone) before cleanup.
