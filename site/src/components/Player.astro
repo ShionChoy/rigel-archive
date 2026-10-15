@@ -10,7 +10,12 @@
 //   [data-play-random]          plays a random track (/api/random)
 //
 // What it does lives in scripts/player.ts; the texts it needs come with it (data-labels), in the page's language.
+// Its cover opens 正在播放 (#now-playing, scripts/now-playing.ts): the track at full size with its lyrics,
+// whose details come from `info` (the public site's /api/track, or the admin's for 预览公开页).
+interface Props { info?: string }
+const { info = '/api/track' } = Astro.props;
 const { t } = Astro.locals;
+const npLabels = { unsynced: t('歌词未与音乐同步') };
 const labels = {
   play: t('播放'),
   pause: t('暂停'),
@@ -41,7 +46,10 @@ const labels = {
 
 <div id="player" class="player" transition:persist="player" data-labels={JSON.stringify(labels)} hidden>
   <div class="pl-now">
-    <img class="pl-cover" alt="" />
+    <button type="button" class="pl-cover-btn" aria-label={t('展开播放页')} title={t('展开播放页')}>
+      <img class="pl-cover" alt="" />
+      <svg class="pl-expand" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6" /></svg>
+    </button>
     <div class="pl-text">
       <div class="pl-title"></div>
       <div class="pl-sub"></div>
@@ -92,6 +100,41 @@ const labels = {
   <audio preload="none"></audio>
 </div>
 
+<section id="now-playing" class="np" transition:persist="now-playing" aria-label={t('正在播放')} data-info={info} data-labels={JSON.stringify(npLabels)} hidden>
+  <div class="np-bg" aria-hidden="true"><img alt="" /></div>
+  <header class="np-head">
+    <button type="button" class="np-close" aria-label={t('收起')} title={t('收起')}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+    </button>
+    <div class="np-from">
+      <span class="np-kicker">{t('正在播放')}</span>
+      <a class="np-album"></a>
+    </div>
+  </header>
+  <div class="np-tabs" role="tablist">
+    <button type="button" role="tab" data-np-tab="cover" aria-selected="true">{t('封面')}</button>
+    <button type="button" role="tab" data-np-tab="lyrics" aria-selected="false">{t('歌词')}</button>
+  </div>
+  <div class="np-body">
+    <div class="np-main">
+      <div class="np-art">
+        <img class="np-cover" alt="" />
+        <svg class="np-blank" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18.5a2.5 2.5 0 1 1-2.5-2.5H9V6l10-2v11.5a2.5 2.5 0 1 1-2.5-2.5H19" /></svg>
+      </div>
+      <div class="np-meta">
+        <div class="np-title"></div>
+        <div class="np-artist"></div>
+        <div class="np-credits"></div>
+      </div>
+    </div>
+    <div class="np-lyrics" tabindex="-1">
+      <p class="np-note"></p>
+      <div class="np-lines"></div>
+    </div>
+  </div>
+  <canvas class="np-wave" aria-hidden="true"></canvas>
+</section>
+
 <style is:global>
   body:has(#player:not([hidden])) { padding-bottom: 92px; }
   .player {
@@ -105,8 +148,11 @@ const labels = {
   .player[hidden] { display: none; }
   .player a { color: inherit; text-decoration: none; }
   .pl-now { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: center; min-width: 0; }
-  .pl-cover { width: 52px; height: 52px; border-radius: 6px; object-fit: cover; display: block; background: var(--blank); }
+  .pl-cover-btn { position: relative; width: 52px; height: 52px; padding: 0; border: 0; border-radius: 6px; overflow: hidden; background: var(--blank); cursor: pointer; display: block; }
+  .pl-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
   .pl-cover:not([src]) { visibility: hidden; }
+  .pl-expand { position: absolute; inset: 0; margin: auto; width: 26px; height: 26px; padding: 3px; border-radius: 50%; background: rgb(0 0 0 / 0.55); fill: none; stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transition: opacity 0.15s; }
+  .pl-cover-btn:hover .pl-expand, .pl-cover-btn:focus-visible .pl-expand { opacity: 1; }
   .pl-text { min-width: 0; }
   .pl-title { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pl-title a:hover { text-decoration: underline; }
@@ -165,7 +211,7 @@ const labels = {
     body:has(#player:not([hidden])) { padding-bottom: 76px; }
     .player { grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; padding: 10px 10px calc(8px + env(safe-area-inset-bottom)); }
     .pl-now { grid-template-columns: 44px minmax(0, 1fr); }
-    .pl-cover { width: 44px; height: 44px; }
+    .pl-cover-btn { width: 44px; height: 44px; }
     .pl-center { display: contents; }
     .pl-buttons { gap: 2px; }
     .pl-shuffle, .pl-repeat, .pl-volume, .pl-close, .pl-format { display: none !important; }
@@ -173,6 +219,139 @@ const labels = {
     .pl-bar .pl-time { display: none; }
     .pl-side { gap: 2px; }
     .pl-quality { padding: 3px 8px; }
+  }
+
+  /* ------------------------------------------------------------ 正在播放 (scripts/now-playing.ts)
+     Always the night palette, whatever the page's theme: the blurred cover gives it its colour. The player
+     stays at the bottom as its remote, in the same palette. */
+  html.np-open { overflow: hidden; }
+  html.np-open .player {
+    --ink: #f4f5fa; --muted: rgb(255 255 255 / 0.62); --line: rgb(255 255 255 / 0.14); --card: #171c2e; --bg: #0b0e1a;
+    --now: rgb(255 255 255 / 0.1); --accent: #e2c17b; --on-accent: #1b1507; --blank: rgb(255 255 255 / 0.08);
+    --player-bg: rgb(6 8 16 / 0.3); border-top-color: rgb(255 255 255 / 0.08); box-shadow: none;
+  }
+  html.np-open .pl-now { visibility: hidden; }
+  .np {
+    --accent: #e2c17b;
+    position: fixed; inset: 0; z-index: 39; display: flex; flex-direction: column; overflow: hidden; isolation: isolate;
+    color: #f4f5fa; background: #0b0e1a; color-scheme: dark;
+    opacity: 0; transform: translateY(28px); transition: opacity 0.26s ease, transform 0.34s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .np.on { opacity: 1; transform: none; }
+  .np[hidden] { display: none; }
+  .np-bg {
+    position: absolute; inset: 0; z-index: -1; overflow: hidden;
+    background: radial-gradient(900px 640px at 18% 12%, rgb(90 110 200 / 0.38), transparent 70%), radial-gradient(760px 560px at 88% 92%, rgb(226 193 123 / 0.16), transparent 70%), #0b0e1a;
+  }
+  .np-bg img { position: absolute; inset: -12%; width: 124%; height: 124%; object-fit: cover; filter: blur(64px) saturate(1.5) brightness(0.62); transition: opacity 0.6s; }
+  .np-bg img:not([src]) { opacity: 0; }
+  .np-bg::after { content: ''; position: absolute; inset: 0; background: linear-gradient(180deg, rgb(8 10 20 / 0.2), rgb(8 10 20 / 0.5) 55%, rgb(8 10 20 / 0.78)); }
+
+  .np-head { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-items: center; gap: 12px; padding: calc(14px + env(safe-area-inset-top)) 20px 6px; }
+  .np-close { width: 42px; height: 42px; border: 0; border-radius: 50%; background: rgb(255 255 255 / 0.1); color: inherit; display: grid; place-items: center; cursor: pointer; padding: 0; transition: background 0.15s; }
+  .np-close:hover { background: rgb(255 255 255 / 0.18); }
+  .np-close svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .np-from { text-align: center; min-width: 0; line-height: 1.4; }
+  .np-kicker { display: block; font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: rgb(255 255 255 / 0.55); }
+  .np-album { display: block; color: inherit; font-size: 13px; font-weight: 600; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .np-album[href]:hover { color: inherit; text-decoration: underline; }
+  .np-tabs { display: none; }
+
+  .np-body {
+    flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(240px, 440px) minmax(0, 580px); grid-template-rows: minmax(0, 1fr);
+    justify-content: center; align-items: center; gap: clamp(40px, 7vw, 110px);
+    padding: 12px 40px calc(var(--pl-h, 92px) + 28px);
+  }
+  .np-main { display: grid; gap: 26px; min-width: 0; }
+  .np-art {
+    position: relative; width: min(100%, 46vh); aspect-ratio: 1; border-radius: 12px; overflow: hidden; background: rgb(255 255 255 / 0.07);
+    box-shadow: 0 28px 70px rgb(0 0 0 / 0.5), 0 0 0 1px rgb(255 255 255 / 0.06);
+  }
+  .np-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .np-cover:not([src]) { visibility: hidden; }
+  .np-blank { position: absolute; inset: 0; margin: auto; width: 34%; height: 34%; fill: none; stroke: rgb(255 255 255 / 0.35); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; display: none; }
+  .np.no-art .np-blank { display: block; }
+  .np-title { font-size: clamp(22px, 2.4vw, 30px); font-weight: 700; line-height: 1.25; letter-spacing: 0.01em; overflow-wrap: anywhere; }
+  .np-artist { margin-top: 6px; font-size: 15px; color: rgb(255 255 255 / 0.72); overflow-wrap: anywhere; }
+  .np-artist:empty { display: none; }
+  .np-credits { display: grid; gap: 3px; margin-top: 14px; font-size: 13px; color: rgb(255 255 255 / 0.84); }
+  .np-credits:empty { display: none; }
+  .np-credits .k { color: rgb(255 255 255 / 0.5); margin-right: 10px; }
+
+  .np-lyrics {
+    position: relative; height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; outline: none;
+    -webkit-mask-image: linear-gradient(transparent, #000 12%, #000 88%, transparent); mask-image: linear-gradient(transparent, #000 12%, #000 88%, transparent);
+  }
+  .np-lyrics::-webkit-scrollbar { display: none; }
+  .np-lyrics, .np-credits, .np-artist, .np-body { transition: opacity 0.2s; }
+  .np.pending .np-body { opacity: 0; }
+  .np.waiting .np-lyrics, .np.waiting .np-credits, .np.waiting .np-artist { opacity: 0; }
+  .np:not(.has-lyrics) .np-lyrics { display: none; }
+  .np-note { margin: 0; padding-top: 4vh; font-size: 12px; color: rgb(255 255 255 / 0.5); }
+  /* Plain lyrics sit in the middle when they are short, and scroll when they are long. */
+  .np.has-lyrics:not(.synced) .np-lyrics { display: flex; flex-direction: column; }
+  .np.has-lyrics:not(.synced) .np-lyrics > :first-child { margin-top: auto; }
+  .np.has-lyrics:not(.synced) .np-lines { margin-bottom: auto; }
+  .np-note:empty { display: none; }
+  .np-lines { padding: 3vh 0 6vh; }
+  .np-line { margin: 0 0 6px; font-size: 19px; font-weight: 600; line-height: 1.6; color: rgb(255 255 255 / 0.86); overflow-wrap: anywhere; }
+  .np-break { height: 18px; margin: 0; }
+  .np.synced .np-lines { padding: 36vh 0 44vh; }
+  .np.synced .np-line {
+    margin: 0 0 22px; font-size: clamp(22px, 2.1vw, 28px); font-weight: 700; line-height: 1.35; color: rgb(255 255 255 / 0.3);
+    cursor: pointer; transform-origin: left center; transition: color 0.35s, transform 0.35s;
+  }
+  .np.synced .np-line:hover { color: rgb(255 255 255 / 0.55); }
+  .np.synced .np-line.on { color: #fff; transform: scale(1.03); }
+  .np.synced .np-line.gap { height: 8px; cursor: default; }
+  .np-line .tr { display: block; margin-top: 4px; font-size: 0.64em; font-weight: 500; line-height: 1.45; opacity: 0.85; }
+
+  /* The waveform above the player: thin, faint, fading out at both ends. */
+  .np-wave {
+    position: absolute; left: 50%; bottom: calc(var(--pl-h, 92px) + 16px); width: min(calc(100% - 80px), 1180px); height: 52px;
+    transform: translateX(-50%); pointer-events: none; opacity: 0; transition: opacity 0.6s;
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 20%, #000 80%, transparent); mask-image: linear-gradient(90deg, transparent, #000 20%, #000 80%, transparent);
+  }
+  .np.has-wave .np-wave { opacity: 1; }
+  .np.has-wave .np-body, .np.has-wave:not(.has-lyrics) .np-body { padding-bottom: calc(var(--pl-h, 92px) + 84px); }
+
+  /* No lyrics: the cover alone in the middle, the title and credits under it. */
+  .np:not(.has-lyrics) .np-body { grid-template-columns: minmax(0, 560px); }
+  .np:not(.has-lyrics) .np-main { justify-items: center; text-align: center; }
+  .np:not(.has-lyrics) .np-art { width: min(100%, 52vh); }
+  .np:not(.has-lyrics) .np-credits { justify-items: center; }
+
+  @media (max-width: 760px) {
+    .np-head { padding: calc(10px + env(safe-area-inset-top)) 14px 4px; }
+    .np.has-lyrics .np-tabs { display: flex; align-self: center; gap: 2px; padding: 3px; margin: 4px 0 2px; border-radius: 999px; background: rgb(255 255 255 / 0.1); }
+    .np-tabs button { border: 0; background: none; color: rgb(255 255 255 / 0.72); font: inherit; font-size: 13px; padding: 5px 18px; border-radius: 999px; cursor: pointer; }
+    .np-tabs button[aria-selected='true'] { background: rgb(255 255 255 / 0.92); color: #10131f; font-weight: 600; }
+    .np-body, .np:not(.has-lyrics) .np-body { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 8px 24px calc(var(--pl-h, 150px) + 12px); }
+    .np-main, .np:not(.has-lyrics) .np-main { gap: 22px; justify-items: stretch; text-align: left; }
+    .np-art, .np:not(.has-lyrics) .np-art { width: min(100%, 40vh); justify-self: center; }
+    .np:not(.has-lyrics) .np-credits { justify-items: start; }
+    .np-title { font-size: 22px; }
+    .np.has-lyrics.tab-lyrics .np-main, .np.has-lyrics:not(.tab-lyrics) .np-lyrics { display: none; }
+    .np.synced .np-lines { padding: 28vh 0 40vh; }
+    .np.synced .np-line { font-size: 22px; margin-bottom: 18px; }
+    .np-wave { width: calc(100% - 48px); height: 36px; bottom: calc(var(--pl-h, 150px) + 8px); }
+    .np.has-wave .np-body, .np.has-wave:not(.has-lyrics) .np-body { padding-bottom: calc(var(--pl-h, 150px) + 54px); }
+
+    /* The player under it becomes its full remote: progress with times, then the buttons, then versions and queue. */
+    html.np-open .player { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'bar' 'buttons' 'side'; row-gap: 8px; padding: 8px 18px calc(12px + env(safe-area-inset-bottom)); }
+    html.np-open .pl-now { display: none; }
+    html.np-open .pl-bar { position: static; grid-area: bar; grid-template-columns: 2.8em minmax(0, 1fr) 2.8em; }
+    html.np-open .pl-bar .pl-time { display: inline; }
+    html.np-open .pl-buttons { grid-area: buttons; justify-content: space-between; padding: 0 4px; }
+    html.np-open .pl-shuffle, html.np-open .pl-repeat { display: grid !important; }
+    html.np-open .pl-btn { width: 44px; height: 44px; }
+    html.np-open .pl-btn svg { width: 24px; height: 24px; }
+    html.np-open .pl-toggle { width: 62px; height: 62px; }
+    html.np-open .pl-toggle svg { width: 28px; height: 28px; }
+    html.np-open .pl-side { grid-area: side; justify-content: space-between; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .np, .np.synced .np-line { transition: none; }
   }
 </style>
 

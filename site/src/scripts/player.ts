@@ -9,6 +9,8 @@
 // browser for every track). Where the connection cannot keep up with 无损 (playback keeps stopping to wait),
 // the rest of the visit plays 省流, unless the visitor picks a version in the menu.
 
+import { setUpNowPlaying } from './now-playing';
+
 type Kind = 'lossless' | 'original' | 'lossy';
 interface Source { src: string; type: string; label?: string; lossless?: boolean; kind?: Kind; size?: number | null; same?: boolean; locked?: boolean; span?: [number, number] }
 interface Item {
@@ -235,6 +237,7 @@ function setUp(root: HTMLElement) {
     root.hidden = !item;
     if (!item) {
       highlight();
+      nowPlaying.update();
       return;
     }
     const playing = !audio.paused && loaded === state.index;
@@ -280,6 +283,7 @@ function setUp(root: HTMLElement) {
     if (!queueBox.hidden) drawQueue();
     highlight();
     session(item, playing);
+    nowPlaying.update();
   }
 
   function drawQueue() {
@@ -436,6 +440,23 @@ function setUp(root: HTMLElement) {
     }
     last = { wall: now, media, src: audio.currentSrc };
   }, 1000);
+
+  // ------------------------------------------------------------ 正在播放 (scripts/now-playing.ts)
+  const nowPlaying = setUpNowPlaying({
+    current,
+    // A preview clip starts where it was cut from the track.
+    time: () => (loaded === state.index ? audio.currentTime + (source?.span?.[0] ?? 0) : state.time),
+    canSeek: () => !(loaded === state.index ? source : current() && pick(current()!))?.span,
+    seek: (seconds) => {
+      if (loaded !== state.index) return void load(state.index, { play: true, time: seconds });
+      audio.currentTime = seconds;
+      if (audio.paused) audio.play().catch(() => render());
+    },
+  });
+  const coverButton = $<HTMLButtonElement>('.pl-cover-btn');
+  coverButton.addEventListener('click', () => nowPlaying.open());
+  coverButton.addEventListener('pointerenter', () => nowPlaying.prefetch());
+  coverButton.addEventListener('focus', () => nowPlaying.prefetch());
 
   // ------------------------------------------------------------ the player's own controls
   $('.pl-toggle').addEventListener('click', toggle);

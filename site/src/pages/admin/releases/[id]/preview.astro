@@ -69,6 +69,6 @@ const publicHref = release.state === 'published' ? `/${siteLangOf(lang)}/works/$
       {view.unsettled > 0 && chosen && <> · <a class="warn" href={`/admin/editions/${chosen.id}#public`}>{t('这个版本有 {n} 个文件权属未定，公开站不显示 › 设定权属', { n: view.unsettled })}</a></>}
     </div>
     <ReleaseView view={view} url={Astro.url} />
-    <Player />
+    <Player info="/admin/api/track" />
   </body>
 </html>

@@ -14,7 +14,7 @@ import { JA } from '../src/lib/i18n-ja.ts';
 
 const PUBLIC = [
   'pages/[lang]/', 'pages/404.astro', 'pages/api/', 'pages/media/', 'layouts/Site.astro', 'components/site/',
-  'components/ReleaseView.astro', 'components/Player.astro', 'lib/public/', 'lib/release-view.ts', 'scripts/site.ts', 'scripts/player.ts',
+  'components/ReleaseView.astro', 'components/Player.astro', 'lib/public/', 'lib/release-view.ts', 'lib/track-info.ts', 'scripts/site.ts', 'scripts/player.ts',
 ];
 /** Constants of shared labels that public pages show by lookup (t(RELATION_TEXT[relation])). */
 const PUBLIC_LABELS = [['lib/editions.ts', 'RELATION_TEXT']];

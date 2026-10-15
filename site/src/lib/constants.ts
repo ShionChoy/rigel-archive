@@ -79,7 +79,7 @@ const EXT_KINDS: Record<string, string> = {
   video: 'mkv mp4 webm wmv avi mov flv',
   archive: 'zip rar 7z lzh lha gz tar',
   disc_image: 'iso bin img mdf',
-  text: 'txt md log cue nfo ini',
+  text: 'txt md log cue nfo ini lrc',
   playlist: 'm3u m3u8',
   web: 'html htm css js jsp php xml json',
   score: 'pdf mscz musicxml ove',

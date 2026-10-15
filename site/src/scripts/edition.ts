@@ -18,7 +18,7 @@ type Tags = Record<string, string[]>;
 interface Cover { file?: string; picture?: string; mode: 'replace' | 'add' }
 interface EdFile {
   id: string; name: string; ext: string; spec: string; duration: number | null; track_id: string | null; cover: string | null;
-  original: Tags; read: boolean; lossless: boolean; path: string;
+  original: Tags; read: boolean; lossless: boolean; path: string; lyrics: { id: string; name: string } | null;
 }
 interface EdRow { id: string; disc: number; position: number; track_id: string; entry_title: string; duration_ms: number | null; tags: Tags; cover: Cover | null; files: string[] }
 interface EdPicture { key: string; src: string; full: string; label: string; width: number | null; height: number | null; mime: string; size: number; embeddable: boolean; tracks: number; kind: 'file' | 'embedded' }
@@ -663,6 +663,7 @@ export function initEditor(data: EditorData) {
     const fileList = filesOf(row).map((id) => {
       const f = data.files[id];
       return `<li><a href="/admin/files/${esc(id)}">${esc(f.name)}</a> <span class="muted">${esc(f.spec)}${f.read ? '' : ` · ${esc(t('原有标签未读取'))}`}</span>
+        ${f.lyrics ? `<span class="muted">· ${esc(t('歌词'))} <a href="/admin/files/${esc(f.lyrics.id)}">${esc(f.lyrics.name)}</a></span>` : ''}
         <a href="/admin/download/${esc(id)}?tagged=1">${esc(t('带标签'))}</a> <a class="muted" href="/admin/download/${esc(id)}">${esc(t('原件'))}</a>
         <button type="button" class="linkish" data-unlink="${esc(id)}">${esc(t('移出这一行'))}</button></li>`;
     });
@@ -678,6 +679,13 @@ export function initEditor(data: EditorData) {
         </p>
         <ul class="tri-files">${fileList.join('') || `<li class="muted">${esc(t('这一行还没有对应的文件'))}</li>`}</ul>
       </div></td></tr>`;
+  }
+
+  /** 「词」 when the row's track has lyrics for 正在播放: an .lrc beside its main file, else its lyrics tag. */
+  function lyricsChip(row: Row): string {
+    const lrc = mainFile(row)?.lyrics;
+    if (lrc) return ` <span class="chip lyrics" title="${esc(t('歌词：同目录的 {name}', { name: lrc.name }))}">${esc(t('词'))}</span>`;
+    return values(row, 'lyrics').some((v) => v.trim()) ? ` <span class="chip lyrics" title="${esc(t('歌词：标签里的歌词'))}">${esc(t('词'))}</span>` : '';
   }
 
   function renderTracks() {
@@ -704,7 +712,7 @@ export function initEditor(data: EditorData) {
           ${columns.map((c) => cellHtml(r, c)).join('')}
           ${compare ? `<td class="map">${onlineOptions(r)}</td>` : ''}
           <td class="muted">${clock((r.duration ?? 0) / 1000 || f?.duration)}</td>
-          <td class="spec muted">${f ? esc(f.ext.toUpperCase() + ' ' + f.spec.replace(/^FLAC |^MP3 /, '')) : `<span class="missing">${esc(t('无文件'))}</span>`}${files.length > 1 ? ` <span class="chip">+${files.length - 1}</span>` : ''}</td>
+          <td class="spec muted">${f ? esc(f.ext.toUpperCase() + ' ' + f.spec.replace(/^FLAC |^MP3 /, '')) : `<span class="missing">${esc(t('无文件'))}</span>`}${files.length > 1 ? ` <span class="chip">+${files.length - 1}</span>` : ''}${lyricsChip(r)}</td>
           <td><button type="button" class="expand" data-expand="${esc(r.id)}" aria-label="${esc(t('展开'))}">${expanded.has(r.id) ? '▾' : '▸'}</button></td>
         </tr>${expanded.has(r.id) ? panelHtml(r, p, n.discs) : ''}`;
     }).join('');

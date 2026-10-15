@@ -272,7 +272,7 @@ table.grid td.num, table.grid th.num { text-align: right; white-space: nowrap; }
 table.grid tr:hover td { background: var(--row-hover); }
 
 .chip { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; white-space: nowrap; background: var(--idle-soft); color: var(--muted); }
-.chip.collected, .chip.own, .chip.classified, .chip.published { background: var(--ok-soft); color: var(--ok); }
+.chip.collected, .chip.own, .chip.classified, .chip.published, .chip.lyrics { background: var(--ok-soft); color: var(--ok); }
 .chip.partial { background: var(--warn-soft); color: var(--warn); }
 .chip.missing, .chip.third_party { background: var(--bad-soft); color: var(--bad); }
 .chip.planned, .chip.inbox, .chip.licensed { background: var(--plan-soft); color: var(--plan); }

@@ -8,6 +8,7 @@
 import { env } from 'cloudflare:workers';
 import { ChangeSet } from './changes';
 import { EXTRA_AUDIO } from './constants';
+import { lyricsFileFor } from './sidecar';
 import { db, parseFormat, type EditionRow, type ReleaseRow } from './db';
 import { editionAudio, parseIds } from './editions';
 import { embeddedFor, pictureUrl, picturesFor, readNow } from './embedded';
@@ -38,6 +39,8 @@ export interface EdFile {
   read: boolean; // its tags have been read
   lossless: boolean;
   path: string; // folder path below the edition
+  /** The .lrc beside it (its lyrics in 正在播放, lib/sidecar.ts). */
+  lyrics: { id: string; name: string } | null;
 }
 
 export interface EdRow {
@@ -161,11 +164,19 @@ export async function editorData(edition: EditionRow, release: ReleaseRow, place
     const chain = places.chain(`fd:${folderId}`);
     return chain.slice(chain.indexOf(`fd:${home.id}`) + 1).map((k) => places.name(k, t)).join('/');
   };
-  const { results: extra } = await database
-    .prepare(`SELECT id, folder_id, json_extract(format, '$.duration') AS duration FROM files WHERE id IN (SELECT value FROM json_each(?))`)
-    .bind(JSON.stringify(audio.map((f) => f.id)))
-    .all<{ id: string; folder_id: string | null; duration: number | null }>();
+  const [{ results: extra }, { results: lrcs }] = await Promise.all([
+    database
+      .prepare(`SELECT id, folder_id, download_name, json_extract(format, '$.duration') AS duration FROM files WHERE id IN (SELECT value FROM json_each(?))`)
+      .bind(JSON.stringify(audio.map((f) => f.id)))
+      .all<{ id: string; folder_id: string | null; download_name: string | null; duration: number | null }>(),
+    database
+      .prepare(`SELECT id, name, download_name, ext, edition_id, folder_id FROM files
+                WHERE edition_id = ? AND lower(ext) = 'lrc' AND state != 'ignored' AND dup_of IS NULL AND sealed_in IS NULL`)
+      .bind(edition.id)
+      .all<{ id: string; name: string; download_name: string | null; ext: string; edition_id: string; folder_id: string | null }>(),
+  ]);
   const folderOf = new Map(extra.map((r) => [r.id, r.folder_id]));
+  const downloadNameOf = new Map(extra.map((r) => [r.id, r.download_name]));
   const files: Record<string, EdFile> = {};
   for (const f of audio) {
     const fmt = parseFormat(f.format);
@@ -174,7 +185,10 @@ export async function editorData(edition: EditionRow, release: ReleaseRow, place
       id: f.id, name: f.name, ext: f.name.split('.').pop()?.toLowerCase() ?? '', spec: formatSpec({ ...fmt, duration: undefined }), size: 0,
       duration: fmt.duration ?? null, track_id: f.track_id, cover: e?.cover ?? null, original: e?.tags ?? {}, read: !!e, lossless: !!fmt.lossless,
       path: pathOf(folderOf.get(f.id) ?? null),
+      lyrics: null,
     };
+    const lrc = lyricsFileFor({ name: f.name, download_name: downloadNameOf.get(f.id) ?? null, ext: files[f.id].ext, edition_id: edition.id, folder_id: folderOf.get(f.id) ?? null }, lrcs);
+    if (lrc) files[f.id].lyrics = { id: lrc.id, name: lrc.download_name || lrc.name };
   }
   // A row's files: the lossless ones first (FLAC before WAV), its tags are shown from the first.
   const rank = (f: EdFile) => (f.lossless ? 0 : 2) + (f.ext === 'flac' ? 0 : 1);

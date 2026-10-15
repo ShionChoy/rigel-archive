@@ -19,6 +19,7 @@ import { imageSrc, pictureSrc, videoSources, type MediaUrls, type Source } from 
 import { openVersions, playVersions } from './playback';
 import { derivedFor } from './processing';
 import { accessOf, isListed, isOpen, isPublicEdition, PREVIEW_EDGE, type Access } from './public/rules';
+import { isLyricsOf } from './sidecar';
 import { clipsFor } from './clips';
 import { effectiveTags, parseTags, type Tags } from './tagging/model';
 import { parseCover } from './tags';
@@ -112,7 +113,7 @@ export interface ViewLinks {
 }
 
 const clock = (s: number) => (s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(Math.round(s % 60)).padStart(2, '0')}` : formatMs(s * 1000));
-const readable = (f: F) => ['text', 'playlist'].includes(f.kind) || /^(log|cue|txt|md|nfo)$/i.test(f.ext);
+const readable = (f: F) => ['text', 'playlist'].includes(f.kind) || /^(log|cue|txt|md|nfo|lrc)$/i.test(f.ext);
 
 /** How good a file sounds, to play the best of a track's files: lossless first, then bits, rate, bitrate. */
 export function audioQuality(format: string | null): number {
@@ -401,7 +402,8 @@ export async function loadReleaseView(
 
   // Attachments: the edition's files that are not its tracks, by folder (audio playable like the tracks,
   // images as a gallery). The files directly in the edition's folder come first, then each folder below it
-  // by its path (as the organizers made them); a single group needs no heading.
+  // by its path (as the organizers made them); a single group needs no heading. An .lrc named like an audio
+  // file beside it is that track's lyrics (shown in 正在播放, lib/sidecar.ts), not an attachment.
   const home = places.editionFolder(chosen.id);
   const folderPath = (folderId: string | null) => {
     if (!folderId || !home || folderId === home.id) return '';
@@ -409,7 +411,7 @@ export async function loadReleaseView(
     return chain.slice(chain.indexOf(`fd:${home.id}`) + 1).map((k) => places.name(k, t)).join(' / ');
   };
   const leadIds = new Set(lead.map((v) => v.id));
-  const others = mine.filter((f) => !leadIds.has(f.id)
+  const others = mine.filter((f) => !leadIds.has(f.id) && !isLyricsOf(f, audio)
     && (f.kind !== 'audio' || f.role === EXTRA_AUDIO || (rows.length > 0 && !raws.some((l) => l.row.track_id === f.track_id))));
   const groups = [...new Set(others.map((f) => folderPath(f.folder_id)))].sort((a, b) => a.localeCompare(b, 'ja', { numeric: true }));
   const attachments: Attachments[] = groups.map((g) => {
