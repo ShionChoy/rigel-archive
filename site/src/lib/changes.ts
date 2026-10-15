@@ -74,7 +74,7 @@ export const ENTITIES = {
   folder: {
     table: 'folders',
     key: ['id'],
-    fields: ['parent_id', 'type', 'era_id', 'release_id', 'edition_id', 'name', 'description', 'readme_file_id', 'color', 'sort'],
+    fields: ['parent_id', 'type', 'era_id', 'release_id', 'edition_id', 'name', 'description', 'readme_file_id', 'sort'],
   },
   edition_type: {
     table: 'slot_types',
@@ -140,7 +140,7 @@ const ROW_DEFAULTS: Partial<Record<EntityName, Record<string, string>>> = {
  * Columns since dropped (folders.extras in 0011, edition_tracks.title in 0012): older revisions of them are
  * left out of an undo.
  */
-const RETIRED: Partial<Record<EntityName, readonly string[]>> = { folder: ['extras'], edition_track: ['title'] };
+const RETIRED: Partial<Record<EntityName, readonly string[]>> = { folder: ['extras', 'color'], edition_track: ['title'] };
 /** Tables since dropped (release_slots in 0012): their old revisions are skipped when a batch is undone. */
 const RETIRED_TABLES: readonly EntityName[] = ['release_slot'];
 const withoutRetired = (entity: EntityName, row: Row | null): Row | null =>

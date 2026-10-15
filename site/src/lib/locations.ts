@@ -23,12 +23,6 @@ export const FOLDER_TYPE_LABELS: Record<FolderType, string> = {
   edition: N_('版本'),
 };
 
-export const FOLDER_COLORS = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'pink'] as const;
-export type FolderColor = (typeof FOLDER_COLORS)[number];
-export const FOLDER_COLOR_LABELS: Record<FolderColor, string> = {
-  red: N_('红'), orange: N_('橙'), yellow: N_('黄'), green: N_('绿'), aqua: N_('青'), blue: N_('蓝'), purple: N_('紫'), pink: N_('粉'),
-};
-
 export interface EraInfo { id: string; name: string; sort: number }
 export interface ReleaseInfo {
   id: string;
@@ -40,7 +34,7 @@ export interface ReleaseInfo {
   state: string;
 }
 export type EditionInfo = Pick<EditionRow, 'id' | 'release_id' | 'slot' | 'name' | 'catalog_no' | 'release_date' | 'status' | 'sort' | 'is_default'>;
-export type FolderInfo = Pick<FolderRow, 'id' | 'parent_id' | 'type' | 'era_id' | 'release_id' | 'edition_id' | 'name' | 'description' | 'readme_file_id' | 'color' | 'sort'>;
+export type FolderInfo = Pick<FolderRow, 'id' | 'parent_id' | 'type' | 'era_id' | 'release_id' | 'edition_id' | 'name' | 'description' | 'readme_file_id' | 'sort'>;
 
 /** The era, release and edition a folder belongs to (its own entity included). */
 export interface Context {
@@ -104,7 +98,7 @@ export class Places {
       database.prepare('SELECT id, name, sort FROM eras ORDER BY sort'),
       database.prepare('SELECT id, era_id, catalog_no, title, release_date, kind, state FROM releases'),
       database.prepare('SELECT id, release_id, slot, name, catalog_no, release_date, status, sort, is_default FROM editions'),
-      database.prepare('SELECT id, parent_id, type, era_id, release_id, edition_id, name, description, readme_file_id, color, sort FROM folders'),
+      database.prepare('SELECT id, parent_id, type, era_id, release_id, edition_id, name, description, readme_file_id, sort FROM folders'),
       database.prepare('SELECT id, name_zh, name_ja, name_en, sort, missing_board FROM slot_types'),
     ]);
     const p = new Places();
@@ -385,7 +379,6 @@ export interface LocNode {
   n: number; // files in this folder and below
   own: number; // files directly in it
   children: LocNode[];
-  color: string | null;
   status?: string; // editions: collected / missing …
   readme?: boolean;
 }
@@ -407,7 +400,6 @@ export async function folderTree(places: Places, t: T): Promise<LocNode[]> {
       own,
       n: own + children.reduce((s, c) => s + c.n, 0),
       children,
-      color: f.color,
       status: f.edition_id ? places.editions.get(f.edition_id)?.status : undefined,
       readme: !!f.readme_file_id,
     };
@@ -434,7 +426,7 @@ export function nextSort(places: Places, parentId: string | null): number {
 }
 
 export function plainFolder(id: string, parentId: string | null, name: string, sort: number): FolderInfo {
-  return { id, parent_id: parentId, type: 'plain', era_id: null, release_id: null, edition_id: null, name, description: null, readme_file_id: null, color: null, sort };
+  return { id, parent_id: parentId, type: 'plain', era_id: null, release_id: null, edition_id: null, name, description: null, readme_file_id: null, sort };
 }
 
 /**
@@ -468,7 +460,7 @@ export function ensureEntityFolder(cs: ChangeSet, places: Places, key: string, d
   if (found) return found.id;
   const [kind, id] = split(key);
   const make = (parentId: string | null, entity: Pick<FolderInfo, 'era_id' | 'release_id' | 'edition_id'>, type: FolderType): string => {
-    const row: FolderInfo = { id: newId('fd'), parent_id: parentId, type, name: '', description: null, readme_file_id: null, color: null, sort: 0, ...entity };
+    const row: FolderInfo = { id: newId('fd'), parent_id: parentId, type, name: '', description: null, readme_file_id: null, sort: 0, ...entity };
     // Queued rows are inserted before everything else in the batch; `direct` keeps the order of the calls,
     // for an entity made with cs.create just before.
     if (direct) cs.create('folder', { ...row });

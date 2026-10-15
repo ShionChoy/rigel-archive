@@ -434,7 +434,7 @@ export async function applyInboxAction(actor: string, ids: string[], a: InboxAct
     }
     case 'reset': {
       const rows = await visible('id, sealed_in');
-      cs = new ChangeSet(database, actor, summary('整理台：{n} 个文件退回待整理', { n: rows.length }));
+      cs = new ChangeSet(database, actor, summary('整理台：{n} 个文件退回未归档', { n: rows.length }));
       cs.updateFiles(rows.map((r) => r.id), { ...NO_PLACE, state: 'inbox', role: null, rights: 'unknown', dup_of: null });
       break;
     }

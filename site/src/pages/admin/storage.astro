@@ -8,7 +8,7 @@ import { formatBytes, formatTime, withParams } from '../../lib/format';
 import { N_, errorText, translateHtml, UserError } from '../../lib/i18n';
 import { MAX_ATTEMPTS, pendingCounts } from '../../lib/processing';
 import { wakeProcessor } from '../../lib/schedule';
-import { graceDays, purge, storageReport, wantedTotals } from '../../lib/storage';
+import { WANTED, graceDays, purge, storageReport, wantedTotals } from '../../lib/storage';
 import { canManage } from '../../lib/team';
 import { backupSettings, processor, type ProcessorStatus } from '../../processor';
 
@@ -74,7 +74,8 @@ if (Astro.request.method === 'POST') {
 const scan = Astro.url.searchParams.has('scan');
 type Failed = { sha256: string; task: string; attempts: number; error: string | null; updated_at: string; id: string | null; name: string | null };
 type Run = { id: number; started_at: string; finished_at: string | null; ok: number | null; report: string | null };
-const [report, gone, wanted, stored, derived, pending, taskCounts, failed, runs, status, badUploads, unread, readStats] = await Promise.all([
+type Listed = { id: string; dir: string; name: string; error?: string | null };
+const [report, gone, wanted, stored, derived, pending, taskCounts, failed, runs, status, badUploads, unread, readStats, missing, unreadable] = await Promise.all([
   scan ? storageReport(database, env.MEDIA, grace) : null,
   database.prepare(`SELECT count(*) AS n FROM files WHERE ${originalGone('files')}`).first<{ n: number }>(),
   wantedTotals(database),
@@ -105,10 +106,19 @@ const [report, gone, wanted, stored, derived, pending, taskCounts, failed, runs,
   unreadCount(database),
   database
     .prepare(
-      `SELECT count(*) AS n, sum(error IS NOT NULL) AS failed, sum(cover IS NOT NULL) AS covers,
+      `SELECT count(*) AS n, sum(error IS NOT NULL AND EXISTS (SELECT 1 FROM files f WHERE f.sha256 = embedded.sha256 AND f.sealed_in IS NULL)) AS failed,
+              sum(cover IS NOT NULL) AS covers,
               (SELECT count(*) FROM pictures) AS pictures, (SELECT coalesce(sum(size), 0) FROM pictures) AS bytes FROM embedded`,
     )
     .first<{ n: number; failed: number | null; covers: number | null; pictures: number; bytes: number }>(),
+  // The files behind the two counts above, so the page says which ones.
+  database.prepare(`SELECT id, dir, name FROM files WHERE ${WANTED} ORDER BY dir, name LIMIT 20`).all<Listed>(),
+  database
+    .prepare(
+      `SELECT min(f.id) AS id, min(f.dir) AS dir, min(f.name) AS name, e.error FROM embedded e JOIN files f ON f.sha256 = e.sha256
+       WHERE e.error IS NOT NULL AND f.sealed_in IS NULL GROUP BY e.sha256 ORDER BY min(f.dir), min(f.name) LIMIT 20`,
+    )
+    .all<Listed>(),
 ]);
 const purgeable = report?.unreferenced.filter((o) => o.purgeable) ?? [];
 const TASK_NAMES: Record<string, string> = { check: N_('核对上传'), derive: N_('推流版与预览'), fingerprint: N_('声学指纹'), clip: N_('试听片段') };
@@ -116,7 +126,7 @@ const count = (task: string, state: string) => taskCounts.results.find((r) => r.
 const running = status.state === 'running' || status.state === 'healthy';
 const STATE_NAMES: Record<string, string> = {
   running: N_('启动中'), healthy: N_('运行中'), stopping: N_('正在停止'), stopped: N_('已停止（没有工作时自动停下）'),
-  stopped_with_code: N_('已停止（程序退出）'), unavailable: N_('无法连接（本地开发时没有容器）'),
+  stopped_with_code: N_('已停止（程序退出）'), unavailable: N_('暂时无法连接'),
 };
 const parse = (raw: string | null) => {
   try {
@@ -129,42 +139,58 @@ const lastOk = runs.results.find((r) => r.ok === 1);
 ---
 
 <Admin title={t('存储与处理')}>
-  <p class="muted" set:html={translateHtml(lang, '网站的文件按内容存放（<code>blobs/&lt;SHA-256&gt;</code>），相同内容只存一份，文件名和归类都在数据库里。删除文件只删记录；存储里的内容在没有任何文件引用 {days} 天后，才可以在这里清理，在此之前删除都能撤销。', { days: grace })} />
+  <p class="muted">{t('这一页是网站存储和后台处理的状态，平时不需要操作：上传后的处理会自动进行，出了问题会列在这里。')}</p>
+  <p class="muted">{t('相同内容只存一份。删除文件只删记录，内容再保留 {days} 天，期间可以在整理台的「回收站」或修改记录里恢复；过期后站长或管理员可以在本页最下面清理，释放空间。', { days: grace })}</p>
 
   <h2>{t('云端存储')}</h2>
   <div class="panel">
-    <p>{t('原件：{n} 份内容，{size}。', { n: stored?.n ?? 0, size: formatBytes(stored?.bytes) })} {t('推流版与预览：{n} 个文件，{size}（可随时从原件重新生成，不备份）。', { n: derived?.n ?? 0, size: formatBytes(derived?.bytes) })}</p>
+    <p>{t('原件：{n} 份内容，{size}。', { n: stored?.n ?? 0, size: formatBytes(stored?.bytes) })} {t('推流版与预览：{n} 个文件，{size}（由原件自动生成）。', { n: derived?.n ?? 0, size: formatBytes(derived?.bytes) })}</p>
     {
       wanted.n > 0 ? (
-        <p set:html={translateHtml(lang, '还有 <b>{n}</b> 份内容（{size}）没有上传：本机在 <code>tools/ra</code> 运行 <code>uv run ra push</code>，中断后重跑会接着传。上传前这些文件在后台不能预览。', { n: wanted.n, size: formatBytes(wanted.bytes) })} />
+        <>
+          <p>{t('有 {n} 份内容（{size}）还没有存进网站：下面的文件只有记录，暂时不能预览或下载。它们来自合辑导入，需要站长从合辑的原始资料补传。', { n: wanted.n, size: formatBytes(wanted.bytes) })}</p>
+          <ul class="small">
+            {missing.results.map((f) => <li><a href={`/admin/files/${f.id}`} class="mono">{f.dir ? `${f.dir}/` : ''}{f.name}</a></li>)}
+          </ul>
+        </>
       ) : (
-        <p class="muted">{t('需要的内容都已上传。')}</p>
+        <p class="muted">{t('所有文件的内容都已存好。')}</p>
       )
     }
-    <p class="muted">{t('存储是私有的，只有管理组能读；第三方文件也存入，公开站上是否展示按权属决定。')}</p>
+    <p class="muted">{t('存储是私有的，只有管理组能读取；公开站展示什么，由各文件的权属和版本页「公开站」里的设置决定。')}</p>
   </div>
 
   <h2>{t('文件原值（内嵌的标签与图片）')}</h2>
   <div class="panel">
+    <p>{t('网站会读取每个音频自带的标签和封面图（只读文件的开头和结尾），用在版本页的「文件原值」和曲目封面上；相同的图片只存一份。')}</p>
     <p>
-      {t('网站直接从存储里读取每个音频自带的标签和图片（只读文件开头和结尾，不下载整个文件），用于版本页的「文件原值」和曲目封面；相同的图片只存一份。')}
-    </p>
-    <p>
-      {t('已读取 {n} 个音频（{covers} 个带封面，{failed} 个读取失败），存了 {pictures} 张图片（{size}）。', {
-        n: readStats?.n ?? 0, covers: readStats?.covers ?? 0, failed: readStats?.failed ?? 0, pictures: readStats?.pictures ?? 0, size: formatBytes(readStats?.bytes),
+      {t('已读取 {n} 个音频（{covers} 个带封面），存了 {pictures} 张图片（{size}）。', {
+        n: readStats?.n ?? 0, covers: readStats?.covers ?? 0, pictures: readStats?.pictures ?? 0, size: formatBytes(readStats?.bytes),
       })}
-      {unread > 0 ? t('还有 {n} 个没读取：每 10 分钟自动读取几百个，也可以现在读取一批。', { n: unread }) : t('全部已读取。')}
+      {unread > 0 ? t('还有 {n} 个没读取：每 10 分钟自动读取一批，也可以现在读取一批。', { n: unread }) : t('全部已读取。')}
     </p>
+    {
+      readStats?.failed ? (
+        <>
+          <p>{t('{n} 个读取失败：文件可能损坏，或者格式比较特殊。不影响播放和下载，只是版本页看不到它自带的标签和封面。可以点「重试读取失败的」再试一次。', { n: readStats.failed })}</p>
+          <ul class="small">
+            {unreadable.results.map((f) => <li><a href={`/admin/files/${f.id}`} class="mono">{f.dir ? `${f.dir}/` : ''}{f.name}</a> <span class="muted">{(f.error ?? '').slice(0, 120)}</span></li>)}
+          </ul>
+        </>
+      ) : null
+    }
     <form method="post" class="inline-form">
       <button type="submit" name="action" value="read_tags" disabled={unread === 0}>{t('现在读取一批')}</button>
-      <button type="submit" name="action" value="reread_tags" disabled={!readStats?.failed}>{t('重试读取失败的')}</button>
+      {readStats?.failed ? <button type="submit" name="action" value="reread_tags">{t('重试读取失败的')}</button> : null}
     </form>
   </div>
 
   <h2>{t('处理程序')}</h2>
   <div class="panel">
     <p class="muted">
-      {t('处理程序在 Cloudflare 的容器里运行：核对上传、解开压缩包、生成推流版与预览、计算声学指纹、每晚备份。有工作时自动启动（上传后立即，其余每 10 分钟检查一次），做完自动停下，不需要本机运行任何程序。')}
+      {backupReady
+        ? t('处理程序在云端运行：核对上传的内容、读取规格和压缩包里的文件清单、生成推流版与预览、计算声学指纹、切出试听片段，并在每晚备份。有工作时自动启动（上传后立即开始，其余每 10 分钟检查一次），做完自动停下。')
+        : t('处理程序在云端运行：核对上传的内容、读取规格和压缩包里的文件清单、生成推流版与预览、计算声学指纹、切出试听片段。有工作时自动启动（上传后立即开始，其余每 10 分钟检查一次），做完自动停下。')}
     </p>
     <p>
       <b>{t('状态')}</b>：{t(STATE_NAMES[status.state] ?? status.state)}
@@ -189,18 +215,18 @@ const lastOk = runs.results.find((r) => r.ok === 1);
     <form method="post" class="inline">
       <button name="action" value="wake">{t('立即处理队列')}</button>
       {running && canManage(Astro.locals.admin) && (
-        <button name="action" value="restart" title={t('部署新版本后，用新版本立即重新开始')}>{t('重启处理程序')}</button>
+        <button name="action" value="restart" title={t('处理程序卡住不动时，让它立即重新开始')}>{t('重启处理程序')}</button>
       )}
       {failed.results.length > 0 && <button name="action" value="retry">{t('重试全部失败的任务')}</button>}
     </form>
     {
       failed.results.length > 0 && (
         <>
-          <p><b>{t('失败的任务（{n}）', { n: failed.results.length })}</b> <span class="muted">{t('失败后隔一小时自动重试，共 {n} 次。', { n: MAX_ATTEMPTS })}</span></p>
+          <p><b>{t('失败的任务（{n}）', { n: failed.results.length })}</b> <span class="muted">{t('失败后隔一小时自动重试，最多 {n} 次。试满 {n} 次还失败的，多半是文件本身损坏或太短，不影响其他文件。', { n: MAX_ATTEMPTS })}</span></p>
           <ul>
             {failed.results.map((f) => (
               <li>
-                {f.id ? <a href={`/admin/files/${f.id}`} class="mono">{f.name}</a> : <span class="mono">{f.sha256.slice(0, 16)}…</span>}
+                {f.id ? <a href={`/admin/files/${f.id}`} class="mono">{f.name}</a> : <span title={f.sha256}>{t('音频里内嵌的图片')}</span>}
                 {' '}<span class="chip">{t(TASK_NAMES[f.task] ?? f.task)}</span>
                 {' '}<span class="chip missing" title={f.error ?? ''}>{(f.error ?? '').slice(0, 100)}</span>
                 <span class="muted"> {t('第 {n} 次', { n: f.attempts })} · {formatTime(f.updated_at)}</span>
@@ -228,16 +254,16 @@ const lastOk = runs.results.find((r) => r.ok === 1);
     )
   }
 
-  <h2>{t('加密备份')}</h2>
+  <h2>{t('异地备份')}</h2>
   <div class="panel">
-    <p class="muted">
-      {t('每晚 4:17（日本时间）把全部原件与数据库导出加密后备份到 Backblaze B2。加密在上传前完成，B2 上只有密文；原件只增不删，已清理的内容在备份里仍然保留。每次备份结束时从 B2 随机读回几个原件核对 SHA-256。')}
-    </p>
     {
       !backupReady ? (
-        <p set:html={translateHtml(lang, '<b>还没有设置。</b>在 <code>tools/ra/backup.env</code> 填好 B2 的密钥后，在 <code>site</code> 运行 <code>npm run secrets:backup</code>（见 README「加密备份」）。')} />
+        <p class="muted">{t('异地备份（Backblaze B2）还没有启用。目前数据库可以恢复到最近 30 天内的任意时间点（Cloudflare 自带）；存储里的文件没有另外的副本：合辑的原件另存在 NAS 上，后台上传的文件只有网站里这一份。')}</p>
       ) : (
         <>
+          <p class="muted">
+            {t('每晚 4:17（日本时间）把全部原件与数据库导出加密后备份到 Backblaze B2。加密在上传前完成，B2 上只有密文；原件只增不删，已清理的内容在备份里仍然保留。每次备份结束时从 B2 随机读回几个原件核对 SHA-256。')}
+          </p>
           <p>
             {lastOk
               ? t('最近一次成功：{at}', { at: formatTime(lastOk.finished_at ?? lastOk.started_at) })
@@ -286,12 +312,12 @@ const lastOk = runs.results.find((r) => r.ok === 1);
       report ? (
         <p>{t('存储里共 {n} 个原件，{size}。其中 {loose} 个已没有文件引用。', { n: report.objects, size: formatBytes(report.bytes), loose: report.unreferenced.length })}</p>
       ) : (
-        <p><a class="button" href={withParams(Astro.url, { scan: '1' })}>{t('检查没有文件引用的内容')}</a> <span class="muted">{t('要逐个列出存储里的对象，需要几秒钟。')}</span></p>
+        <p><a class="button" href={withParams(Astro.url, { scan: '1' })}>{t('检查没有文件引用的内容')}</a> <span class="muted">{t('需要逐个列出存储里的内容，要几秒钟。')}</span></p>
       )
     }
     {
       gone && gone.n > 0 && (
-        <p set:html={translateHtml(lang, '另有 <a href="/admin/inbox?view=p:gone">{n} 个合辑文件原件已不存在</a>（最近一次导入时 source 里没有找到），可以在整理台删除。', { n: gone.n })} />
+        <p set:html={translateHtml(lang, '另有 <a href="/admin/inbox?view=p:gone">{n} 个合辑文件</a>在最近一次核对合辑时已经找不到原件，这些记录可以在整理台删除。', { n: gone.n })} />
       )
     }
   </div>

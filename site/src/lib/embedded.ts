@@ -55,6 +55,21 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * Storage could not be read or written for a moment (Cloudflare answered with an error): the content is left
+ * unread and read again later, instead of being recorded as a file that cannot be read. (On 2026-09-28 one
+ * such hiccup marked 26 good files as unreadable for good.)
+ */
+class StorageHiccup extends Error {}
+
+async function fromStorage<V>(work: () => Promise<V>): Promise<V> {
+  try {
+    return await work();
+  } catch (e) {
+    throw new StorageHiccup(e instanceof Error ? e.message : String(e));
+  }
+}
+
 /** Store the pictures (those not stored yet) and return their references. */
 async function storePictures(database: D1Database, media: R2Bucket, e: Embedded): Promise<PictureRef[]> {
   const refs: PictureRef[] = [];
@@ -69,7 +84,7 @@ async function storePictures(database: D1Database, media: R2Bucket, e: Embedded)
     const known = await database.prepare('SELECT 1 FROM pictures WHERE sha256 = ?').bind(sha).first();
     if (known) continue;
     const key = `pictures/${sha}`;
-    if (!(await media.head(key))) await media.put(key, p.image, { httpMetadata: { contentType: ref.mime } });
+    if (!(await fromStorage(() => media.head(key)))) await fromStorage(() => media.put(key, p.image, { httpMetadata: { contentType: ref.mime } }));
     await database
       .prepare('INSERT OR IGNORE INTO pictures (sha256, key, mime, width, height, size) VALUES (?, ?, ?, ?, ?, ?)')
       .bind(sha, key, ref.mime, ref.width, ref.height, ref.size)
@@ -78,16 +93,19 @@ async function storePictures(database: D1Database, media: R2Bucket, e: Embedded)
   return refs;
 }
 
-/** Read one content and keep what it carries (errors are kept too, so a broken file is not retried). */
-export async function readContent(database: D1Database, media: R2Bucket, c: Content): Promise<void> {
+/**
+ * Read one content and keep what it carries (errors are kept too, so a broken file is not retried). Returns
+ * false when storage failed for a moment: nothing is recorded and the content is read again later.
+ */
+export async function readContent(database: D1Database, media: R2Bucket, c: Content): Promise<boolean> {
   let row: { format: string | null; tags: string; native: string; pictures: string; cover: string | null; error: string | null };
   try {
     const read = async (offset: number, length: number): Promise<Uint8Array> => {
       const len = Math.max(0, Math.min(length, c.size - offset));
       if (len === 0 || offset < 0) return new Uint8Array(0);
-      const object = await media.get(c.key, { range: { offset, length: len } });
+      const object = await fromStorage(() => media.get(c.key, { range: { offset, length: len } }));
       if (!object) throw new Error('存储里没有这个文件');
-      return new Uint8Array(await object.arrayBuffer());
+      return new Uint8Array(await fromStorage(() => object.arrayBuffer()));
     };
     const e = READABLE.has(c.ext.toLowerCase()) ? await readEmbedded(read, c.size, c.ext) : { format: 'none', native: [], tags: {}, pictures: [] };
     const pictures = await storePictures(database, media, e);
@@ -98,6 +116,7 @@ export async function readContent(database: D1Database, media: R2Bucket, c: Cont
       cover: frontCover(pictures)?.sha256 ?? null, error: null,
     };
   } catch (err) {
+    if (err instanceof StorageHiccup) return false;
     row = { format: null, tags: '{}', native: '[]', pictures: '[]', cover: null, error: clip(err instanceof Error ? err.message : String(err), 500) };
   }
   await database
@@ -109,6 +128,7 @@ export async function readContent(database: D1Database, media: R2Bucket, c: Cont
     )
     .bind(c.sha256, READER_VERSION, row.format, row.tags, row.native, row.pictures, row.cover, row.error)
     .run();
+  return true;
 }
 
 async function contents(database: D1Database, where: string, binds: unknown[], limit: number): Promise<Content[]> {
@@ -126,15 +146,18 @@ async function contents(database: D1Database, where: string, binds: unknown[], l
 /** Reading is waiting on storage and the database: several contents at a time. */
 const PARALLEL = 8;
 
-/** Read these contents, several at a time, starting no new one after `until`. Returns how many were read. */
-async function readAll(database: D1Database, media: R2Bucket, list: Content[], until: number): Promise<number> {
+/**
+ * Read these contents, several at a time, starting no new one after `until`. Returns how many were read;
+ * those storage failed on go into `later`.
+ */
+async function readAll(database: D1Database, media: R2Bucket, list: Content[], until: number, later = new Set<string>()): Promise<number> {
   let next = 0;
   let read = 0;
   const worker = async () => {
     while (next < list.length && Date.now() < until) {
       const c = list[next++];
-      await readContent(database, media, c);
-      read += 1;
+      if (await readContent(database, media, c)) read += 1;
+      else later.add(c.sha256);
     }
   };
   await Promise.all(Array.from({ length: Math.min(PARALLEL, list.length) }, worker));
@@ -148,10 +171,13 @@ async function readAll(database: D1Database, media: R2Bucket, list: Content[], u
 export async function readPending(database: D1Database, media: R2Bucket, budgetMs: number, limit = 2000): Promise<{ read: number; left: number }> {
   const until = Date.now() + budgetMs;
   let read = 0;
+  const later = new Set<string>();
   while (Date.now() < until && read < limit) {
-    const batch = await contents(database, '1', [], Math.min(100, limit - read));
+    const batch = await contents(database, 'f.sha256 NOT IN (SELECT value FROM json_each(?))', [JSON.stringify([...later])], Math.min(100, limit - read));
     if (batch.length === 0) break;
-    read += await readAll(database, media, batch, until);
+    const n = await readAll(database, media, batch, until, later);
+    read += n;
+    if (n === 0 && batch.every((c) => later.has(c.sha256))) break; // storage is not answering: next time
   }
   return { read, left: await unreadCount(database) };
 }

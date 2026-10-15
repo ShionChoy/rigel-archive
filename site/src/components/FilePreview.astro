@@ -1,6 +1,5 @@
 ---
 import type { FileRow } from '../lib/db';
-import { translateHtml } from '../lib/i18n';
 import { audioSources, imageSrc, mediaSrc, videoSources, waveSrc, type Derived } from '../lib/media';
 import { mimeFor } from '../lib/constants';
 
@@ -13,7 +12,7 @@ interface Props {
 }
 
 const { file, base, derived } = Astro.props;
-const { t, lang } = Astro.locals;
+const { t } = Astro.locals;
 const src = mediaSrc(file, base);
 const TEXT_EXTS = new Set(['txt', 'md', 'log', 'cue', 'nfo', 'ini', 'm3u', 'm3u8', 'html', 'htm', 'css', 'js', 'bms', 'bme', 'bml', 'pms', 'json', 'xml']);
 const isText = TEXT_EXTS.has(file.ext);
@@ -32,7 +31,7 @@ const picture = file.kind === 'image' ? imageSrc(src, derived, 1600) : null;
       ) : !file.sha256 ? (
         t('这个文件没能解出（加密或损坏），没有可预览的内容。')
       ) : (
-        <Fragment set:html={translateHtml(lang, '原件还没有上传到云端存储：在本机 <code>tools/ra</code> 运行 <code>uv run ra push</code>。')} />
+        t('这个文件的内容还没有存进网站（只有记录），暂时不能预览。')
       )}
     </p>
   ) : (

@@ -22,15 +22,9 @@ const keys: [string, string][] = [
   ['F2', N_('重命名（选中多个文件时批量改名）')],
   ['E', N_('编辑音频的标签与封面')],
   ['M · Ctrl+Shift+J', N_('移动到…')],
-  ['Shift+D', N_('放到上次的位置')],
-  ['1 – 5', N_('放到最近用过的位置')],
   ['Ctrl+X · Ctrl+V', N_('剪切 · 粘贴到当前文件夹')],
-  ['A', N_('按建议归档')],
-  ['I', N_('忽略')],
-  ['T', N_('设为第三方')],
-  ['D', N_('标为重复')],
   ['Delete', N_('删除文件夹 / 删除或忽略文件')],
-  ['Ctrl+Z · U', N_('撤销上一步')],
+  ['Ctrl+Z', N_('撤销上一步')],
   ['Ctrl+J', N_('跳转到文件夹')],
   ['Ctrl+K', N_('跳转到作品、版本、乐曲或文件（每个页面都可以用）')],
   ['Ctrl+[ · Ctrl+]', N_('文件夹上移 / 下移')],
@@ -155,7 +149,7 @@ const keys: [string, string][] = [
       <span class="full muted small">{t('{name} 是现在的文件名（不含扩展名），{n} 是按列表顺序的编号。')}</span>
     </div>
     <div data-fields="restore" hidden><p class="muted small">{t('改回导入或上传时的文件名。')}</p></div>
-    <p class="muted small">{t('扩展名不变。原文件名一直保留（按来源浏览、下次导入都按原名）；这里改的是整理台显示和下载用的名字。')}</p>
+    <p class="muted small">{t('扩展名不变。这里改的是整理台显示和下载用的名字；原文件名一直保留，在文件页能看到，也可以随时「恢复原文件名」。')}</p>
     <p class="small" data-count></p>
     <div class="rename-preview" data-preview></div>
     <p class="err-line" data-err></p>
@@ -171,7 +165,7 @@ const keys: [string, string][] = [
     <table class="keys">
       {keys.map(([k, what]) => <tr><td><kbd>{t(k)}</kbd></td><td>{t(what)}</td></tr>)}
     </table>
-    <p class="muted small">{t('右键菜单里每一项旁边也标着快捷键。拖动文件或文件夹到左侧的文件夹上就是移动；拖到两个文件夹之间是调整顺序。')}</p>
+    <p class="muted small">{t('右键菜单里每一项旁边也标着快捷键。按建议归档、忽略、设权属、标为重复和放到最近的位置在右键菜单里（单个字母键不会改动文件，免得误按）。拖动文件或文件夹到左侧的文件夹上就是移动；拖到两个文件夹之间是调整顺序。')}</p>
     <div class="dlg-buttons">
       <button value="guide" data-guide>{t('重看上手引导')}</button>
       <button value="ok" class="primary">{t('知道了')}</button>
@@ -196,7 +190,7 @@ const keys: [string, string][] = [
     </div>
     <div data-step="3" hidden>
       <h3>{t('3 / 4 · 右栏：看详情、改属性')}</h3>
-      <p>{t('选中一个文件时显示预览、位置、建议和权利；选中多个时可以一起改；什么都没选时显示当前文件夹。')}</p>
+      <p>{t('选中一个文件时显示预览、位置、建议和权属；选中多个时可以一起改；什么都没选时显示当前文件夹。')}</p>
     </div>
     <div data-step="4" hidden>
       <h3>{t('4 / 4 · 右键和撤销')}</h3>

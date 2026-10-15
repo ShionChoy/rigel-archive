@@ -1,15 +1,14 @@
-// Folder operations of the 整理台 (新建、重命名、移动、合并、排序、删除、设类型、颜色) and the personal
+// Folder operations of the 整理台 (新建、重命名、移动、合并、排序、删除、设类型) and the personal
 // 快速访问 list. Every change goes through one ChangeSet, so each operation is one entry in the history
 // and can be undone as a whole. The tree itself is described in locations.ts.
 
 import { ChangeSet } from './changes';
-import { isOneOf } from './constants';
 import { db } from './db';
 import { chosenForm, kindOf, loadForms } from './forms';
 import { summary, UserError, type Params, type T } from './i18n';
 import { newId } from './ids';
 import {
-  FOLDER_COLORS, NO_PLACE, Places, TOP, UNPLACED, checkFolderName, ensureFolder, folderKey, markEditionsCollected,
+  NO_PLACE, Places, TOP, UNPLACED, checkFolderName, ensureFolder, folderKey, markEditionsCollected,
   nextSort, type Context, type FolderInfo, type FolderType,
 } from './locations';
 import { NEW_TYPE, addType } from './types';
@@ -260,9 +259,9 @@ export async function renameFolder(actor: string, id: string, rawName: string, t
   return done(cs, { id });
 }
 
-/** 说明、说明文件、颜色. */
+/** 说明、说明文件. */
 export async function updateFolderInfo(
-  actor: string, id: string, patch: { description?: string | null; readme_file_id?: string | null; color?: string | null }, t: T,
+  actor: string, id: string, patch: { description?: string | null; readme_file_id?: string | null }, t: T,
 ): Promise<FolderResult> {
   const places = await Places.load();
   const f = mustFolder(places, id);
@@ -271,10 +270,6 @@ export async function updateFolderInfo(
     const d = patch.description?.trim() || null;
     if (d && d.length > 4000) throw new UserError('内容过长');
     next.description = d;
-  }
-  if (patch.color !== undefined) {
-    if (patch.color && !isOneOf(FOLDER_COLORS, patch.color)) throw new UserError('未知的颜色');
-    next.color = patch.color || null;
   }
   if (patch.readme_file_id !== undefined) {
     if (patch.readme_file_id) {
@@ -410,11 +405,18 @@ export async function deleteFolders(actor: string, ids: string[], confirmed: boo
   const first = places.folders.get(list[0])!;
   const parent = first.parent_id ? folderKey(first.parent_id) : null;
   const path = places.path(folderKey(list[0]), t);
+  // Unlike the file explorer, the files are not deleted: the message says where they went.
+  const inside = await database
+    .prepare('SELECT count(*) AS n FROM files WHERE folder_id IN (SELECT value FROM json_each(?)) AND sealed_in IS NULL')
+    .bind(JSON.stringify(list.flatMap((id) => places.subtree(id))))
+    .first<{ n: number }>();
+  const files = inside?.n ?? 0;
   const cs = new ChangeSet(database, actor, list.length > 1
-    ? summary('删除 {n} 个文件夹', { n: list.length })
+    ? files ? summary('删除 {n} 个文件夹（里面的 {files} 个文件退回「未归档」）', { n: list.length, files }) : summary('删除 {n} 个文件夹', { n: list.length })
     : first.release_id ? summary('删除作品 {path}（连同作品资料）', { path })
       : first.edition_id ? summary('删除版本 {path}（连同版本资料）', { path })
-        : first.era_id ? summary('删除名义 {path}', { path }) : summary('删除文件夹 {path}', { path }));
+        : first.era_id ? summary('删除名义 {path}', { path })
+          : files ? summary('删除文件夹 {path}（里面的 {files} 个文件退回「未归档」）', { path, files }) : summary('删除文件夹 {path}', { path }));
   for (const id of list) {
     const f = places.folders.get(id)!;
     const sub = places.subtree(id);

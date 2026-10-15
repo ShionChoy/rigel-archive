@@ -36,7 +36,8 @@ function file(r: Row) {
     id: r.id, name: r.download_name || r.name, orig: r.name, ext: r.ext, kind: r.kind, size: r.size, state: r.state,
     edition: r.edition_id ?? undefined, placed: !!r.folder_id || undefined, sug: (!r.folder_id && !!r.suggest) || undefined,
     upload: r.origin === 'upload' || undefined, archive: isArchive({ kind: r.kind, format: parseFormat(r.format) }) || undefined,
-    sealed: !!r.sealed || undefined,
+    // (an uploaded .exe is marked to be kept whole before anyone knows whether it is an archive)
+    sealed: (!!r.sealed && isArchive({ kind: r.kind, format: parseFormat(r.format) })) || undefined,
   };
 }
 

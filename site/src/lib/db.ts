@@ -106,7 +106,6 @@ export interface FolderRow {
   name: string; // plain folders; typed folders show their entity's name
   description: string | null;
   readme_file_id: string | null;
-  color: string | null;
   sort: number;
 }
 

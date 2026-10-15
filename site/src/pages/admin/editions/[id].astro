@@ -18,7 +18,7 @@ import { editorData } from '../../../lib/edition-editor';
 import { formatBytes, formatSpec, withParams } from '../../../lib/format';
 import { ChangeSet, batchSince } from '../../../lib/changes';
 import { N_, errorText, summary, UserError } from '../../../lib/i18n';
-import { Places, folderKey } from '../../../lib/locations';
+import { Places, folderKey, isArchive } from '../../../lib/locations';
 import { imageSrc } from '../../../lib/media';
 import { derivedFor } from '../../../lib/processing';
 import { COVER_SQL } from '../../../lib/tagedit';
@@ -167,7 +167,7 @@ const firstTrackFile = ctx?.rows.map((r) => files.find((x) => x.track_id === r.t
 const sampleName = firstTrackFile ? taggedNames.get(firstTrackFile.id) ?? null : null;
 const coverable = (f: F) => (f.kind === 'image' && /^(jpe?g|png)$/i.test(f.ext)) || f.kind === 'audio';
 // 「整理非音频文件…」 offers the files directly in the edition's folder that are not audio, nor an archive kept whole.
-const loose = (f: F) => f.folder_id === home?.id && f.kind !== 'audio' && !f.sealed;
+const loose = (f: F) => f.folder_id === home?.id && f.kind !== 'audio' && !(f.sealed && isArchive(f));
 const looseRoot = files.filter(loose).length;
 const rowOfTrack = new Map(editor.rows.map((r) => [r.track_id, r]));
 // Pictures for an edition without tracks: a gallery, and its cover.

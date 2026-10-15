@@ -1,19 +1,43 @@
 ---
-// 概览: the admin's front page. How far the organizing is, what is waiting (suggestions to accept, the
-// 检查清单, missing editions, duplicates, failed processing), and the latest changes, each linking to where
-// it is done.
+// 概览: the admin's front page. The team's 留言板 first (lib/notes.ts), then how far the organizing is, what is
+// waiting (suggestions to accept, the 检查清单, missing editions, duplicates, failed processing), and the latest
+// changes, each linking to where it is done.
 import Admin from '../../layouts/Admin.astro';
 import { runChecks } from '../../lib/checks';
 import { db } from '../../lib/db';
 import { originalGone } from '../../lib/deletion';
-import { formatTime, percent } from '../../lib/format';
-import { summaryText } from '../../lib/i18n';
+import { formatTime, percent, withParams } from '../../lib/format';
+import { errorText, summaryText, UserError } from '../../lib/i18n';
+import { addNote, deleteNote, editNote, listNotes, pinNote, type Note } from '../../lib/notes';
 import { duplicateGroups, viewCounts } from '../../lib/inbox';
 import { siteLangOf } from '../../lib/public/paths';
 
 const { t, lang } = Astro.locals;
+const actor = Astro.locals.admin!.email;
+
+// 留言板: written, edited, pinned and deleted by anyone in the team.
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const get = (k: string) => String(form.get(k) ?? '');
+  const back = new URL('/admin', Astro.url);
+  try {
+    let msg: string;
+    switch (get('action')) {
+      case 'note-add': await addNote(actor, get('body')); msg = t('留言已发布'); break;
+      case 'note-edit': await editNote(actor, get('id'), get('body')); msg = t('留言已修改'); break;
+      case 'note-pin': await pinNote(get('id'), get('pinned') === '1'); msg = get('pinned') === '1' ? t('已置顶') : t('已取消置顶'); break;
+      case 'note-delete': await deleteNote(get('id')); msg = t('留言已删除'); break;
+      default: throw new UserError('未知的操作');
+    }
+    return Astro.redirect(withParams(back, { msg }), 303);
+  } catch (e) {
+    return Astro.redirect(withParams(back, { err: errorText(e, t) }), 303);
+  }
+}
+
 const database = db();
-const [counts, checks, dups, other, recent] = await Promise.all([
+const [notes, counts, checks, dups, other, recent] = await Promise.all([
+  listNotes(),
   viewCounts(),
   runChecks(t),
   duplicateGroups('content', 1, 1),
@@ -44,9 +68,82 @@ const todo = [
   { n: other?.failed ?? 0, label: t('份内容处理失败'), href: '/admin/storage' },
 ].filter((x) => x.n > 0);
 const problems = checks.map((c) => ({ id: c.id, title: t(c.title), n: c.items.length + c.more })).filter((c) => c.n > 0);
+
+// Pinned notes and the newest few are shown; older ones fold away.
+const SHOWN = 6;
+const shown = notes.filter((n, i) => n.pinned || i - notes.filter((x) => x.pinned).length < SHOWN);
+const older = notes.filter((n) => !shown.includes(n));
+const who = (email: string | null, name: string | null) => name || email || '';
+/** A note's text with its web addresses and admin paths as links. */
+const LINK = /(https?:\/\/[^\s<>"'「」（）]+|\/admin\/[^\s<>"'「」（）]*)/;
+const pieces = (body: string) => body.split(LINK).map((part, i) => (i % 2 ? { href: part, text: part } : { href: null, text: part }));
 ---
 
 <Admin title={t('概览')}>
+  <section class="panel board" id="board" aria-label={t('留言板')}>
+    <h2>{t('留言板')}</h2>
+    <form method="post" class="board-new">
+      <input type="hidden" name="action" value="note-add" />
+      <textarea name="body" rows="2" maxlength="2000" required placeholder={t('写一条留言（Ctrl+Enter 发布）')} aria-label={t('新留言')}></textarea>
+      <button type="submit" class="primary">{t('发布')}</button>
+    </form>
+    {notes.length === 0 && <p class="muted small">{t('还没有留言。')}</p>}
+    {(() => {
+      const item = (n: Note) => (
+        <li class:list={['note', { pinned: !!n.pinned }]} data-note={n.id}>
+          <div class="note-body">{pieces(n.body).map((p) => (p.href ? <a href={p.href} target={p.href.startsWith('http') ? '_blank' : undefined} rel="noopener">{p.text}</a> : p.text))}</div>
+          <form method="post" class="note-edit" hidden>
+            <input type="hidden" name="action" value="note-edit" />
+            <input type="hidden" name="id" value={n.id} />
+            <textarea name="body" rows="3" maxlength="2000" required aria-label={t('修改留言')}>{n.body}</textarea>
+            <span><button type="submit" class="primary">{t('保存')}</button> <button type="button" data-note-cancel>{t('取消')}</button></span>
+          </form>
+          <div class="note-meta small">
+            {n.pinned ? <span class="chip planned">{t('置顶')}</span> : null}
+            <span class="muted">
+              {who(n.author, n.author_name)} · <time datetime={n.created_at}>{formatTime(n.created_at)}</time>
+              {n.edited_at && <> · {t('{who} 改过', { who: who(n.edited_by, n.editor_name) })} <time datetime={n.edited_at}>{formatTime(n.edited_at)}</time></>}
+            </span>
+            <span class="note-acts">
+              <button type="button" class="link" data-note-edit>{t('编辑')}</button>
+              <form method="post">
+                <input type="hidden" name="action" value="note-pin" />
+                <input type="hidden" name="id" value={n.id} />
+                <input type="hidden" name="pinned" value={n.pinned ? '0' : '1'} />
+                <button type="submit" class="link">{n.pinned ? t('取消置顶') : t('置顶')}</button>
+              </form>
+              <form method="post" data-note-delete>
+                <input type="hidden" name="action" value="note-delete" />
+                <input type="hidden" name="id" value={n.id} />
+                <button type="submit" class="link danger">{t('删除')}</button>
+              </form>
+            </span>
+          </div>
+        </li>
+      );
+      return (
+        <>
+          {shown.length > 0 && <ul class="notes">{shown.map(item)}</ul>}
+          {older.length > 0 && (
+            <details class="notes-older">
+              <summary class="muted small">{t('更早的 {n} 条留言', { n: older.length })}</summary>
+              <ul class="notes">{older.map(item)}</ul>
+            </details>
+          )}
+        </>
+      );
+    })()}
+    <dialog id="note-confirm" class="dlg">
+      <form method="dialog">
+        <p>{t('删除这条留言？删除后不能恢复。')}</p>
+        <div class="dlg-buttons">
+          <button value="cancel">{t('取消')}</button>
+          <button value="ok" class="primary">{t('删除')}</button>
+        </div>
+      </form>
+    </dialog>
+  </section>
+
   <div class="overview-stats">
     <a class="stat" href="/admin/inbox?view=all">
       <span class="stat-n">{percent(counts.all ? done / counts.all : 0)}</span>
@@ -102,3 +199,47 @@ const problems = checks.map((c) => ({ id: c.id, title: t(c.title), n: c.items.le
     <span class="muted small">{t('在任何页面按 Ctrl+K 可以跳到作品、版本、乐曲或文件。')}</span>
   </section>
 </Admin>
+
+<script>
+  // 留言板: edit in place, ask before deleting, Ctrl+Enter sends, times in the reader's own time zone.
+  const board = document.querySelector<HTMLElement>('#board');
+  const pad = (n: number) => String(n).padStart(2, '0');
+  for (const el of board?.querySelectorAll<HTMLTimeElement>('time[datetime]') ?? []) {
+    const d = new Date(el.dateTime);
+    if (Number.isNaN(d.getTime())) continue;
+    el.title = el.textContent ?? '';
+    el.textContent = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  board?.addEventListener('click', (ev) => {
+    const target = ev.target as HTMLElement;
+    const note = target.closest<HTMLElement>('li.note');
+    if (!note) return;
+    const editing = target.closest('[data-note-edit]') ? true : target.closest('[data-note-cancel]') ? false : null;
+    if (editing === null) return;
+    note.querySelector<HTMLElement>('.note-body')!.hidden = editing;
+    note.querySelector<HTMLFormElement>('.note-edit')!.hidden = !editing;
+    note.querySelector<HTMLElement>('.note-meta')!.hidden = editing;
+    if (editing) note.querySelector<HTMLTextAreaElement>('.note-edit textarea')?.focus();
+  });
+  const confirm = document.querySelector<HTMLDialogElement>('#note-confirm');
+  let sure = false;
+  board?.addEventListener('submit', (ev) => {
+    const form = ev.target as HTMLFormElement;
+    if (!form.matches('[data-note-delete]') || sure || !confirm) return;
+    ev.preventDefault();
+    confirm.returnValue = '';
+    confirm.addEventListener('close', () => {
+      if (confirm.returnValue !== 'ok') return;
+      sure = true;
+      form.requestSubmit();
+    }, { once: true });
+    confirm.showModal();
+  });
+  board?.addEventListener('keydown', (ev) => {
+    const area = ev.target as HTMLElement;
+    if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey) && area instanceof HTMLTextAreaElement) {
+      ev.preventDefault();
+      area.form?.requestSubmit();
+    }
+  });
+</script>

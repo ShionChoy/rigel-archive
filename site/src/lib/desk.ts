@@ -140,7 +140,7 @@ export async function filesSummary(ids: string[]): Promise<FilesSummary> {
         `SELECT count(*) AS count, coalesce(sum(size), 0) AS bytes, sum(folder_id IS NOT NULL) AS placed,
                 sum(suggest IS NOT NULL AND folder_id IS NULL) AS suggested,
                 sum(${IS_ARCHIVE}) AS archives,
-                sum(sealed = 1) AS sealed, sum(origin = 'upload') AS uploads, sum(state = 'ignored') AS ignored
+                sum(sealed = 1 AND ${IS_ARCHIVE}) AS sealed, sum(origin = 'upload') AS uploads, sum(state = 'ignored') AS ignored
          FROM files WHERE id IN (SELECT value FROM json_each(?))`,
       )
       .bind(list),

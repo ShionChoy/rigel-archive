@@ -25,7 +25,7 @@ import {
   ARCHIVE_VIEW, FIXED_VIEWS, applyInboxAction, browsing, underDir, deskOrder, deskWhere, idsForQuery, idsInDirs, parseInboxAction, readDeskQuery, sourceChildren, viewCounts,
   type ActionResult, type DeskQuery,
 } from '../../lib/inbox';
-import { Places, UNPLACED_SQL, folderKey, folderTree, isArchive, split, type LocNode } from '../../lib/locations';
+import { Places, UNPLACED_SQL, VISIBLE, folderKey, folderTree, isArchive, split, type LocNode } from '../../lib/locations';
 import { guessRelease, loadQuickAccess } from '../../lib/folders';
 import { ORIGINS, PRESETS, RULE_FIELDS, RULE_OPS, SUGGEST_KINDS, loadSmartFolders, presetOf, type RuleSet } from '../../lib/smart';
 import { EDITION_PROBLEMS, editionProblems, type EditionProblem } from '../../lib/checks';
@@ -47,10 +47,16 @@ const wantsJson = (Astro.request.headers.get('accept') ?? '').includes('applicat
 const partial = Astro.request.headers.get('x-desk-part') === 'main';
 const database = db();
 
-/** The message shown after an action, in the admin's language. */
-function resultMessage(r: ActionResult, deleting: boolean, tr: T): string {
-  const done = summaryText(r.summary, tr);
-  let head = deleting ? done : tr('{done}：实际改动 {n} 个', { done, n: r.changed });
+/**
+ * The message shown after an action, in the admin's language: what was done (the history's summary without
+ * its 「整理台：」, which says where it was done), and why files were left out.
+ */
+function resultMessage(r: ActionResult, action: string, tr: T): string {
+  const text = summaryText(r.summary, tr);
+  const prefix = `${tr('整理台')}：`;
+  const done = text.startsWith(prefix) ? text.slice(prefix.length) : text;
+  if (action === 'dup' && !r.changed) return tr('没有标记：选中的文件都没有内容相同的其他文件');
+  let head = r.changed || ['delete', 'discard', 'note', 'rename'].includes(action) ? done : tr('{done}：没有改动', { done });
   if (r.placed !== undefined || r.sealed) {
     const parts = [
       r.placed ? tr('{n} 个文件放入位置或按建议忽略', { n: r.placed }) : '',
@@ -58,9 +64,13 @@ function resultMessage(r: ActionResult, deleting: boolean, tr: T): string {
     ].filter(Boolean);
     head = parts.length ? `${done}：${parts.join(tr('；'))}` : tr('{done}：没有改动', { done });
   }
-  const skipped = r.skipped ? tr('，{n} 个没有可用建议或在整体收藏的包里，已跳过', { n: r.skipped }) : '';
+  const skipped = !r.skipped ? ''
+    : action === 'accept' ? tr('，{n} 个没有可用的建议，已跳过', { n: r.skipped })
+    : action === 'dup' ? tr('，{n} 个没有内容相同的其他文件，没有标记', { n: r.skipped })
+    : action === 'seal' || action === 'unseal' ? tr('，{n} 个不是压缩包，已跳过', { n: r.skipped })
+    : tr('，{n} 个在整体收藏的压缩包里，已跳过', { n: r.skipped });
   const low = r.lowConfidence ? tr('，{n} 个把握度低于 50% 已跳过（请逐个确认或手动移动）', { n: r.lowConfidence }) : '';
-  const refused = r.refused?.length ? tr('；{names} 的包内已有文件归档，没有收起（先把它们退回待整理）', { names: r.refused.join('、') }) : '';
+  const refused = r.refused?.length ? tr('；{names} 的包内已有文件归档，没有收起（先把它们退回未归档）', { names: r.refused.join('、') }) : '';
   const noType = r.noType ? tr('，{n} 个的建议用到的版本类型已被删除，已跳过（请手动移动）', { n: r.noType }) : '';
   // A long list of new editions is cut short (the whole list is in the history).
   const names = r.created && r.created.length > 5 ? tr('{names} 等', { names: r.created.slice(0, 5).join('、') }) : r.created?.join('、');
@@ -113,7 +123,7 @@ if (Astro.request.method === 'POST') {
     if (ids.length === 0) throw new UserError('没有选中文件');
     const r = await applyInboxAction(actor, ids, action, t);
     if (r.plan) return new Response(JSON.stringify({ ok: true, msg: planMessage(r, t), batch: null }), { headers: { 'content-type': 'application/json' } });
-    const msg = action.action === 'rename' && !r.changed ? t('没有改动') : resultMessage(r, ['delete', 'discard', 'note', 'rename'].includes(action.action), t);
+    const msg = action.action === 'rename' && !r.changed ? t('没有改动') : resultMessage(r, action.action, t);
     if (wantsJson) return new Response(JSON.stringify({ ok: true, msg, batch: r.batchId, changed: r.changed }), { headers: { 'content-type': 'application/json' } });
     // 「放入指定位置」 on the upload page: on to the place the files went.
     const then = places.canonical(String(form.get('then') ?? ''));
@@ -139,15 +149,18 @@ const w = deskWhere(q, places, smart, presetIds);
 // 未归档 opened like a folder: the original folders below the open one come first.
 const browse = browsing(q);
 const srcDirs = browse ? (await sourceChildren(q.dir)).dirs : [];
-// What the open original folder holds to organize, at any depth (the inspector's count).
+// 已归档 at its top lists only folders.
+const atTop = !q.loc && q.view === ARCHIVE_VIEW;
+// The inspector's count when the list itself does not hold it: what the open original folder holds to
+// organize (at any depth), or everything filed (已归档's top lists only folders).
 const browseTotals = browse
   ? await (() => {
     const u = underDir(q.dir);
     return database.prepare(`SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM files WHERE ${UNPLACED_SQL} AND ${u.sql}`).bind(...u.binds).first<{ n: number; bytes: number }>();
   })()
-  : null;
-// 已归档 at its top lists only folders.
-const atTop = !q.loc && q.view === ARCHIVE_VIEW;
+  : atTop
+    ? await database.prepare(`SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM files WHERE ${VISIBLE} AND folder_id IS NOT NULL`).first<{ n: number; bytes: number }>()
+    : null;
 const listsFiles = q.view !== 'trash' && !atTop && !preset?.editions;
 
 type Row = Pick<
@@ -352,7 +365,7 @@ const Page = partial ? Bare : Admin;
           {quickFolders.map((f) => (
             <li>
               <div class:list={['frow', 'quick-row', { current: q.loc === folderKey(f!.id) }]} data-folder={f!.id} data-kind={f!.type} data-drop="folder" data-quick draggable="true">
-                <FolderIcon kind={f!.type} color={f!.color} />
+                <FolderIcon kind={f!.type} />
                 <a class="fname" href={folderHref(folderKey(f!.id))} data-nav title={places.path(folderKey(f!.id), t)}>{places.folderName(f!, t)}</a>
                 <span class="n">{byKey.get(folderKey(f!.id))?.n || ''}</span>
               </div>
@@ -433,7 +446,7 @@ const Page = partial ? Bare : Admin;
             <a href={viewHref(q.view)} data-nav>{viewName(q.view)}</a>
           )}
           {dirParts.length > 0 && q.view !== 'unplaced' && (
-            <span class="dir-crumbs" title={t('按来源浏览')}>
+            <span class="dir-crumbs" title={t('原始文件夹')}>
               <span class="sep">·</span> {t('来源：')}
               {dirParts.map((part, i) => <>{i > 0 && ' / '}<a href={here({ dir: dirParts.slice(0, i + 1).join('/') })} data-nav>{part}</a></>)}
               <a href={here({ dir: null })} data-nav class="clear" title={t('不限来源')} aria-label={t('不限来源')}>×</a>
@@ -501,7 +514,7 @@ const Page = partial ? Bare : Admin;
               const node = byKey.get(folderKey(f.id));
               return (
                 <div class:list={['tile', 'item-folder']} role="listitem" tabindex="-1" data-folder={f.id} data-kind={f.type} data-drop="folder" draggable="true">
-                  <FolderIcon kind={f.type} color={f.color} size={28} />
+                  <FolderIcon kind={f.type} size={28} />
                   <a class="tname" href={folderHref(folderKey(f.id))} data-nav tabindex="-1">{places.folderName(f, t)}</a>
                   <span class="muted small">
                     {t('{n} 个', { n: node?.n ?? 0 })}
@@ -553,7 +566,7 @@ const Page = partial ? Bare : Admin;
             {problemEditions.length === 0 && <p class="empty">{t('没有问题。')}</p>}
             {problemEditions.map(({ folder: f, list }) => (
               <div class="tile wide-tile" tabindex="-1" data-folder={f!.id} data-kind="edition" data-drop="folder" draggable="true">
-                <FolderIcon kind="edition" color={f!.color} size={28} />
+                <FolderIcon kind="edition" size={28} />
                 <a class="tname" href={folderHref(folderKey(f!.id))} data-nav>{places.path(folderKey(f!.id), t)}</a>
                 <span class="small">{list.map((p: EditionProblem) => <span class="chip partial">{t(EDITION_PROBLEMS[p])}</span>)}</span>
               </div>
@@ -585,7 +598,7 @@ const Page = partial ? Bare : Admin;
                       <div class="item" role="option" aria-selected="false" tabindex="-1" draggable="true"
                         data-id={f.id} data-kind={f.kind} data-state={f.state} data-upload={f.origin === 'upload' ? '1' : undefined}
                         data-name={shown} data-orig={f.name} data-ext={f.ext} data-edition={f.edition_id ?? undefined} data-release={f.release_id ?? undefined}
-                        data-archive={archive ? '1' : undefined} data-sealed={f.sealed ? '1' : undefined} data-sug={s && !key ? '1' : undefined}
+                        data-archive={archive ? '1' : undefined} data-sealed={f.sealed && archive ? '1' : undefined} data-sug={s && !key ? '1' : undefined}
                         data-placed={key ? '1' : undefined}>
                         <input type="checkbox" class="pick" tabindex="-1" aria-label={t('选中')} />
                         <div class="thumb">{thumb ? <img src={thumb} alt="" loading="lazy" /> : <span class={`kind-icon k-${f.kind}`}>{(f.ext || '?').slice(0, 4).toUpperCase()}</span>}</div>
@@ -593,11 +606,11 @@ const Page = partial ? Bare : Admin;
                           <span class="fn" title={f.download_name ? t('原文件名：{name}', { name: f.name }) : shown}>{shown}</span>
                           <span class="chips">
                             {f.download_name && <span class="chip" title={t('原文件名：{name}', { name: f.name })}>{t('已改名')}</span>}
-                            {f.sealed ? <span class="chip collected" title={t('整体收藏：包内文件不单独整理，只在文件页列出清单')}>{t('整体收藏')}</span> : null}
+                            {f.sealed && archive ? <span class="chip collected" title={t('整体收藏：包内文件不单独整理，只在文件页列出清单')}>{t('整体收藏')}</span> : null}
                             {f.old ? <span class="chip ignored" title={t('已上传新版本替换')}>{t('旧版本')}</span> : null}
                             {f.dup_of && <span class="chip ignored" title={t('标为重复，指向保留的那份')}>{t('重复')}</span>}
                             {f.origin === 'upload' && <span class="chip planned">{t('上传')}</span>}
-                            {f.gone ? <span class="chip missing" title={t('最近一次导入时 source 里已没有这个文件，可以删除')}>{t('原件已不存在')}</span> : null}
+                            {f.gone ? <span class="chip missing" title={t('最近一次核对合辑时，原始资料里已经没有这个文件，这条记录可以删除')}>{t('原件已不存在')}</span> : null}
                             {fmt.upload_error && <span class="chip missing" title={fmt.upload_error}>{t('上传内容有误')}</span>}
                             {f.copies > 1 && <span class="chip partial" title={t('SHA-256 相同的文件数')}>{t('重复 ×{n}', { n: f.copies })}</span>}
                             {f.same_audio > 1 && <span class="chip planned" title={t('解码后的音频完全相同、文件本身不同的版本数（如 WAV 与 FLAC，或只有标签不同）')}>{t('同音频 ×{n}', { n: f.same_audio })}</span>}
@@ -665,8 +678,8 @@ const Page = partial ? Bare : Admin;
         {listsFiles && total > 0 && <label class="small" title={t('改为当前列表全部 {n} 个文件', { n: total })}><input type="checkbox" data-scope-all /> <span>{t('改为当前列表全部 {n} 个文件', { n: total })}</span></label>}
         <span class="sep"></span>
         <button type="button" data-act="move-selection" title="M">{t('移动到…')}</button>
-        <button type="button" class="primary" data-act="file-action" data-action="accept" title="A">{t('按建议归档')}</button>
-        <button type="button" data-act="file-action" data-action="ignore" title="I">{t('忽略')}</button>
+        <button type="button" class="primary" data-act="file-action" data-action="accept">{t('按建议归档')}</button>
+        <button type="button" data-act="file-action" data-action="ignore" title={t('不收录：移出文件夹，放到「已忽略」里（可以恢复）')}>{t('忽略')}</button>
         <button type="button" data-act="menu-selection">{t('更多…')}</button>
         <button type="button" class="link" data-act="clear-selection">{t('取消选择')}</button>
       </div>
@@ -685,9 +698,12 @@ const Page = partial ? Bare : Admin;
       ) : (
         <Inspector
           mode="view" title={title} hint={preset ? t(preset.hint) : q.view === 'unplaced' ? t('还没归档的文件，按原始文件夹排列。把文件或整个文件夹拖到左边「已归档」里的文件夹上即可归档；有规则建议的可以「按建议归档」。')
-            : q.view === 'suggested' ? t('建议把握度在 50% 以上、还没归档的文件（批量「按建议归档」处理的就是这些），按建议的作品分组：勾选一组按 A 即可。')
-            : atTop ? t('整理好的文件夹。名义、作品、版本都是带图标的文件夹，操作和普通文件夹一样。') : undefined}
-          count={browseTotals?.n ?? total} bytes={browseTotals?.bytes ?? totals?.bytes ?? 0} link={preset?.link ? { href: preset.link.href, label: t(preset.link.label) } : null}
+            : q.view === 'suggested' ? t('建议把握度在 50% 以上、还没归档的文件（批量「按建议归档」处理的就是这些），按建议的作品分组：勾选一组，再点下面的「按建议归档」即可。')
+            : atTop ? t('整理好的文件夹。名义、作品、版本都是带图标的文件夹，操作和普通文件夹一样。')
+            : q.view === 'all' ? t('整理台里的全部文件，已归档的和还没归档的都在内。')
+            : q.view === 'ignored' ? t('不收录的文件：不在任何文件夹里，公开站也不显示，文件本身还在。要重新收录，拖到文件夹里，或右键「退回未归档」。')
+            : q.view === 'trash' ? t('最近删除的文件，按每次删除列出；在期限内点「恢复」即可找回。') : undefined}
+          count={q.view === 'trash' ? null : browseTotals?.n ?? total} bytes={browseTotals?.bytes ?? totals?.bytes ?? 0} link={preset?.link ? { href: preset.link.href, label: t(preset.link.label) } : null}
           smart={smart?.id ?? null} rules={smart ? ruleText(smart.rules) : []}
         />
       )}

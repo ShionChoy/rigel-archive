@@ -40,7 +40,7 @@ export const RULE_FIELDS: Record<string, { label: string; ops: RuleOp[]; value: 
   kind: { label: N_('文件类型'), ops: ['is', 'not'], value: 'kind' },
   size: { label: N_('大小（MB）'), ops: ['gt', 'lt'], value: 'number' },
   duration: { label: N_('时长（秒）'), ops: ['gt', 'lt'], value: 'number' },
-  rights: { label: N_('权利'), ops: ['is', 'not'], value: 'rights' },
+  rights: { label: N_('权属'), ops: ['is', 'not'], value: 'rights' },
   state: { label: N_('状态'), ops: ['is', 'not'], value: 'state' },
   origin: { label: N_('来源'), ops: ['is'], value: 'origin' },
   added: { label: N_('加入整理台'), ops: ['within'], value: 'number' },
@@ -55,7 +55,7 @@ export const RULE_FIELDS: Record<string, { label: string; ops: RuleOp[]; value: 
   gone: { label: N_('原件已不存在'), ops: ['yes'], value: 'none' },
 };
 
-export const SUGGEST_KINDS = { place: N_('位置'), release: N_('作品'), seal: N_('整体收藏'), rights: N_('权利') } as const;
+export const SUGGEST_KINDS = { place: N_('位置'), release: N_('作品'), seal: N_('整体收藏'), rights: N_('权属') } as const;
 export const ORIGINS = { nas: N_('合辑'), upload: N_('后台上传') } as const;
 
 export interface Rule {
@@ -77,6 +77,8 @@ export const HAS_COPY = `(files.sha256 IS NOT NULL AND EXISTS (SELECT 1 FROM fil
 const SAME_RECORDING = (own: boolean) => `(files.sha256 IS NOT NULL AND EXISTS (SELECT 1 FROM acoustic_matches m WHERE (m.a = files.sha256 OR m.b = files.sha256)
   ${own ? "AND EXISTS (SELECT 1 FROM files o WHERE o.sha256 = CASE WHEN m.a = files.sha256 THEN m.b ELSE m.a END AND o.rights = 'own')" : ''}))`;
 const ARCHIVE = IS_ARCHIVE;
+// Kept whole (an uploaded .exe is marked before anyone knows whether it is an archive).
+const SEALED = `files.sealed = 1 AND ${IS_ARCHIVE}`;
 
 function textSql(column: string, op: RuleOp, value: string): { sql: string; binds: unknown[] } {
   // instr / substr instead of LIKE: D1 refuses LIKE patterns longer than 50 bytes.
@@ -149,7 +151,7 @@ export function ruleSql(rule: Rule, places: Places): { sql: string; binds: unkno
     case 'recording':
       return { sql: SAME_RECORDING(rule.op === 'own'), binds: [] };
     case 'archive':
-      return { sql: rule.op === 'sealed' ? 'files.sealed = 1' : rule.op === 'yes' ? ARCHIVE : `NOT ${ARCHIVE}`, binds: [] };
+      return { sql: rule.op === 'sealed' ? SEALED : rule.op === 'yes' ? ARCHIVE : `NOT ${ARCHIVE}`, binds: [] };
     case 'gone':
       return { sql: originalGone('files'), binds: [] };
   }
@@ -194,13 +196,13 @@ export const PRESETS: Preset[] = [
   { key: 'sure', name: N_('把握度高的建议'), hint: N_('建议把握度在 80% 以上、还没确认的文件，可以直接「按建议归档」。'), sql: `${UNPLACED_SQL} AND ${S('confidence')} >= 0.8` },
   { key: 'unsure', name: N_('把握度低的建议'), hint: N_('建议把握度低于 50%：批量确认时会跳过，请逐个确认或手动移动。'), sql: `${UNPLACED_SQL} AND files.suggest IS NOT NULL AND ${S('confidence')} < 0.5` },
   { key: 'seal', name: N_('建议整体收藏的压缩包'), hint: N_('规则建议整体收藏、还没收藏的压缩包。'), sql: `${S('seal')} = 1 AND files.sealed = 0 AND files.state != 'ignored'` },
-  { key: 'sealed', name: N_('整体收藏的包'), hint: N_('已整体收藏的压缩包和光盘镜像；双击可以看包内清单。'), sql: 'files.sealed = 1' },
+  { key: 'sealed', name: N_('整体收藏的包'), hint: N_('已整体收藏的压缩包和光盘镜像；双击可以看包内清单。'), sql: SEALED },
   { key: 'dups', name: N_('疑似重复'), hint: N_('内容完全相同的多份文件。'), sql: `files.state != 'ignored' AND ${HAS_COPY}`, link: { href: '/admin/duplicates', label: N_('逐组选择保留哪份') } },
   { key: 'recording', name: N_('同一录音'), hint: N_('声学指纹判断为同一录音的文件（不同编码、母带、剪辑）。'), sql: SAME_RECORDING(false) },
-  { key: 'third', name: N_('第三方'), hint: N_('权利为第三方的文件：公开站只列条目。'), sql: "files.rights = 'third_party'" },
-  { key: 'unknown', name: N_('权利未知'), hint: N_('还没确定权利的文件（放进作品时会自动设为社团自有）。'), sql: "files.rights = 'unknown' AND files.state != 'ignored'" },
+  { key: 'third', name: N_('第三方'), hint: N_('权属为第三方的文件：公开站只列条目。'), sql: "files.rights = 'third_party'" },
+  { key: 'unknown', name: N_('权属未定'), hint: N_('还没确定权属的文件（放进作品时会自动设为社团自有）。'), sql: "files.rights = 'unknown' AND files.state != 'ignored'" },
   { key: 'recent', name: N_('最近上传'), hint: N_('7 天内在后台上传的文件。'), sql: "files.origin = 'upload' AND files.created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')" },
-  { key: 'gone', name: N_('原件已不存在'), hint: N_('最近一次导入时合辑里已找不到原件的文件，可以删除。'), sql: originalGone('files') },
+  { key: 'gone', name: N_('原件已不存在'), hint: N_('最近一次核对合辑时，原始资料里已经找不到的文件，这些记录可以删除。'), sql: originalGone('files') },
   {
     key: 'unlinked', name: N_('音频没有对应曲目'), hint: N_('版本已有曲目顺序、但还没对应到曲目的音频：在版本页的曲目列表下方点「按标题、音频和时长自动对应」。'),
     sql: `files.kind = 'audio' AND files.edition_id IS NOT NULL AND files.track_id IS NULL AND files.state != 'ignored' AND files.dup_of IS NULL
@@ -220,11 +222,10 @@ export interface SmartFolder {
   id: string;
   name: string;
   rules: RuleSet;
-  color: string | null;
 }
 
 export async function loadSmartFolders(): Promise<SmartFolder[]> {
-  const { results } = await db().prepare('SELECT id, name, rules, color FROM smart_folders ORDER BY sort, created_at').all<{ id: string; name: string; rules: string; color: string | null }>();
+  const { results } = await db().prepare('SELECT id, name, rules FROM smart_folders ORDER BY sort, created_at').all<{ id: string; name: string; rules: string }>();
   return results.map((r) => {
     let rules: RuleSet = { match: 'all', rules: [] };
     try {
@@ -232,7 +233,7 @@ export async function loadSmartFolders(): Promise<SmartFolder[]> {
     } catch {
       // a rule this version no longer knows: the folder shows everything until it is edited
     }
-    return { id: r.id, name: r.name, rules, color: r.color };
+    return { id: r.id, name: r.name, rules };
   });
 }
 

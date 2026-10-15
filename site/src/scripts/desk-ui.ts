@@ -10,7 +10,6 @@ export interface MenuItem {
   run?: () => void;
   disabled?: string | false; // why it cannot be used
   danger?: boolean;
-  swatches?: { color: string; label: string; on: boolean; run: () => void }[];
 }
 export type MenuEntry = MenuItem | '-';
 
@@ -32,27 +31,6 @@ export function openMenu(entries: MenuEntry[], x: number, y: number) {
         hr.className = 'sep';
         hr.setAttribute('role', 'separator');
         return hr;
-      }
-      if (e.swatches) {
-        const row = document.createElement('div');
-        row.className = 'menu-swatches';
-        const label = document.createElement('span');
-        label.textContent = e.label;
-        row.appendChild(label);
-        for (const s of e.swatches) {
-          const b = document.createElement('button');
-          b.type = 'button';
-          b.className = `swatch${s.on ? ' on' : ''}${s.color ? '' : ' none'}`;
-          b.dataset.color = s.color;
-          b.title = s.label;
-          b.setAttribute('aria-label', s.label);
-          b.addEventListener('click', () => {
-            closeMenu();
-            s.run();
-          });
-          row.appendChild(b);
-        }
-        return row;
       }
       const b = document.createElement('button');
       b.type = 'button';

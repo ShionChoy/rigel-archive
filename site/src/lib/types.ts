@@ -172,7 +172,7 @@ export async function reorderTypes(actor: string, order: string[]): Promise<numb
 /** Why a type cannot be deleted now, or null. */
 export function deleteProblem(use: TypeUse | undefined): UserError | null {
   if (use?.editions) return new UserError('还有 {n} 个版本是这个类型，先把它们改成别的类型', { n: use.editions });
-  if (use?.suggestions) return new UserError('还有 {n} 个待整理文件的归档建议用到这个类型，先确认或忽略这些建议', { n: use.suggestions });
+  if (use?.suggestions) return new UserError('还有 {n} 个未归档文件的归档建议用到这个类型，先确认或忽略这些建议', { n: use.suggestions });
   return null;
 }
 

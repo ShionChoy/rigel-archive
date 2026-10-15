@@ -472,14 +472,14 @@ function menuFor(sel: Sel): MenuEntry[] {
     const files = sel.every;
     entries.push(
       '-',
-      { label: t('忽略'), keys: 'I', run: () => run(() => fileAction('ignore', files)) },
+      { label: t('忽略'), run: () => run(() => fileAction('ignore', files)) },
       { label: t('退回未归档'), run: () => run(() => fileAction('reset', files)) },
       { label: t('标为重复'), run: () => run(() => fileAction('dup', files)) },
       '-',
       { label: t('设为社团自有'), run: () => run(() => fileAction('rights', files, { rights_value: 'own' }), { keep: true }) },
       { label: t('设为第三方'), run: () => run(() => fileAction('rights', files, { rights_value: 'third_party' }), { keep: true }) },
       { label: t('设为已授权'), run: () => run(() => fileAction('rights', files, { rights_value: 'licensed' }), { keep: true }) },
-      { label: t('权利改回未知'), run: () => run(() => fileAction('rights', files, { rights_value: 'unknown' }), { keep: true }) },
+      { label: t('权属改回未定'), run: () => run(() => fileAction('rights', files, { rights_value: 'unknown' }), { keep: true }) },
       { label: t('公开权限…'), run: () => window.dispatchEvent(new CustomEvent('rigel:access-select', { detail: files })) },
     );
   }
@@ -785,7 +785,8 @@ function init() {
     }
     openMenu(menuFor(current()), ev.clientX, ev.clientY);
   });
-  // Keys work while the focus is in the list, or nowhere in particular (after a rename or a download).
+  // Keys work while the focus is in the list, or nowhere in particular (after a rename or a download). No
+  // single letter changes anything (a key pressed by mistake would): M only opens 「移动到…」.
   document.addEventListener('keydown', (ev) => {
     const el = ev.target as HTMLElement;
     if (!section.contains(el) && el !== document.body) return;
@@ -802,9 +803,6 @@ function init() {
     } else if ((ev.key === 'm' || ev.key === 'M') && !ev.ctrlKey && !ev.metaKey) {
       ev.preventDefault();
       pickAndMove(sel);
-    } else if ((ev.key === 'i' || ev.key === 'I') && !ev.ctrlKey && !ev.metaKey && sel.every.length) {
-      ev.preventDefault();
-      run(() => fileAction('ignore', sel.every));
     } else if (ev.key === 'Enter' && sel.files.length === 1 && !sel.folders.length && el.matches('tr[data-key]')) {
       location.href = `/admin/files/${sel.files[0]}`;
     } else if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && (ev.key === 'N' || ev.key === 'n')) {

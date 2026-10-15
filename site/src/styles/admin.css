@@ -417,15 +417,6 @@ details.check ul { margin: 8px 0 0; padding-left: 20px; }
 .ficon.era { color: var(--f-era); }
 .ficon.release { color: var(--f-release); }
 .ficon.edition { color: var(--f-edition); }
-[data-color="red"], .ficon[data-color="red"] { --c: #d0453a; }
-[data-color="orange"] { --c: #e0782b; }
-[data-color="yellow"] { --c: #d6ae1f; }
-[data-color="green"] { --c: #3f9a4f; }
-[data-color="aqua"] { --c: #2aa3b3; }
-[data-color="blue"] { --c: #3669d6; }
-[data-color="purple"] { --c: #8a55c9; }
-[data-color="pink"] { --c: #d9559a; }
-.ficon[data-color] { color: var(--c); }
 
 .main.wide:has(.desk) { padding: 12px 16px 0; }
 .main.wide:has(.desk) > h1 { display: none; }
@@ -677,10 +668,6 @@ input.pick { margin: 0; }
 .chip.type-era { background: var(--ask-soft); color: var(--ask); }
 .chip.type-release { background: var(--plan-soft); color: var(--plan); }
 .chip.type-edition { background: var(--edition-soft); color: var(--edition-text); }
-.swatches, .menu-swatches { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.swatch { width: 18px; height: 18px; border-radius: 50%; padding: 0; border: 2px solid var(--panel); box-shadow: 0 0 0 1px var(--field); background: var(--c, var(--panel)); cursor: pointer; }
-.swatch.none { background: linear-gradient(135deg, var(--panel) 45%, #d0453a 45%, #d0453a 55%, var(--panel) 55%); }
-.swatch.on { box-shadow: 0 0 0 2px var(--text); }
 .trash-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; user-select: text; }
 
 /* right-click menu */
@@ -690,8 +677,6 @@ input.pick { margin: 0; }
 .ctx-menu button.danger { color: var(--bad); }
 .ctx-menu kbd, table.keys kbd { font: 11px ui-monospace, Menlo, Consolas, monospace; color: var(--muted); }
 .ctx-menu .sep { height: 1px; background: var(--line); margin: 4px 6px; }
-.ctx-menu .menu-swatches { padding: 5px 10px; }
-.ctx-menu .menu-swatches span { margin-right: auto; }
 
 /* dialogs */
 dialog.dlg { width: min(520px, 94vw); background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
@@ -1104,3 +1089,21 @@ dialog.jump .jump-label { flex: none; max-width: 60%; overflow: hidden; text-ove
 dialog.jump .jump-sub { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 dialog.jump p { margin: 4px 2px 0; }
 
+
+/* ============================== 留言板 (pages/admin/index.astro) ============================== */
+.board h2 { margin: 0 0 10px; font-size: 16px; }
+.board-new { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 12px; }
+.board-new textarea { flex: 1; min-width: 0; resize: vertical; font: inherit; }
+.notes { list-style: none; margin: 0; padding: 0; }
+.note { padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 8px; margin-bottom: 8px; background: var(--panel-2); }
+.note.pinned { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); background: var(--accent-soft); }
+.note-body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.note-edit { display: grid; gap: 6px; }
+.note-edit textarea { width: 100%; font: inherit; resize: vertical; }
+.note-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin-top: 6px; }
+.note-acts { margin-left: auto; display: inline-flex; gap: 10px; align-items: center; }
+.note-acts form { display: inline; margin: 0; }
+.note-acts button.link.danger { color: var(--bad); }
+.notes-older { margin-top: 4px; }
+.notes-older summary { cursor: pointer; margin-bottom: 8px; }
+@media (max-width: 640px) { .board-new { flex-direction: column; align-items: stretch; } .note-acts { margin-left: 0; } }

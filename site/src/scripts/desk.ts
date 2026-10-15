@@ -160,6 +160,15 @@ function fileAction(action: string, ids: string[], extra: Record<string, string>
   }
   const search = location.search;
   return queued(async () => {
+    // Taking many files out of their folders (or re-righting them) at once is asked first: a ticked 「全部」 or
+    // original folders can mean thousands of files.
+    const what = ({ discard: t('删除或忽略'), ignore: t('忽略'), reset: t('退回未归档'), dup: t('标为重复'), rights: t('改权属') } as Record<string, string>)[action];
+    if (what && (all || dirs.length > 0 || ids.length > 20)) {
+      const text = dirs.length && !all
+        ? t('对所选文件夹里的全部文件执行「{what}」？', { what })
+        : t('对 {n} 个文件执行「{what}」？', { n: all ? data.total : ids.length, what });
+      if (!(await confirmBox(`${text}\n${t('之后可以在修改记录里撤销。')}`, what))) return false;
+    }
     // A large 「按建议归档」 shows what it will do first: which editions and folders it makes, where the files go.
     if (action === 'accept' && (all || ids.length > 20 || dirs.length)) {
       toast(t('正在估算…'));
@@ -702,6 +711,13 @@ function selectionChanged(immediate = false) {
     bar.hidden = n === 0;
     const count = bar.querySelector<HTMLElement>('[data-count]');
     if (count) count.textContent = String(n);
+    // Only what applies to the selection: 「按建议归档」 when something chosen has a suggestion (original
+    // folders and the whole list may), 「忽略」 when files are chosen (folders alone have neither).
+    const wide = dirs.length > 0 || !!all?.checked;
+    const accept = bar.querySelector<HTMLElement>('[data-action="accept"]');
+    const ignore = bar.querySelector<HTMLElement>('[data-action="ignore"]');
+    if (accept) accept.hidden = !(wide || selectedEls().some((el) => el.dataset.sug));
+    if (ignore) ignore.hidden = !(wide || files.length > 0);
   }
   clearTimeout(inspectTimer);
   const run = () => inspect(files, fds, dirs);
@@ -762,7 +778,7 @@ async function pickAndMove(what: What) {
   }
   const blocked = new Set(what.folders);
   const r = await openPicker({
-    title: what.folders.length || what.dirs.length ? t('把 {n} 个文件夹和文件移到…', { n: what.folders.length + what.dirs.length }) : t('移动到…'),
+    title: moveTitle(what),
     allowTop: what.files.length === 0 && what.dirs.length === 0,
     keepDir: what.files.length && data.dir && !data.browse ? data.dir : null,
     current: data.loc || null,
@@ -779,6 +795,15 @@ async function pickAndMove(what: What) {
     return;
   }
   await moveTo(what, r.target, r.newFolder);
+}
+
+/** 「把 2 个文件夹和 3 个文件移到…」: what is moving, as chosen (with 「全部」 ticked, the whole list). */
+function moveTitle(what: What): string {
+  const dirs = what.folders.length + what.dirs.length;
+  const files = scopeAll() ? data.total : what.files.length;
+  if (dirs && files) return t('把 {dirs} 个文件夹和 {files} 个文件移到…', { dirs, files });
+  if (dirs) return t('把 {n} 个文件夹移到…', { n: dirs });
+  return t('把 {n} 个文件移到…', { n: files });
 }
 
 function freeName(parent: string | null, base: string): string {
@@ -1068,20 +1093,20 @@ function fileMenu(els = selectedEls().filter((el) => el.dataset.id), what = targ
   return [
     ...head,
     { label: t('移动到…'), keys: 'M', run: () => pickAndMove(what) },
-    ...places.slice(0, 5).map((k, i) => ({ label: t('放到「{place}」', { place: placeName(k) }), keys: i === 0 ? `Shift+D · ${i + 1}` : String(i + 1), run: () => moveTo(what, k) })),
-    { label: t('按建议归档'), keys: 'A', run: () => fileAction('accept', what.files, {}, what.dirs), disabled: suggested ? false : t('选中的文件没有规则建议') },
+    ...places.slice(0, 5).map((k) => ({ label: t('放到「{place}」', { place: placeName(k) }), run: () => moveTo(what, k) })),
+    { label: t('按建议归档'), run: () => fileAction('accept', what.files, {}, what.dirs), disabled: suggested ? false : t('选中的文件没有规则建议') },
     { label: t('退回未归档'), run: () => fileAction('reset', what.files), disabled: any('placed') || any('state') ? false : t('没有已归档的文件') },
     { label: t('剪切'), keys: 'Ctrl+X', run: () => cut(what) },
     '-',
     { label: t('设为社团自有'), run: () => fileAction('rights', what.files, { rights_value: 'own' }, what.dirs) },
-    { label: t('设为第三方'), keys: 'T', run: () => fileAction('rights', what.files, { rights_value: 'third_party' }, what.dirs) },
+    { label: t('设为第三方'), run: () => fileAction('rights', what.files, { rights_value: 'third_party' }, what.dirs) },
     { label: t('设为已授权'), run: () => fileAction('rights', what.files, { rights_value: 'licensed' }, what.dirs) },
-    { label: t('权利改回未知'), run: () => fileAction('rights', what.files, { rights_value: 'unknown' }, what.dirs) },
+    { label: t('权属改回未定'), run: () => fileAction('rights', what.files, { rights_value: 'unknown' }, what.dirs) },
     '-',
-    { label: t('标为重复'), keys: 'D', run: () => fileAction('dup', what.files, {}, what.dirs) },
+    { label: t('标为重复'), run: () => fileAction('dup', what.files, {}, what.dirs) },
     ...(any('archive') ? [{ label: t('整体收藏（压缩包）'), run: () => fileAction('seal', what.files) }] : []),
     ...(any('sealed') ? [{ label: t('展开整体收藏的包'), run: () => fileAction('unseal', what.files) }] : []),
-    { label: t('忽略'), keys: 'I', run: () => fileAction('ignore', what.files, {}, what.dirs) },
+    { label: t('忽略'), run: () => fileAction('ignore', what.files, {}, what.dirs) },
     { label: any('upload') ? t('删除（移到回收站）或忽略') : t('删除或忽略'), keys: 'Delete', danger: true, run: () => deleteSelection(what) },
   ];
 }
@@ -1093,8 +1118,6 @@ function folderMenu(id: string, inTree: boolean): MenuEntry[] {
   const pinned = data.quick.includes(id);
   const what = inTree ? { ...NOTHING(), folders: [id] } : targets();
   const many = what.folders.length > 1 || what.files.length > 0;
-  const colors = ['', 'red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'pink'];
-  const colorLabel: Record<string, string> = { '': t('无'), red: t('红'), orange: t('橙'), yellow: t('黄'), green: t('绿'), aqua: t('青'), blue: t('蓝'), purple: t('紫'), pink: t('粉') };
   return [
     { label: t('打开'), keys: 'Enter', run: () => navigate(`/admin/inbox?loc=${key}`) },
     { label: t('打开并显示子文件夹内容'), run: () => navigate(`/admin/inbox?loc=${key}&sub=1`) },
@@ -1111,7 +1134,6 @@ function folderMenu(id: string, inTree: boolean): MenuEntry[] {
     { label: t('子文件夹按默认顺序排列'), run: () => folderOp({ op: 'reorder', under: key, order: null }, { quiet: true }) },
     '-',
     { label: f.kind === 'plain' ? t('设为名义、作品或版本…') : t('改回普通文件夹…'), run: () => setType(id) },
-    { label: t('颜色'), swatches: colors.map((c) => ({ color: c, label: colorLabel[c], on: false, run: () => folderOp({ op: 'color', id, color: c }, { quiet: true }) })) },
     { label: pinned ? t('移出快速访问') : t('加入快速访问'), run: () => folderOp({ op: pinned ? 'unpin' : 'pin', id }, { quiet: true }) },
     ...(f.release ? [{ label: t('打开作品页'), run: () => (location.href = `/admin/releases/${f.release}`) }] : []),
     ...(f.edition ? [{ label: t('打开版本页'), run: () => (location.href = `/admin/editions/${f.edition}`) }] : []),
@@ -1490,7 +1512,6 @@ function initClicks() {
       case 'unpin': folderOp({ op: a, id: act.dataset.folder }, { quiet: true }); break;
       case 'delete-folders': deleteSelection({ ...NOTHING(), folders: act.dataset.folders!.split(',') }); break;
       case 'set-type': setType(act.dataset.folder!); break;
-      case 'color': folderOp({ op: 'color', id: act.dataset.folder, color: act.dataset.color ?? '' }, { quiet: true }); break;
       case 'open': navigate(`/admin/inbox?loc=${act.dataset.key}`); break;
       case 'undo': undo(act.dataset.batch!); break;
       case 'undo-toast': undo(act.dataset.batch || null); break;
@@ -1555,6 +1576,7 @@ function initClicks() {
       navigate(u.pathname + u.search);
     } else if (el.matches('[data-scope-all]')) {
       if ((el as HTMLInputElement).checked) selectAll();
+      else selectionChanged();
     }
   });
 
@@ -1660,14 +1682,9 @@ function initKeys() {
     } else if (key === 'Delete') { ev.preventDefault(); deleteSelection(what()); }
     else if (key === '?') helpBox(guideBox);
     else if (key === '*') expandAll();
-    else if (key === 'u') undo();
     else if (key === 'm') { ev.preventDefault(); pickAndMove(what()); }
-    else if (key === 'D' && ev.shiftKey) { const k = recent()[0]; if (k) moveTo(what(), k); }
-    else if (/^[1-5]$/.test(key)) { const k = recent()[Number(key) - 1]; if (k) moveTo(what(), k); }
-    else if (key === 'a') fileAction('accept', what().files, {}, what().dirs);
-    else if (key === 'i') fileAction('ignore', what().files, {}, what().dirs);
-    else if (key === 't') fileAction('rights', what().files, { rights_value: 'third_party' }, what().dirs);
-    else if (key === 'd') fileAction('dup', what().files, {}, what().dirs);
+    // No single letter changes anything: a key pressed by mistake (Explorer users type a name's first letter
+    // to jump to it) must not file, ignore or re-right files. Those are in the menus; Ctrl+Z undoes.
   });
 }
 

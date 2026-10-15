@@ -1,4 +1,4 @@
-// Deleting files. Only records are deleted: source/ is never touched, and stored content stays until
+// Deleting files. Only records are deleted: the 合辑's originals are never touched, and stored content stays until
 // the storage cleanup (/admin/storage) removes objects no file has referenced for STORAGE_GRACE_DAYS.
 //
 // A file can be deleted when it was uploaded in the admin, or when it comes from the 合辑 but its
@@ -40,7 +40,7 @@ export function keepReason(f: { origin: string; state: string; gone: number | bo
 }
 
 export const KEEP_REASON_TEXT: Record<Exclude<KeepReason, null>, string> = {
-  nas: N_('合辑文件的原件还在 source 里，只能「忽略」（删除后重新导入又会出现）'),
+  nas: N_('合辑文件的原件还在，只能「忽略」（删除后再次导入合辑时又会出现）'),
   published: N_('已发布的文件要先改为其他状态才能删除'),
   member: N_('包内有不能删除的文件'),
 };

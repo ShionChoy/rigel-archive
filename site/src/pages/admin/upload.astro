@@ -10,7 +10,9 @@ const places = await Places.load();
 ---
 
 <Admin title={t('上传')} wide>
-  <p class="muted" set:html={translateHtml(lang, '上传的文件进入整理台的「{root}」目录，和合辑文件一样在那里确认归类。文件先在浏览器里算出 SHA-256，存储里已有相同内容时不再重复传；大文件分块上传，中断后重新选择同一文件会接着传。上传后处理程序会自动核对内容、读取规格、解开压缩包并生成推流版与预览，进度见<a href="/admin/storage">存储与处理</a>页。', { root: UPLOAD_ROOT })} />
+  {/* Like a cloud drive: files are kept exactly as uploaded — their folders, archives unopened, copies of
+      files already in the archive too. Nothing to tick. */}
+  <p class="muted" set:html={translateHtml(lang, '文件按原样保存：子文件夹结构不变，压缩包不解开（包内文件在文件页列出清单），和已有文件内容相同也照样保存一份。大文件分块上传，中断后重新选择同一文件会接着传。上传后处理程序会自动核对内容、读取规格并生成推流版与预览，进度见<a href="/admin/storage">存储与处理</a>页。')} />
 
   <div class="panel form-grid" id="upload-options" data-root={UPLOAD_ROOT}>
     <label>{t('放到（可选）')}</label>
@@ -20,16 +22,10 @@ const places = await Places.load();
       <span id="place-path" class="muted">{t('不指定，在整理台再放')}</span>
       <button type="button" id="clear-place" class="link" hidden>{t('清除')}</button>
     </span>
-    <span></span>
-    <label><input id="up-keep" type="checkbox" /> {t('保留上传文件夹里的子文件夹结构')}</label>
-    <span></span>
-    <label><input id="up-sealed" type="checkbox" /> {t('压缩包整体收藏：只列包内清单，不逐个整理包内文件')}</label>
     <label for="up-note">{t('备注（可选）')}</label>
     <input id="up-note" type="text" placeholder={t('例如：来源、获得方式；会写到每个文件上')} />
-    <span></span>
-    <label><input id="up-dup" type="checkbox" /> {t('内容与已有文件完全相同时也添加一条记录（默认跳过）')}</label>
   </div>
-  <p class="muted">{t('指定了位置时，上传完成的文件直接放进那里（之后可以在整理台再调整）；不指定则留在整理台的「未归档」里。')}</p>
+  <p class="muted">{t('指定了位置时，文件连同所在的文件夹直接放进那里；那里已有同名文件时，新文件自动加编号，如「cover (2).jpg」。不指定则放在整理台「未归档 › {root} › 上传时间」下。之后都可以在整理台调整。', { root: UPLOAD_ROOT })}</p>
 
   <div id="drop" class="dropzone">
     {t('把文件或文件夹拖到这里，或')}
@@ -93,7 +89,7 @@ const places = await Places.load();
   // Files the operating system writes by itself; the import ignores them too.
   const JUNK = /(^|\/)(__MACOSX\/|\._[^/]*$|(thumbs\.db|desktop\.ini|\.ds_store)$)/i;
 
-  type Status = 'waiting' | 'working' | 'done' | 'exists' | 'skipped' | 'error';
+  type Status = 'waiting' | 'working' | 'done' | 'skipped' | 'error';
   interface Item {
     file: File;
     path: string;
@@ -143,16 +139,20 @@ const places = await Places.load();
     refresh();
   }
 
+  // While files go up, where they go and their note stay as they were when the upload started.
+  const locked = ['#choose-place', '#clear-place', '#up-note', '#clear'].map((id) => document.querySelector<HTMLInputElement | HTMLButtonElement>(id)!);
+
   function refresh() {
     const count = (s: Status) => items.filter((i) => i.status === s).length;
     const waiting = count('waiting') + count('error');
     summary.textContent = items.length
-      ? t('共 {n} 个：完成 {done}，已存在 {exists}，跳过 {skipped}，失败 {failed}，待上传 {waiting}', {
-          n: items.length, done: count('done'), exists: count('exists'), skipped: count('skipped'), failed: count('error'), waiting: count('waiting'),
-        })
+      ? t('共 {n} 个：完成 {done}，跳过 {skipped}，失败 {failed}，待上传 {waiting}', {
+          n: items.length, done: count('done'), skipped: count('skipped'), failed: count('error'), waiting: count('waiting'),
+        }) + (!running && count('waiting') ? t('（点「开始上传」开始）') : '')
       : '';
     startButton.disabled = running || waiting === 0;
     startButton.textContent = count('error') && !count('waiting') ? t('重试失败的文件') : t('开始上传');
+    for (const el of locked) el.disabled = running;
   }
 
   function add(file: File, path: string) {
@@ -229,18 +229,13 @@ const places = await Places.load();
     try {
       show(item, 'working', t('计算 SHA-256'), 0);
       const sha = await sha256(item);
-      show(item, 'working', t('检查是否已存在'));
-      const check = await call<{ stored: boolean; files: { id: string; dir: string; name: string }[] }>('/admin/api/upload/check', { sha256: sha });
-      const allowDup = document.querySelector<HTMLInputElement>('#up-dup')!.checked;
-      if (check.files.length && !allowDup) {
-        const first = check.files[0];
-        show(item, 'exists', t('已有相同内容：{path}', { path: `${first.dir ? `${first.dir}/` : ''}${first.name}` }), undefined, `/admin/files/${first.id}`);
-        return;
-      }
+      // Content already in storage is not sent again (秒传); the file is added all the same.
+      const check = await call<{ stored: boolean }>('/admin/api/upload/check', { sha256: sha });
       if (!check.stored) await upload(item, sha);
       show(item, 'working', placeInput.value ? t('放进指定位置') : t('登记到整理台'));
-      // One registration at a time: files going into new folders must not make the same folder twice.
-      const { id } = await registering(() => call<{ id: string }>('/admin/api/upload/register', {
+      // One registration at a time: files going into new folders must not make the same folder twice, and a
+      // second file of the same name sees the first one.
+      const { id, renamed } = await registering(() => call<{ id: string; renamed: string | null }>('/admin/api/upload/register', {
         batch: session.batch,
         batchDir: session.dir,
         path: item.path,
@@ -248,12 +243,14 @@ const places = await Places.load();
         mtime: new Date(item.file.lastModified).toISOString(),
         sha256: sha,
         place: placeInput.value || null,
-        keep: document.querySelector<HTMLInputElement>('#up-keep')!.checked,
         folder: placeInput.dataset.folder || null,
-        sealed: document.querySelector<HTMLInputElement>('#up-sealed')!.checked,
         note: value('#up-note'),
       }));
-      show(item, 'done', check.stored ? t('完成（存储里已有相同内容，未重复上传）') : t('完成'), undefined, `/admin/files/${id}`);
+      const notes = [
+        check.stored ? t('秒传：存储里已有相同内容') : '',
+        renamed ? t('那里已有同名文件，存为「{name}」', { name: renamed }) : '',
+      ].filter(Boolean);
+      show(item, 'done', notes.length ? t('完成（{notes}）', { notes: notes.join(t('；')) }) : t('完成'), undefined, `/admin/files/${id}`);
     } catch (e) {
       show(item, 'error', t('失败：{error}', { error: e instanceof Error ? e.message : String(e) }));
     }
@@ -275,16 +272,19 @@ const places = await Places.load();
     };
     await Promise.all(Array.from({ length: PARALLEL }, worker));
     running = false;
-    // The files went to the place chosen (the 整理台 opens it), else they wait in 未归档.
+    // The files went to the place chosen (the 整理台 opens it), else they wait in 未归档, in their folders.
     const place = placeInput.value;
-    toInbox.href = place && place.startsWith('fd:') ? `/admin/inbox?loc=${place}` : `/admin/inbox?view=all&dir=${encodeURIComponent(session.dir)}`;
+    toInbox.href = place.startsWith('fd:') ? `/admin/inbox?loc=${place}`
+      : place ? `/admin/inbox?view=all&dir=${encodeURIComponent(session.dir)}`
+      : `/admin/inbox?view=unplaced&dir=${encodeURIComponent(session.dir)}`;
     toInbox.textContent = place ? t('在整理台打开「{place}」', { place: placeText.textContent ?? '' }) : t('到整理台查看这批文件');
     toInbox.hidden = !items.some((i) => i.status === 'done');
     backLink.hidden = !backLink.getAttribute('href') || !items.some((i) => i.status === 'done');
     refresh();
   });
 
+  // Leaving with files still to send (or being sent) asks first.
   window.addEventListener('beforeunload', (e) => {
-    if (running) e.preventDefault();
+    if (running || items.some((i) => i.status === 'waiting')) e.preventDefault();
   });
 </script>

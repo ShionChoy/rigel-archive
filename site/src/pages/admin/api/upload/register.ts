@@ -10,9 +10,9 @@ export const POST: APIRoute = async ({ request, url, locals }) => {
   if (!fromAdminPage(request, url)) return fail(locals.t('请求来源不对'), 403);
   try {
     const input = parseUpload(await readJson(request));
-    const id = await registerUpload(env.DB, env.MEDIA, locals.admin!.email, input);
+    const registered = await registerUpload(env.DB, env.MEDIA, locals.admin!.email, input);
     wakeAfter(locals, env); // verify and process it right away
-    return json({ id });
+    return json(registered);
   } catch (e) {
     return fail(errorText(e, locals.t));
   }

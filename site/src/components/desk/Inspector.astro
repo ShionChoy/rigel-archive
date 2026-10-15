@@ -8,7 +8,7 @@ import { FILE_KIND_LABELS, FILE_STATE_LABELS, RIGHTS, RIGHTS_LABELS, ROLE_LABELS
 import { formatBytes, formatSpec, percent } from '../../lib/format';
 import { parseFormat } from '../../lib/db';
 import { EDITION_STATUS_LABELS } from '../../lib/editions';
-import { FOLDER_COLORS, FOLDER_COLOR_LABELS, FOLDER_TYPE_LABELS, isArchive, type Places } from '../../lib/locations';
+import { FOLDER_TYPE_LABELS, isArchive, type Places } from '../../lib/locations';
 import type { FilesSummary, FileView, FolderView } from '../../lib/desk';
 import { accessOf, type EditionAccessRow } from '../../lib/access';
 import { accessNote } from '../../lib/edition-access';
@@ -22,7 +22,7 @@ type Props =
   | { mode: 'folder'; places: Places; view: FolderView; selected?: boolean }
   | { mode: 'file'; places: Places; file: FileView; derived: Derived; base: string; tags?: FileTagView | null }
   | { mode: 'files'; places: Places; summary: FilesSummary; folders: number }
-  | { mode: 'view'; title: string; hint?: string; count: number; bytes: number; link?: { href: string; label: string } | null; smart?: string | null; rules?: string[] }
+  | { mode: 'view'; title: string; hint?: string; count: number | null; bytes: number; link?: { href: string; label: string } | null; smart?: string | null; rules?: string[] }
   | { mode: 'empty' };
 
 const props = Astro.props;
@@ -39,7 +39,7 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
       return (
         <div data-folder={f.id} data-kind={f.type}>
           <div class="insp-head">
-            <FolderIcon kind={f.type} color={f.color} size={22} />
+            <FolderIcon kind={f.type} size={22} />
             <div>
               <b class="insp-name">{v.name}</b>
               <div><span class={`chip type-${f.type}`}>{t(FOLDER_TYPE_LABELS[f.type])}</span></div>
@@ -117,14 +117,6 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
           </section>
 
           <section class="insp-sec">
-            <h4>{t('颜色')}</h4>
-            <div class="swatches">
-              <button type="button" class:list={['swatch', 'none', { on: !f.color }]} data-act="color" data-folder={f.id} data-color="" title={t('无')} aria-label={t('无')} />
-              {FOLDER_COLORS.map((c) => <button type="button" class:list={['swatch', { on: f.color === c }]} data-act="color" data-folder={f.id} data-color={c} title={t(FOLDER_COLOR_LABELS[c])} aria-label={t(FOLDER_COLOR_LABELS[c])} />)}
-            </div>
-          </section>
-
-          <section class="insp-sec">
             <h4>{t('说明')}</h4>
             <form data-op="info" data-folder={f.id} class="stack">
               <textarea name="description" rows="3" placeholder={t('写给整理者看的说明，显示在文件夹顶部')}>{f.description ?? ''}</textarea>
@@ -179,7 +171,7 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
               {key && <button type="button" data-act="file-action" data-action="reset" data-files={f.id}>{t('退回未归档')}</button>}
               {f.state === 'ignored'
                 ? <button type="button" data-act="file-action" data-action="reset" data-files={f.id}>{t('取消忽略')}</button>
-                : <button type="button" data-act="file-action" data-action="ignore" data-files={f.id} title="I">{t('忽略')}</button>}
+                : <button type="button" data-act="file-action" data-action="ignore" data-files={f.id} title={t('不收录：移出文件夹，放到「已忽略」里（可以恢复）')}>{t('忽略')}</button>}
             </div>
           </section>
           {!key && s && (
@@ -195,7 +187,7 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
                 {s.role && ROLE_LABELS[s.role] && <span class="chip">{t(ROLE_LABELS[s.role])}</span>}
               </p>
               <p class="muted small">{t('规则：{rule}', { rule: t(s.rule) })}{s.note && ` · ${s.note}`}</p>
-              <button type="button" class="primary" data-act="file-action" data-action="accept" data-files={f.id} title="A">{t('按建议归档')}</button>
+              <button type="button" class="primary" data-act="file-action" data-action="accept" data-files={f.id}>{t('按建议归档')}</button>
             </section>
           )}
           <section class="insp-sec">
@@ -204,8 +196,8 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
             {f.copies > 1 && <p><span class="chip partial">{t('重复 ×{n}', { n: f.copies })}</span> <a href="/admin/inbox?view=p:dups" data-nav>{t('查看疑似重复')}</a></p>}
           </section>
           <section class="insp-sec">
-            <h4>{t('权利')} <span class="help" title={t('社团自有的文件公开站可以播放、下载；第三方只列条目。放进作品时，未知会自动设为社团自有。')}>?</span></h4>
-            <select data-act="rights" data-files={f.id} aria-label={t('权利')}>
+            <h4>{t('权属')} <span class="help" title={t('社团自有和已获授权的文件可以在公开站展示，能否播放、下载在版本页「公开站」里设；第三方只列条目；未定的不公开。文件放进作品时，未定会自动设为社团自有。')}>?</span></h4>
+            <select data-act="rights" data-files={f.id} aria-label={t('权属')}>
               {RIGHTS.map((r) => <option value={r} selected={f.rights === r}>{t(RIGHTS_LABELS[r])}</option>)}
             </select>
             {f.edition_id && f.edition_access && (() => {
@@ -223,7 +215,7 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
             <section class="insp-sec">
               <h4>{t('整体收藏')} <span class="help" title={t('整体收藏：包内文件不单独整理，只在文件页列出清单')}>?</span></h4>
               {f.sealed
-                ? <p>{t('已整体收藏，包内 {n} 个文件不单独整理。', { n: f.members })} <button type="button" data-act="file-action" data-action="unseal" data-files={f.id}>{t('展开')}</button></p>
+                ? <p>{t('已整体收藏，包内 {n} 个文件不单独整理。', { n: f.members })} <button type="button" data-act="file-action" data-action="unseal" data-files={f.id}>{t('展开（包内文件回到整理台）')}</button></p>
                 : <button type="button" data-act="file-action" data-action="seal" data-files={f.id}>{t('整体收藏这个包')}</button>}
             </section>
           )}
@@ -297,17 +289,17 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
           <p class="muted small">{t('已归档 {a} · 有建议 {b} · 已忽略 {c}', { a: s.placed, b: s.suggested, c: s.ignored })}</p>
           <div class="insp-actions">
             <button type="button" data-act="move-selection" title="M">{t('移动到…')}</button>
-            {s.suggested > 0 && <button type="button" class="primary" data-act="file-action" data-action="accept" title="A">{t('按建议归档')}</button>}
-            <button type="button" data-act="file-action" data-action="ignore" title="I">{t('忽略')}</button>
+            {s.suggested > 0 && <button type="button" class="primary" data-act="file-action" data-action="accept">{t('按建议归档')}</button>}
+            <button type="button" data-act="file-action" data-action="ignore" title={t('不收录：移出文件夹，放到「已忽略」里（可以恢复）')}>{t('忽略')}</button>
             {s.placed > 0 && <button type="button" data-act="file-action" data-action="reset">{t('退回未归档')}</button>}
-            <button type="button" data-act="file-action" data-action="dup" title="D">{t('标为重复')}</button>
+            <button type="button" data-act="file-action" data-action="dup">{t('标为重复')}</button>
             {s.archives > 0 && <button type="button" data-act="file-action" data-action="seal">{t('整体收藏压缩包')}</button>}
             {s.sealed > 0 && <button type="button" data-act="file-action" data-action="unseal">{t('展开整体收藏的包')}</button>}
             {s.uploads > 0 && <button type="button" class="danger" data-act="file-action" data-action="discard" title="Delete">{t('删除或忽略')}</button>}
           </div>
           <section class="insp-sec">
-            <h4>{t('权利')}</h4>
-            <select data-act="rights" aria-label={t('权利')}>
+            <h4>{t('权属')}</h4>
+            <select data-act="rights" aria-label={t('权属')}>
               <option value="">{t('（不改）')}</option>
               {RIGHTS.map((r) => <option value={r}>{t(RIGHTS_LABELS[r])}</option>)}
             </select>
@@ -322,7 +314,7 @@ const statusLabel = (s: string) => t(EDITION_STATUS_LABELS[s as keyof typeof EDI
       <div>
         <div class="insp-head"><b class="insp-name">{props.title}</b></div>
         {props.hint && <p class="muted">{props.hint}</p>}
-        <p class="insp-stats">{t('{n} 个文件', { n: props.count })} · {formatBytes(props.bytes)}</p>
+        {props.count !== null && <p class="insp-stats">{t('{n} 个文件', { n: props.count })} · {formatBytes(props.bytes)}</p>}
         {props.link && <p><a href={props.link.href}>{props.link.label} ›</a></p>}
         {props.rules && props.rules.length > 0 && (
           <section class="insp-sec">

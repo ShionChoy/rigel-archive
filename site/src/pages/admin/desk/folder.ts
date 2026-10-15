@@ -1,4 +1,4 @@
-// The 整理台's folder operations, as JSON: {"op": "create" | "create_many" | "rename" | "info" | "color" |
+// The 整理台's folder operations, as JSON: {"op": "create" | "create_many" | "rename" | "info" |
 // "move" | "reorder" | "delete" | "type" | "pin" | "unpin" | "quick_order", ...}. Answers
 // {ok, msg, batch} (batch = what 「撤销」 undoes), or {ok: false, err} / {conflict: [names]} /
 // {confirm: text} when the admin has to choose.
@@ -34,9 +34,6 @@ export const POST: APIRoute = async ({ request, url, locals }) => {
         break;
       case 'info':
         r = await updateFolderInfo(actor, str(body.id), { description: str(body.description), readme_file_id: str(body.readme_file_id) }, t);
-        break;
-      case 'color':
-        r = await updateFolderInfo(actor, str(body.id), { color: str(body.color) }, t);
         break;
       case 'move': {
         const mode = str(body.mode) || 'ask';

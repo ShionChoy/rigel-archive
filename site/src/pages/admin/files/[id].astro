@@ -83,7 +83,7 @@ if (Astro.request.method === 'POST') {
       undo = r.batchId;
     } else if (section === 'seal' || section === 'unseal') {
       const r = await sealArchives(actor, [file.id], section === 'seal');
-      if (r.refused.length) throw new UserError('包内已有文件归档，先把它们退回待整理');
+      if (r.refused.length) throw new UserError('包内已有文件归档，先把它们退回未归档');
       msg = section === 'seal' ? t('已整体收藏，{n} 个包内文件不再单独整理', { n: r.hidden }) : t('已展开，{n} 个包内文件回到整理台', { n: r.hidden });
       undo = r.batchId;
     } else {
@@ -319,9 +319,9 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
       {file.pcm_md5 && (<><label>PCM MD5</label><span class="mono">{file.pcm_md5}</span></>)}
       <label>{t('来源')}</label>
       <span>
-        {file.origin === 'nas' ? t('合辑（本机副本）') : t('后台上传：{who} · {at}', { who: file.uploaded_by ?? '', at: formatTime(file.created_at) })}
+        {file.origin === 'nas' ? t('合辑导入') : t('后台上传：{who} · {at}', { who: file.uploaded_by ?? '', at: formatTime(file.created_at) })}
         {file.gone ? <span class="chip missing">{t('原件已不存在')}</span> : null}
-        {file.gone ? <div class="muted">{t('最近一次导入时 source 里已没有这个文件（可能被移动、改名或删除），这条记录可以删除。')}</div> : null}
+        {file.gone ? <div class="muted">{t('最近一次核对合辑时，原始资料里已经没有这个文件（可能被移动、改名或删除），这条记录可以删除。')}</div> : null}
       </span>
       {
         file.origin === 'upload' && (
@@ -357,7 +357,7 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
           </>
         )
       }
-      <label>{t('存储')}</label><span>{file.blob_key ?? t('尚未上传到存储')}</span>
+      <label>{t('存储')}</label><span>{file.blob_key ?? (file.sha256 ? <a href="#replace">{t('还没有存进网站（只有记录），可以在下面「补传内容」')}</a> : t('没有内容（没能解出）'))}</span>
       {
         track && (
           <>
@@ -442,13 +442,24 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
     )
   }
 
+  {/* A record without its content (a 合辑 file imported without its bytes) takes the same file again first; a
+      different file is a new version. */}
   {
     !newer && (
-      <div class="panel" id="replace" data-file={file.id} data-sha={sha ?? ''}>
-        <b>{t('上传新版本')}</b>{' '}
-        <span class="muted">
-          {t('例如更清晰的扫图、修正过的母带。新版本接替这个文件的作品、栏位、曲目与权属，这个文件保留为旧版本；可在修改记录里撤销。')}
-        </span>
+      <div class="panel" id="replace" data-file={file.id} data-sha={sha ?? ''} data-mode={!file.blob_key && file.sha256 ? 'restore' : 'replace'} data-size={file.size}>
+        {!file.blob_key && file.sha256 ? (
+          <>
+            <b>{t('补传内容')}</b>{' '}
+            <span class="muted">{t('这个文件只有记录，网站里还没有它的内容，所以不能预览或下载。选择同一个原文件即可补上（会核对内容是否完全相同），归档位置和设置都不变。')}</span>
+          </>
+        ) : (
+          <>
+            <b>{t('上传新版本')}</b>{' '}
+            <span class="muted">
+              {t('例如更清晰的扫图、修正过的母带。新版本接替这个文件的作品、栏位、曲目与权属，这个文件保留为旧版本；可在修改记录里撤销。')}
+            </span>
+          </>
+        )}
         <p>
           <label class="button">{t('选择文件')}<input type="file" hidden /></label>
           <span data-status class="muted"></span>
@@ -485,7 +496,7 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
           <input type="hidden" name="new_folder" value="" />
           <button type="button" class="primary" id="file-move" data-current={file.folder_id ? `fd:${file.folder_id}` : undefined}>{t('移动到…')}</button>
         </form>
-        {placeKey && <form method="post" class="inline"><input type="hidden" name="section" value="reset" /><button type="submit">{t('退回待整理')}</button></form>}
+        {placeKey && <form method="post" class="inline"><input type="hidden" name="section" value="reset" /><button type="submit">{t('退回未归档')}</button></form>}
         {file.state !== 'ignored' && <form method="post" class="inline"><input type="hidden" name="section" value="ignore" /><button type="submit">{t('忽略')}</button></form>}
         {archive && (
           <form method="post" class="inline">
@@ -646,9 +657,9 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
         <>
           <p class="muted">
             {fmt.archive
-              ? t('只删除这条记录，连同包内 {n} 个文件，source 里的原件不受影响。', { n: fmt.files ?? 0 })
-              : t('只删除这条记录，source 里的原件不受影响。')}
-            {t('删除后可以在修改记录里撤销；存储里的内容在没有任何文件引用后还会保留 {days} 天。', { days: env.STORAGE_GRACE_DAYS || 30 })}
+              ? t('删除这条记录，连同包内 {n} 个文件。', { n: fmt.files ?? 0 })
+              : t('删除这条记录。')}
+            {t('{days} 天内可以在整理台的「回收站」或修改记录里恢复。', { days: env.STORAGE_GRACE_DAYS || 30 })}
           </p>
           <label><input type="checkbox" name="confirm" value="yes" required /> {t('确认删除')}</label>{' '}
           <button class="danger" type="submit">{t('删除')}</button>
@@ -695,9 +706,24 @@ const myDuration = fingerprint?.duration ?? fmt.duration ?? 0;
     try {
       say(t('计算 SHA-256'), 0);
       const sha = await hashFile(file, (done) => say(t('计算 SHA-256'), done));
-      if (sha === box.dataset.sha) throw new Error(t('新文件与原文件内容完全相同'));
+      const restore = box.dataset.mode === 'restore';
+      // Refusals, not interruptions: nothing to continue by choosing the file again.
+      if (restore && (sha !== box.dataset.sha || file.size !== Number(box.dataset.size))) {
+        say(t('选的文件和这条记录的内容不一样（SHA-256 不符），不能补传。要换成别的文件，请在补传后用「上传新版本」。'));
+        return;
+      }
+      if (!restore && sha === box.dataset.sha) {
+        say(t('新文件与原文件内容完全相同'));
+        return;
+      }
       const check = await call<{ stored: boolean }>('/admin/api/upload/check', { sha256: sha });
       if (!check.stored) await storeFile(file, sha, (loaded) => say(t('上传中'), file.size ? loaded / file.size : 1));
+      if (restore) {
+        say(t('补上内容'));
+        await call('/admin/api/upload/restore', { file: box.dataset.file, sha256: sha, size: file.size });
+        location.href = `${location.pathname}?msg=${encodeURIComponent(t('内容已补上，可以预览和下载了'))}`;
+        return;
+      }
       say(t('登记新版本'));
       const { id } = await call<{ id: string }>('/admin/api/upload/replace', {
         old: box.dataset.file, sha256: sha, size: file.size, name: file.name, mtime: new Date(file.lastModified).toISOString(),
