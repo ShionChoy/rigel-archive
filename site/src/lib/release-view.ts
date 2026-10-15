@@ -6,7 +6,7 @@
 //
 // Everything is plain data with its links worked out here (media, downloads), so the page itself only draws.
 
-import { mimeFor } from './constants';
+import { EXTRA_AUDIO, mimeFor } from './constants';
 import { COVER_NAME } from './covers';
 import { parseFormat, type EditionRow, type FileRow, type ReleaseRow } from './db';
 import { comparison, defaultEdition, loadEditions, parseIds, trackTitle } from './editions';
@@ -24,14 +24,18 @@ import { effectiveTags, parseTags, type Tags } from './tagging/model';
 import { parseCover } from './tags';
 import { formatMs } from './tracks';
 
-type F = Pick<FileRow, 'id' | 'name' | 'download_name' | 'kind' | 'ext' | 'edition_id' | 'folder_id' | 'track_id' | 'format' | 'size' | 'sha256' | 'blob_key' | 'source_path' | 'member_path' | 'rights'
+type F = Pick<FileRow, 'id' | 'name' | 'download_name' | 'kind' | 'ext' | 'role' | 'edition_id' | 'folder_id' | 'track_id' | 'format' | 'size' | 'sha256' | 'blob_key' | 'source_path' | 'member_path' | 'rights'
   | 'pub_visible' | 'pub_play' | 'pub_clip' | 'pub_quality' | 'pub_download'>;
 type Row = {
   id: string; disc: number; position: number; track_id: string; tags: string; cover: string | null;
   entry_title: string; version_label: string | null; song_id: string | null; duration_ms: number | null; entry_duration: number | null;
 };
 
-export interface NavEdition { id: string; name: string; sub: string; cover: string | null }
+export interface NavEdition {
+  id: string; name: string; sub: string; cover: string | null;
+  /** Its page leads with videos (a PV): the cover is a video's poster frame. */
+  video: boolean;
+}
 export interface Line {
   disc: number; position: number; title: string; sub: string; seconds: number | null; cover: string | null;
   sources: Source[] | null;
@@ -43,9 +47,17 @@ export interface Line {
   preparing: boolean;
 }
 export interface Picture { href: string; thumb: string; caption: string }
-export interface Video { name: string; poster: string | null; sources: Source[] }
+export interface Video {
+  id: string; name: string; poster: string | null; sources: Source[];
+  seconds: number | null; width: number | null; height: number | null;
+  spec: string | null; // «1080p»
+}
 export interface Doc { name: string; size: string; view: string | null; download: string | null; listed: boolean }
-export interface Attachments { label: string; pictures: (Picture | { name: string })[]; videos: Video[]; docs: Doc[] }
+/** Audio that is not one of the tracks (a whole-disc rip, an XFD): played and downloaded like a track's file. */
+export interface Sound extends Pick<Line, 'title' | 'sub' | 'seconds' | 'cover' | 'sources' | 'file' | 'clip' | 'preparing'> {
+  name: string; size: string; download: string | null; listed: boolean;
+}
+export interface Attachments { label: string; sounds: Sound[]; pictures: (Picture | { name: string })[]; videos: Video[]; docs: Doc[] }
 export interface ChosenView {
   id: string;
   name: string; // «CD 抓轨 · 初版»
@@ -57,6 +69,8 @@ export interface ChosenView {
   descriptionOriginal: boolean; // no translation in the page's language: the original is shown (marked 「原文」)
   note: string | null; // an edition without tracks
   covers: { src: string; n: number }[];
+  /** An edition that is only videos (a PV: no track list, no audio, no pictures): they take the cover's place. */
+  videos: Video[];
   differentCovers: boolean;
   multiDisc: boolean;
   lines: Line[];
@@ -156,7 +170,7 @@ export async function loadReleaseView(
   const [filesResult, titles, rowsResult, forms] = await Promise.all([
     database
       .prepare(
-        `SELECT id, name, download_name, kind, ext, edition_id, folder_id, track_id, format, size, sha256, blob_key, source_path, member_path, rights,
+        `SELECT id, name, download_name, kind, ext, role, edition_id, folder_id, track_id, format, size, sha256, blob_key, source_path, member_path, rights,
                 pub_visible, pub_play, pub_clip, pub_quality, pub_download FROM files f
          WHERE release_id = ? AND edition_id IS NOT NULL AND state IN ('classified', 'published') AND dup_of IS NULL AND sealed_in IS NULL
            AND NOT EXISTS (SELECT 1 FROM files n WHERE n.replaces = f.id)
@@ -231,6 +245,32 @@ export async function loadReleaseView(
     return small || urls.fullPictures ? urls.original(f, true) : null;
   };
   const imageUrl = (f: F, size: 240 | 640 | 1600) => (open(f) ? imageSrc(pictureOriginal(f), derivedOf(f), size, urls) : null);
+  /** A video as the page plays it (its MP4 copy first, then the original); no sources when none is there. */
+  const videoOf = (f: F): Video => {
+    const fmt = parseFormat(f.format);
+    const short = fmt.width && fmt.height ? Math.min(fmt.width, fmt.height) : fmt.height;
+    return {
+      id: f.id, name: f.download_name || f.name, seconds: fmt.duration ?? null, width: fmt.width ?? null, height: fmt.height ?? null,
+      spec: short ? `${short}p` : null,
+      ...videoSources(urls.original(f, false), derivedOf(f), mimeFor(f.ext), urls),
+    };
+  };
+  /**
+   * The videos an edition leads with: those of an edition that is only videos (a PV) — no track list, no audio
+   * and no pictures shown, at least one video to play. Empty for any other edition.
+   */
+  const leadCache = new Map<string, Video[]>();
+  const leadVideos = (editionId: string): Video[] => {
+    let lead = leadCache.get(editionId);
+    if (!lead) {
+      const list = files.filter((f) => f.edition_id === editionId);
+      const onlyVideos = !trackCounts.get(editionId) && !list.some((f) => f.kind === 'audio' || f.kind === 'image');
+      lead = onlyVideos ? list.filter((f) => f.kind === 'video' && open(f)).map(videoOf).filter((v) => v.sources.length > 0) : [];
+      leadCache.set(editionId, lead);
+    }
+    return lead;
+  };
+  const seconds = (videos: Video[]) => videos.reduce((s, v) => s + (v.seconds ?? 0), 0);
   /** The cover a row shows: its chosen one, else the one its (best) file carries. */
   const rowCover = (editionId: string, row: { track_id: string; cover: string | null }): string | null => {
     const c = parseCover(row.cover);
@@ -245,7 +285,10 @@ export async function loadReleaseView(
     }
     return null;
   };
-  /** An edition without a track list: its chosen picture, else one named like a cover, else its first picture, else what its audio carries. */
+  /**
+   * An edition without a track list: its chosen picture, else one named like a cover, else its first picture,
+   * else what its audio carries, else (an edition of videos only) its first video's poster frame.
+   */
   const editionCover = (e: EditionRow): string | null => {
     const images = files.filter((f) => f.edition_id === e.id && f.kind === 'image' && open(f));
     const chosenFile = e.cover_file_id ? images.find((f) => f.id === e.cover_file_id) : undefined;
@@ -255,7 +298,7 @@ export async function loadReleaseView(
       const own1 = f.sha256 ? own.get(f.sha256) : undefined;
       if (own1?.cover) return picture(own1.cover);
     }
-    return null;
+    return leadVideos(e.id).find((v) => v.poster)?.poster ?? null;
   };
   // Nav thumbnails: the most used row cover of each edition.
   const { results: navRows } = shown.length
@@ -278,9 +321,11 @@ export async function loadReleaseView(
     return [...counts].sort((a, b) => b[1] - a[1]).map(([src, n]) => ({ src, n }));
   };
   const navSub = (e: EditionRow) => {
-    const n = trackCounts.get(e.id) ?? files.filter((f) => f.edition_id === e.id && f.kind === 'audio').length;
+    const n = trackCounts.get(e.id) ?? files.filter((f) => f.edition_id === e.id && f.kind === 'audio' && f.role !== EXTRA_AUDIO).length;
     const pics = files.filter((f) => f.edition_id === e.id && f.kind === 'image').length;
-    return [e.catalog_no ?? release.catalog_no, e.release_date, n ? t('{n} 曲', { n }) : pics ? t('{n} 张', { n: pics }) : null].filter(Boolean).join(' · ');
+    const lead = leadVideos(e.id);
+    const what = n ? t('{n} 曲', { n }) : lead.length ? t('{n} 个视频', { n: lead.length }) : pics ? t('{n} 张', { n: pics }) : null;
+    return [e.catalog_no ?? release.catalog_no, e.release_date, what, lead.length && seconds(lead) ? clock(seconds(lead)) : null].filter(Boolean).join(' · ');
   };
   const years = [...new Set(shown.map((e) => (e.release_date ?? release.release_date ?? '').slice(0, 4)).filter(Boolean))].sort();
 
@@ -289,7 +334,7 @@ export async function loadReleaseView(
     formLabel: forms.label(release.form, t),
     subline: [subtitles[0], years.length ? (years.length > 1 ? `${years[0]}–${years.at(-1)}` : years[0]) : release.release_date, shown.length ? t('{n} 个版本', { n: shown.length }) : null].filter(Boolean).join(' · '),
     pages: releasePages(release.links, t),
-    editions: shown.map((e) => ({ id: e.id, name: editionName(e), sub: navSub(e), cover: coversOf(e)[0]?.src ?? null })),
+    editions: shown.map((e) => ({ id: e.id, name: editionName(e), sub: navSub(e), cover: coversOf(e)[0]?.src ?? null, video: leadVideos(e.id).length > 0 })),
     chosen: null,
     compare: compareView ? await publicComparison(release.id, new Set(shown.map((e) => e.id))) : null,
     compareNames: new Map(shown.map((e) => [e.id, editionName(e)])),
@@ -300,8 +345,9 @@ export async function loadReleaseView(
 
   // ---------------------------------------------------------------- the chosen edition
   interface Raw { row: Row; tags: Tags; src: F | null; cover: string | null; seconds: number | null }
-  // An edition with audio but no track list yet plays its files in name order, with the tags they carry.
-  const byName = rows.length === 0 ? audio.filter(playable).sort((a, b) => (a.download_name || a.name).localeCompare(b.download_name || b.name, 'ja', { numeric: true })) : [];
+  // An edition with audio but no track list yet plays its files in name order, with the tags they carry
+  // (audio marked 「不是曲目」 goes with the attachments).
+  const byName = rows.length === 0 ? audio.filter((f) => f.role !== EXTRA_AUDIO && playable(f)).sort((a, b) => (a.download_name || a.name).localeCompare(b.download_name || b.name, 'ja', { numeric: true })) : [];
   const fileLines: Raw[] = byName.map((f, i) => {
     const e = f.sha256 ? own.get(f.sha256) : undefined;
     const tags: Tags = { ...(e?.tags ?? {}) };
@@ -335,11 +381,13 @@ export async function loadReleaseView(
     return values.size ? [...values].join(' / ') : null;
   };
   const covers = coversOf(chosen);
-  const total = raws.reduce((s, l) => s + (l.seconds ?? 0), 0);
+  const lead = leadVideos(chosen.id);
+  const total = raws.reduce((s, l) => s + (l.seconds ?? 0), 0) + seconds(lead);
   const specs = [...new Set(audio.filter((f) => raws.some((l) => l.src?.id === f.id)).map((f) => {
     const fmt = parseFormat(f.format);
     return fmt.lossless ? `${(f.ext || fmt.codec || '').toUpperCase()} ${fmt.bits ?? '?'} bit / ${+((fmt.rate ?? 0) / 1000).toFixed(1)} kHz` : `${(f.ext || '').toUpperCase()} ${fmt.kbps ?? '?'} kbps`;
   }))];
+  for (const v of lead) if (v.spec && !specs.includes(v.spec)) specs.push(v.spec);
   const ids = parseIds(chosen.external_ids);
   const withTracks = raws.length > 0;
   const credits = ([
@@ -351,24 +399,44 @@ export async function loadReleaseView(
     [t('来源'), chosen.source],
   ] as [string, string | null][]).filter((c): c is [string, string] => !!c[1]);
 
-  // Attachments: the edition's files that are not its tracks, by folder (images as a gallery). The files
-  // directly in the edition's folder come first, then each folder below it by its path (as the organizers
-  // made them); a single group needs no heading.
+  // Attachments: the edition's files that are not its tracks, by folder (audio playable like the tracks,
+  // images as a gallery). The files directly in the edition's folder come first, then each folder below it
+  // by its path (as the organizers made them); a single group needs no heading.
   const home = places.editionFolder(chosen.id);
   const folderPath = (folderId: string | null) => {
     if (!folderId || !home || folderId === home.id) return '';
     const chain = places.chain(`fd:${folderId}`);
     return chain.slice(chain.indexOf(`fd:${home.id}`) + 1).map((k) => places.name(k, t)).join(' / ');
   };
-  const others = mine.filter((f) => f.kind !== 'audio' || (rows.length > 0 && !raws.some((l) => l.row.track_id === f.track_id)));
+  const leadIds = new Set(lead.map((v) => v.id));
+  const others = mine.filter((f) => !leadIds.has(f.id)
+    && (f.kind !== 'audio' || f.role === EXTRA_AUDIO || (rows.length > 0 && !raws.some((l) => l.row.track_id === f.track_id))));
   const groups = [...new Set(others.map((f) => folderPath(f.folder_id)))].sort((a, b) => a.localeCompare(b, 'ja', { numeric: true }));
   const attachments: Attachments[] = groups.map((g) => {
     const inGroup = others.filter((f) => folderPath(f.folder_id) === g);
-    const videos = inGroup.filter((f) => f.kind === 'video' && open(f))
-      .map((f) => ({ name: f.download_name || f.name, ...videoSources(urls.original(f, false), derivedOf(f), mimeFor(f.ext), urls) }))
-      .filter((v) => v.sources.length > 0);
+    const videos = inGroup.filter((f) => f.kind === 'video' && open(f)).map(videoOf).filter((v) => v.sources.length > 0);
     return {
       label: groups.length > 1 ? g : '',
+      sounds: inGroup.filter((f) => f.kind === 'audio').map((f) => {
+        const listed = !open(f);
+        const sources = playable(f) ? versionsOf(f) : null;
+        const e = f.sha256 && showsCover(f) ? own.get(f.sha256) : undefined;
+        const name = f.download_name || f.name;
+        return {
+          name,
+          title: e?.tags.title?.[0] ?? name.replace(/\.[^.]+$/, ''),
+          sub: (e?.tags.artist ?? []).join(' / '),
+          seconds: parseFormat(f.format).duration ?? null,
+          cover: e?.cover ? picture(e.cover) : null,
+          sources,
+          file: sources ? f.id : null,
+          clip: sources && access(f).play === 'clip' ? (sources.find((v) => v.span)?.span ?? null) : null,
+          preparing: !sources && !listed && access(f).play === 'clip',
+          size: listed ? t('只列条目') : formatBytes(f.size),
+          download: !listed && access(f).download ? links.fileDownload(f) : null,
+          listed,
+        };
+      }),
       pictures: inGroup.filter((f) => f.kind === 'image').map((f) => {
         const href = imageUrl(f, 1600);
         const fmt = parseFormat(f.format);
@@ -395,13 +463,15 @@ export async function loadReleaseView(
     name: editionName(chosen),
     status: chosen.status,
     albumTitle: common('album') ?? chosen.album_title ?? release.title,
-    subline: [chosen.catalog_no ?? release.catalog_no, chosen.release_date ?? release.release_date, withTracks ? t('{n} 曲', { n: raws.length }) : null,
+    subline: [chosen.catalog_no ?? release.catalog_no, chosen.release_date ?? release.release_date,
+      withTracks ? t('{n} 曲', { n: raws.length }) : lead.length > 1 ? t('{n} 个视频', { n: lead.length }) : null,
       total ? clock(total) : null, specs.join(' / ') || null].filter(Boolean).join(' · '),
     credits,
     description: description && chosen.is_default ? description : null,
     descriptionOriginal: !translated && opts.lang !== 'ja',
     note: !withTracks ? chosen.note : null,
     covers,
+    videos: lead,
     differentCovers: new Set(raws.map((l) => l.cover).filter(Boolean)).size > 1,
     multiDisc: raws.some((l) => l.row.disc > 1),
     lines: raws.map((l) => ({

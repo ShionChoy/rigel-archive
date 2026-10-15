@@ -90,6 +90,7 @@ export const EN: Record<string, string> = {
   '下载': 'Download',
   '{n} 曲': '{n} {n:track|tracks}',
   '{n} 张': '{n} {n:image|images}',
+  '{n} 个视频': '{n} {n:video|videos}',
   '{n} 个版本': '{n} {n:edition|editions}',
   '艺术家': 'Artist',
   '作曲': 'Composer',

@@ -358,6 +358,16 @@ function setUp(root: HTMLElement) {
     }
   });
   audio.addEventListener('play', render);
+  // One sound at a time: a video on the page (a PV, an attachment) pauses the player and the other videos,
+  // and the player pauses the videos. «play» does not bubble, so the page's are caught on the way down.
+  audio.addEventListener('play', () => {
+    for (const v of Array.from(document.querySelectorAll('video'))) if (!v.paused) v.pause();
+  });
+  document.addEventListener('play', (e) => {
+    if (!(e.target instanceof HTMLVideoElement)) return;
+    if (!audio.paused) audio.pause();
+    for (const v of Array.from(document.querySelectorAll('video'))) if (v !== e.target && !v.paused) v.pause();
+  }, true);
   audio.addEventListener('pause', () => {
     render();
     save(true);

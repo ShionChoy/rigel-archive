@@ -1,12 +1,13 @@
 ---
 // The album page (作品页) of a release, drawn from lib/release-view.ts: on the left the collected editions
 // (each with its own address), on the right the chosen one — covers, information, tracks that play only its
-// own files, attachments — or 「版本对照」. On a phone the editions become a row of buttons above.
+// own files, attachments (their audio plays too) — or 「版本对照」. An edition of videos only (a PV) shows
+// them in the cover's place. On a phone the editions become a row of buttons above.
 // The page around it (its <html>, colours, the player) is the caller's: the public site's layouts/Site.astro,
 // or the admin's pages/admin/releases/[id]/preview.astro. Tracks play in components/Player.astro.
 import { RELATION_MARK, RELATION_TEXT } from '../lib/editions';
 import { withParams } from '../lib/format';
-import { formatClock, type ReleaseView } from '../lib/release-view';
+import { formatClock, type Line, type ReleaseView } from '../lib/release-view';
 
 interface Props {
   view: ReleaseView;
@@ -20,7 +21,7 @@ const { release, chosen, compare } = view;
 const editionHref = (id: string) => withParams(url, { edition: id, view: null });
 // What the player shows of this edition's tracks (components/Player.astro reads it).
 const album = chosen ? `${release.title}${chosen.name ? ` · ${chosen.name}` : ''}` : release.title;
-const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify({
+const item = (l: Pick<Line, 'file' | 'title' | 'sub' | 'cover' | 'sources'>) => JSON.stringify({
   file: l.file, title: l.title, sub: l.sub, album, cover: l.cover ?? chosen?.covers[0]?.src ?? null,
   href: chosen ? editionHref(chosen.id) : url.pathname, sources: l.sources, exp: view.expires,
 });
@@ -44,7 +45,10 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
         <h2>{t('版本')}</h2>
         {view.editions.map((e) => (
           <a href={editionHref(e.id)} class:list={{ on: chosen?.id === e.id }} aria-current={chosen?.id === e.id ? 'page' : undefined}>
-            {e.cover ? <img src={e.cover} alt="" loading="lazy" /> : <span class="blank"></span>}
+            <span class="thumb">
+              {e.cover ? <img src={e.cover} alt="" loading="lazy" /> : <span class="blank"></span>}
+              {e.video && <span class="badge"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg></span>}
+            </span>
             <span><span class="name">{e.name}</span><br /><span class="meta">{e.sub}</span></span>
           </a>
         ))}
@@ -88,15 +92,28 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
 
         {chosen && (
           <>
-            <div class="ed-head">
-              <div>
-                {chosen.covers[0] ? <img class="cover" id="big-cover" src={chosen.covers[0].src} alt="" width="640" height="640" fetchpriority="high" /> : <div class="nocover">{t('无封面')}</div>}
-                {chosen.covers.length > 1 && (
-                  <div class="thumbs">
-                    {chosen.covers.map((c, i) => <button type="button" class:list={{ on: i === 0 }} data-cover={c.src} title={t('用于 {n} 首', { n: c.n })}><img src={c.src} alt="" /></button>)}
-                  </div>
-                )}
-              </div>
+            <div class:list={['ed-head', { 'ed-video': chosen.videos.length > 0 }]}>
+              {chosen.videos.length > 0 ? (
+                <div class="lead">
+                  {chosen.videos.map((v, i) => (
+                    <figure data-lead={i} hidden={i > 0}>
+                      <video controls preload="none" poster={v.poster ?? undefined} playsinline width={v.width ?? undefined} height={v.height ?? undefined}>
+                        {v.sources.map((s) => <source src={s.src} type={s.type} />)}
+                      </video>
+                      <figcaption>{v.name}</figcaption>
+                    </figure>
+                  ))}
+                </div>
+              ) : (
+                <div>
+                  {chosen.covers[0] ? <img class="cover" id="big-cover" src={chosen.covers[0].src} alt="" width="640" height="640" fetchpriority="high" /> : <div class="nocover">{t('无封面')}</div>}
+                  {chosen.covers.length > 1 && (
+                    <div class="thumbs">
+                      {chosen.covers.map((c, i) => <button type="button" class:list={{ on: i === 0 }} data-cover={c.src} title={t('用于 {n} 首', { n: c.n })}><img src={c.src} alt="" /></button>)}
+                    </div>
+                  )}
+                </div>
+              )}
               <div>
                 <div class="ed-kind">{chosen.name}</div>
                 <div class="ed-title">{chosen.albumTitle}</div>
@@ -122,6 +139,20 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
                 </div>
               </div>
             </div>
+
+            {chosen.videos.length > 1 && (
+              <div class="lead-list">
+                {chosen.videos.map((v, i) => (
+                  <button type="button" class:list={{ on: i === 0 }} data-show={i} aria-pressed={i === 0 ? 'true' : 'false'}>
+                    {v.poster ? <img src={v.poster} alt="" loading="lazy" /> : <span class="blank"></span>}
+                    <span class="text">
+                      <span class="name">{v.name}</span>
+                      <span class="meta">{[v.seconds ? formatClock(v.seconds) : null, v.spec].filter(Boolean).join(' · ')}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
 
             {chosen.withTracks && (
               <section>
@@ -150,7 +181,7 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
               </section>
             )}
 
-            {!chosen.withTracks && chosen.attachments.length === 0 && (
+            {!chosen.withTracks && chosen.videos.length === 0 && chosen.attachments.length === 0 && (
               <p class="muted">{chosen.hidden ? t('这个版本的文件暂不公开。') : t('这个版本还没有收录文件。')}</p>
             )}
 
@@ -160,6 +191,25 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
                 {chosen.attachments.map((g) => (
                   <>
                     {g.label && <div class="group">{g.label}</div>}
+                    {g.sounds.length > 0 && (
+                      <table class="sounds" data-queue>
+                        <tbody>
+                          {g.sounds.map((s) => (
+                            <tr data-track={s.sources ? item(s) : undefined} data-file={s.file ?? undefined}>
+                              <td>
+                                {s.name}
+                                {s.clip && <span class="clip-mark" title={t('只能试听这一段')}>{t('试听 {from}–{to}', { from: formatClock(s.clip[0]), to: formatClock(s.clip[1]) })}</span>}
+                                {s.preparing && <span class="clip-mark muted">{t('试听准备中')}</span>}
+                              </td>
+                              <td class="time">{s.seconds ? formatClock(s.seconds) : ''}</td>
+                              <td class="muted" style="width:6em">{s.size}</td>
+                              {g.sounds.some((x) => x.download) && <td style="width:4em">{s.download ? <a href={s.download}>{t('下载')}</a> : null}</td>}
+                              <td class="play">{s.sources ? <button type="button" class="play" data-play aria-label={t('播放 {title}', { title: s.title })}><svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg><svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" /></svg></button> : null}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
                     {g.videos.length > 0 && (
                       <div class="videos">
                         {g.videos.map((v) => (
@@ -220,7 +270,10 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
   .release nav.editions a { display: grid; grid-template-columns: 44px 1fr; gap: 10px; align-items: center; padding: 6px; border-radius: 8px; color: var(--ink); text-decoration: none; }
   .release nav.editions a:hover { background: var(--now); }
   .release nav.editions a.on { background: var(--now); box-shadow: inset 3px 0 0 var(--accent); }
+  .release nav.editions .thumb { position: relative; display: block; width: 44px; height: 44px; }
   .release nav.editions img, .release nav.editions .blank { width: 44px; height: 44px; object-fit: cover; border-radius: 4px; background: var(--blank); display: block; }
+  .release nav.editions .badge { position: absolute; right: 3px; bottom: 3px; width: 16px; height: 16px; border-radius: 50%; background: rgb(0 0 0 / 0.62); color: #fff; display: grid; place-items: center; }
+  .release nav.editions .badge svg { width: 10px; height: 10px; fill: currentColor; margin-left: 1px; }
   .release nav.editions .name { font-size: 14px; line-height: 1.35; }
   .release nav.editions .meta { font-size: 12px; color: var(--muted); }
   .release nav.editions hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
@@ -229,6 +282,18 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
   .release .cover { width: 100%; height: auto; aspect-ratio: 1; object-fit: cover; border-radius: 8px; background: var(--blank); display: block; box-shadow: 0 6px 22px rgb(0 0 0 / 0.14); }
   .release .nocover { width: 100%; aspect-ratio: 1; border-radius: 8px; background: var(--blank); display: grid; place-items: center; color: var(--muted); }
   .release .thumbs { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .release .ed-head.ed-video { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .release .lead figure { margin: 0; }
+  .release .lead video { width: 100%; height: auto; max-height: 72vh; background: #000; border-radius: 8px; display: block; box-shadow: 0 6px 22px rgb(0 0 0 / 0.14); }
+  .release .lead figcaption { color: var(--muted); font-size: 13px; margin-top: 6px; overflow-wrap: anywhere; }
+  .release .lead-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin-top: 20px; }
+  .release .lead-list button { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 8px; padding: 0 0 8px; overflow: hidden; text-align: left; cursor: pointer; font: inherit; }
+  .release .lead-list button:hover { border-color: var(--muted); }
+  .release .lead-list button.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .release .lead-list img, .release .lead-list .blank { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: var(--blank); display: block; margin-bottom: 6px; }
+  .release .lead-list .text { display: grid; gap: 2px; padding: 0 10px; min-width: 0; }
+  .release .lead-list .name { font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+  .release .lead-list .meta { font-size: 12px; color: var(--muted); }
   .release .thumbs button { border: 2px solid transparent; padding: 0; border-radius: 6px; background: none; cursor: pointer; }
   .release .thumbs button.on { border-color: var(--accent); }
   .release .thumbs img { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; display: block; }
@@ -270,7 +335,7 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
   .release .videos video { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; display: block; }
   .release .videos figcaption { color: var(--muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
   .release .group { margin-top: 14px; font-size: 13px; color: var(--muted); }
-  .release .docs td { font-size: 14px; overflow-wrap: anywhere; }
+  .release .docs td, .release .sounds td { font-size: 14px; overflow-wrap: anywhere; }
   .release .muted { color: var(--muted); }
   .release .compare { overflow-x: auto; }
   .release .compare td, .release .compare th { font-size: 12px; white-space: nowrap; text-align: center; }
@@ -283,13 +348,16 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
   @media (max-width: 860px) {
     .release .layout { grid-template-columns: 1fr; gap: 14px; }
     .release nav.editions { position: static; display: flex; align-items: flex-start; gap: 6px; overflow-x: auto; padding: 0; border: 0; border-radius: 0; background: none; scrollbar-width: none; }
-    .release nav.editions h2, .release nav.editions hr, .release nav.editions .meta, .release nav.editions img, .release nav.editions .blank, .release nav.editions .compare-link .blank, .release nav.editions br { display: none; }
+    .release nav.editions h2, .release nav.editions hr, .release nav.editions .meta, .release nav.editions .thumb, .release nav.editions .compare-link .blank, .release nav.editions br { display: none; }
     .release nav.editions a { display: block; white-space: nowrap; border: 1px solid var(--line); border-radius: 18px; padding: 4px 12px; background: var(--card); flex: none; }
     .release nav.editions a.on { background: var(--accent); color: var(--on-accent); box-shadow: none; border-color: var(--accent); }
     .release .ed-head { grid-template-columns: 1fr; gap: 14px; }
     .release .ed-head .cover, .release .ed-head .nocover { max-width: 360px; }
     .release h1 { font-size: 24px; }
     .release td.cv { display: none; }
+    .release .lead-list { grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 16px; }
+    .release .lead-list button { flex-direction: row; align-items: center; padding: 0; }
+    .release .lead-list img, .release .lead-list .blank { width: 112px; flex: none; margin: 0; }
   }
 </style>
 
@@ -308,6 +376,26 @@ const item = (l: NonNullable<typeof chosen>['lines'][number]) => JSON.stringify(
       const big = document.querySelector<HTMLImageElement>('#big-cover');
       if (big) big.src = thumb.dataset.cover!;
       document.querySelectorAll('[data-cover]').forEach((x) => x.classList.toggle('on', x === thumb));
+      return;
+    }
+    // An edition of several videos: the list below the information puts one in the player above.
+    const show = target.closest<HTMLButtonElement>('[data-show]');
+    if (show) {
+      let shown: HTMLElement | null = null;
+      for (const figure of Array.from(document.querySelectorAll<HTMLElement>('[data-lead]'))) {
+        const on = figure.dataset.lead === show.dataset.show;
+        if (!on) figure.querySelector('video')?.pause();
+        figure.hidden = !on;
+        if (on) shown = figure;
+      }
+      for (const b of Array.from(document.querySelectorAll<HTMLElement>('[data-show]'))) {
+        b.classList.toggle('on', b === show);
+        b.setAttribute('aria-pressed', String(b === show));
+      }
+      if (shown) {
+        shown.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        shown.querySelector('video')?.play().catch(() => {});
+      }
       return;
     }
     // Pictures and text files open over the page.
