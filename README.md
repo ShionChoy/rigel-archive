@@ -16,22 +16,22 @@
 | `tools/ra/backup.env` | B2 密钥与备份加密口令；只在本机，不进 git，**另存一份到密码管理器** |
 | `data/seed/catalog.yaml` | 初始作品目录（53 个作品；各作品原来的 7 个版本栏位状态自迁移 0008 起不再导入）；导入后以数据库为准 |
 
-原件工作区在 `D:\documents\projects\rigel-archive`（WSL 下为 `/mnt/d/documents/projects/rigel-archive`）：
+本机工作区是仓库里的 `workspace/`（已在 `.gitignore` 里排除，不进 git；可用环境变量 `RA_WORKSPACE` 改到别处）。
+2026-11-02 从原来的 `D:\documents\projects\rigel-archive` 搬来，只留了还用得上的部分：
 
 | 目录 | 内容 |
 | --- | --- |
-| `source/Rigel Theatre合辑` | 合辑原件，所有工具只读不写 |
-| `extracted/<SHA-256 前 16 位>/` | `ra extract` 解开的压缩包与光盘镜像，按包的内容命名，相同的包只解一次 |
-| `manifest/scan.jsonl` | `ra scan`：每个文件的大小、修改时间、SHA-256 |
+| `backups/` | `npm run db:backup` 导出的线上数据库 |
+| `manifest/scan.jsonl` | `ra scan`：合辑每个文件的大小、修改时间、SHA-256 |
 | `manifest/archives/<SHA-256>.json` | `ra extract`：每个包的格式、文件名编码、状态和包内文件清单（含 SHA-256） |
 | `manifest/probe.jsonl` | `ra probe`：音频、视频、图片的规格、内嵌标签与 PCM MD5 |
-| `manifest/push-state.json` | `ra push`：大文件分块上传的进度，中断后从这里接着传 |
-| `manifest/push.log` | `ra push` 的运行记录 |
-| `tmp/` | `ra worker` 下载与解包用的临时目录，处理完即删 |
-| `backups/` | `npm run db:backup` 导出的线上数据库 |
 
-2026-09-24 起本机的 `source/` 与 `extracted/` 已清空：原件在 R2 和 NAS 上（B2 备份开通后另有一份）。以后导入新的合辑文件时，
-先放回 `source/` 再走导入流程，传完即可再删。
+`ra seed` 和 `ra report` 读这三份清单。不要删掉它们之后再把 `ra seed` 的结果导入线上：清单不在时文件列表是空的，
+导入后线上所有合辑文件都会被当成"原件已不在"，整理台对它们的删除保护随之失效。
+
+以下目录与文件现在都不存在，需要时再放回工作区：`source/Rigel Theatre合辑`（合辑原件，所有工具只读不写；
+原件在 R2 和 NAS 上，以后导入新的合辑文件时先放到这里，传完即可再删）、`extracted/<SHA-256 前 16 位>/`（`ra extract`
+解开的压缩包）、`tmp/`（`ra worker` 的临时目录）、`manifest/push-state.json` 与 `manifest/push.log`（`ra push` 的进度与记录）。
 
 ## 线上（Cloudflare）
 
@@ -104,7 +104,7 @@ RK 自解压包（2002 年前后的 BMS 包）7-Zip 和 Bandizip 都打不开，
 
 ## 在云端开发（全新检出）
 
-仓库里只有代码：密钥（`cloud.env`、`backup.env`、`site/.dev.vars`）、原件工作区和线上数据都不在仓库里，也不要放进来。
+仓库里只有代码：密钥（`cloud.env`、`backup.env`、`site/.dev.vars`）、本机工作区 `workspace/` 和线上数据都不在仓库里，也不要放进来。
 在 Claude Code 网页版等云端环境，或任何全新检出里：
 
 ```sh

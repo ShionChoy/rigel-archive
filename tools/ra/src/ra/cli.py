@@ -26,7 +26,7 @@ from .processing import TASKS, Inputs, run_derive, run_fingerprint, run_matching
 _HERE = Path(__file__).resolve()
 # The repository (tools/ra/src/ra/cli.py → four levels up); inside the container image there is none.
 REPO = _HERE.parents[4] if len(_HERE.parents) > 4 else _HERE.parents[-1]
-WORKSPACE = Path(os.environ.get("RA_WORKSPACE", "/mnt/d/documents/projects/rigel-archive"))
+WORKSPACE = Path(os.environ.get("RA_WORKSPACE", REPO / "workspace"))
 
 DEFAULT_CATALOG = REPO / "data" / "seed" / "catalog.yaml"
 DEFAULT_RULES = REPO / "tools" / "ra" / "rules" / "mapping.yaml"

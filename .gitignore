@@ -17,3 +17,6 @@ cloud.env
 
 # Encryption keys and B2 credentials for the backup (ra backup)
 backup.env
+
+# The local workspace: database exports and the 合辑 manifests (see README). Never commit it.
+/workspace/
