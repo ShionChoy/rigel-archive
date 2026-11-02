@@ -233,6 +233,9 @@ rclone copy vault:blobs ./blobs           # 取回全部原件（文件名就是
   （远处的访客生成一页要 1 秒以上，这样很少需要等）。浏览器每次都重新确认（`max-age=0`），不用 Cloudflare 默认的 4 小时。
   图片（长期地址，25 MB 以内）在检查地址之后按存储键存进同一缓存（`pages/media/[...path].ts`）；声音与视频直接从 R2 读。
   Cache API 按 Cloudflare 数据中心分别缓存，只在正式域名上起作用。
+  网址里带页面不读的参数（`?x=…`、`utm_…`、重复或空的参数、格式不对的值）时，先 301 到去掉它们的网址再渲染
+  （`lib/public/query.ts`，不读数据库），所以缓存里的页面与它的键一致，加参数也绕不过缓存；页面新读一个参数时要登记在那里。
+  首页「随机播放」（`/api/random`）每种语言在边缘缓存 4 份随机队列、各 1 分钟，每次随机给其中一份。
 - **界面文字**：代码里写中文，日文在 `i18n-ja.ts`，英文在 `site/src/lib/i18n-en.ts`（只需公开站用到的文字）；
   `npm run check:i18n` 同时检查公开站文字缺不缺英文。英文可按数字选词：`{n} {n:track|tracks}`。
 - 站名、官网链接、联系方式、是否禁止搜索引擎收录都在 `site/src/lib/site.ts` 一处；`robots.txt`（`pages/robots.txt.ts`）

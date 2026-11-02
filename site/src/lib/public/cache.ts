@@ -48,7 +48,13 @@ function stamped(response: Response): Response {
 export async function cachedPage(request: Request, url: URL, waitUntil: ((p: Promise<unknown>) => void) | undefined, render: () => Promise<Response>): Promise<Response> {
   const cache = (globalThis as { caches?: { default?: Cache } }).caches?.default;
   if (import.meta.env.DEV || request.method !== 'GET' || !cache || !waitUntil) return render();
-  const key = new Request(`${url.origin}${url.pathname}?${new URLSearchParams([...url.searchParams, ['_v', await catalogueVersion()], ['_b', __BUILD_ID__]])}`);
+  // The middleware has already sent addresses with parameters the page does not read on without them
+  // (lib/public/query.ts); sorted, the same parameters in another order share one entry.
+  const params = new URLSearchParams(url.searchParams);
+  params.sort();
+  params.append('_v', await catalogueVersion());
+  params.append('_b', __BUILD_ID__);
+  const key = new Request(`${url.origin}${url.pathname}?${params}`);
   const hit = await cache.match(key);
   if (hit) {
     if (Date.now() - Number(hit.headers.get(RENDERED) || 0) > FRESH * 1000 && !renewing.has(key.url)) {

@@ -5,6 +5,7 @@ import { route } from './lib/hosts';
 import { isLang, langFromHeader, translator, type Lang } from './lib/i18n';
 import { cachedPage } from './lib/public/cache';
 import { langOfPath } from './lib/public/paths';
+import { withoutStrayParams } from './lib/public/query';
 import { SITE } from './lib/site';
 
 type Admin = NonNullable<App.Locals['admin']>;
@@ -86,6 +87,9 @@ export const onRequest = defineMiddleware(async (context, next) => {
   // The public site: /zh/…, /ja/…, /en/… (lib/public/paths.ts), kept at the edge (lib/public/cache.ts).
   const siteLang = langOfPath(path);
   if (siteLang) {
+    // Query parameters the page does not read would each make a page of their own (lib/public/query.ts).
+    const clean = withoutStrayParams(context.url);
+    if (clean !== null) return publicHeaders(new Response(null, { status: 301, headers: { location: clean, 'cache-control': 'public, max-age=3600' } }), where.ours);
     context.locals.lang = siteLang;
     context.locals.t = translator(siteLang);
     return publicHeaders(await cachedPage(context.request, context.url, context.locals.cfContext?.waitUntil.bind(context.locals.cfContext), () => next()), where.ours);
